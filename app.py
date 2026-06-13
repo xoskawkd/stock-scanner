@@ -1,33 +1,26 @@
-from datetime import datetime, timedelta
+import streamlit as st
+import pyupbit
+import yfinance as yf
 import pandas as pd
 import requests
-import streamlit as st
 from ta.momentum import RSIIndicator
-import yfinance as yf
-import pyupbit
 from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
-# 1. 페이지 기본 설정 및 스타일 정의
+# 1. 캐시 함수 (속도 최적화)
 # ==========================================
-st.set_page_config(
-    page_title="Tae Mid-Cap Theme TOP 3 Scanner", page_icon="🛡️", layout="wide"
-)
-
-st.markdown(
-    """
-    <style>
-    [data-testid="stMetricValue"] { font-size: 24px !important; }
-    .stMarkdown h3 { margin-top: 10px !important; margin-bottom: 5px !important; }
-    .news-box { background-color: #1e222b; padding: 10px; border-radius: 5px; margin-top: 10px; }
-    .news-title { font-size: 13px !important; font-weight: bold; color: #00ffcc; text-decoration: none; }
-    </style>
-""",
-    unsafe_allow_html=True,
-)
+@st.cache_data(ttl=30)
+def get_live_price(name):
+    try:
+        price = pyupbit.get_current_price(f"KRW-{name}")
+        if price: return price
+        ticker = yf.Ticker(name)
+        data = ticker.history(period="1d")
+        return data['Close'].iloc[-1] if not data.empty else 0
+    except: return 0
 
 # ==========================================
-# 2. 데이터 추출 함수 (기존 로직 유지)
+# 2. 스캐너 로직 (기존 기능)
 # ==========================================
 @st.cache_data(ttl=1800)
 def get_safe_kr_themes():
@@ -57,9 +50,6 @@ def get_safe_kr_themes():
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN", "DKNG", "CELH", "IONQ", "COIN", "AI", "SQ", "RBLX", "U", "NET", "SNOW"]
 
-# ==========================================
-# 3. 데이터 분석 및 핵심 스코어링 (병렬 처리용)
-# ==========================================
 def calculate_swing_score(df):
     if len(df) < 25: return 0, 0, 0
     current = df["Close"].iloc[-1]
@@ -116,15 +106,24 @@ def get_market_status():
     try:
         fg = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3).json()
         fg_val = fg["data"][0]["value"]
-        fg_num = int(fg_val)
-        fg_txt = "극단적 탐욕" if fg_num >= 75 else "탐욕" if fg_num >= 60 else "중립" if fg_num >= 40 else "공포" if fg_num >= 25 else "극단적 공포"
+        fg_txt = "극단적 탐욕" if int(fg_val) >= 75 else "탐욕" if int(fg_val) >= 60 else "중립" if int(fg_val) >= 40 else "공포" if int(fg_val) >= 25 else "극단적 공포"
         usd = yf.Ticker("KRW=X").history(period="1d")['Close'].iloc[-1]
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
 # ==========================================
-# 실행부 (병렬 처리 적용)
+# 3. UI 및 상태 관리
 # ==========================================
+st.set_page_config(page_title="Tae Scanner", layout="wide")
+if 'my_portfolio' not in st.session_state: st.session_state.my_portfolio = []
+
+fg_val, fg_txt, exchange = get_market_status()
+st.sidebar.title("🛡️ Safety Theme Pulse")
+st.sidebar.metric("공포탐욕지수", f"{fg_val} ({fg_txt})")
+st.sidebar.metric("환율 (USD/KRW)", f"{exchange} 원")
+st.title("🚀 Tae's Balanced Smart TOP 3 Scanner")
+
+# 실행 및 렌더링
 kr_live_dict = get_safe_kr_themes()
 us_live_list = get_safe_us_movers()
 coins = pyupbit.get_tickers(fiat="KRW")
@@ -134,28 +133,42 @@ with ThreadPoolExecutor(max_workers=20) as executor:
     crypto_top = sorted([r for r in executor.map(fetch_crypto, coins[:30]) if r], key=lambda x: x["점수"], reverse=True)[:3]
     kr_top = sorted([r for r in executor.map(fetch_kr, kr_live_dict.items()) if r], key=lambda x: x["점수"], reverse=True)[:3]
 
-# ==========================================
-# UI 렌더링 (기존 그대로)
-# ==========================================
-fg_val, fg_txt, exchange = get_market_status()
-st.sidebar.title("🛡️ Safety Theme Pulse")
-st.sidebar.metric("공포탐욕지수", f"{fg_val} ({fg_txt})")
-st.sidebar.metric("환율 (USD/KRW)", f"{exchange} 원")
-st.title("🚀 Tae's Balanced Smart TOP 3 Scanner")
-st.divider()
+for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$"), ("🪙 코인 TOP 3", crypto_top, ""), ("🇰🇷 국내 테마 대장주 TOP 3", kr_top, "")]:
+    st.header(title)
+    cols = st.columns(3)
+    for i, item in enumerate(data):
+        with cols[i]:
+            key = "종목" if "종목" in item else "코인"
+            st.markdown(f"### 🥇 {item[key]}\n* 🔥 점수: `{item['점수']}점`\n* 💰 현재가: {sym}{item['현재가']:,}\n* 🎯 타점: `{item['매수구간']}`\n* 📈 목표: {sym}{item['목표가']:,}\n* 📉 손절: {sym}{item['손절가']:,}")
 
-for market_title, data, symbol in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$"), ("🪙 가상화폐 알트코인 실시간 TOP 3", crypto_top, ""), ("🇰🇷 국내 검증된 테마 대장주 TOP 3", kr_top, "")]:
-    st.header(market_title)
-    if data:
-        cols = st.columns(3)
-        for i, item in enumerate(data):
-            with cols[i]:
-                name_key = "종목" if "종목" in item else "코인"
-                st.markdown(f"### 🥇 {['1등', '2등', '3등'][i]} 추천 : **{item[name_key]}**\n* 🔥 점수: `{item['점수']}점`\n* 💰 현재가: {symbol}{item['현재가']:,} (RSI: {item['RSI']})\n* 🎯 타점: `{item['매수구간']}`\n* 📈 목표: {symbol}{item['목표가']:,}\n* 📉 손절: {symbol}{item['손절가']:,}")
-                if item.get("ticker"):
-                    news = fetch_ticker_news(item["ticker"])
-                    if news:
-                        st.markdown("<div class='news-box'><b>📰 뉴스</b>", unsafe_allow_html=True)
-                        for n in news: st.markdown(f"• <a href='{n['link']}'>{n['title']}</a>", unsafe_allow_html=True)
-                        st.markdown("</div>", unsafe_allow_html=True)
-    st.divider()
+# ==========================================
+# 4. 실시간 자산 관리 모듈 (완전체)
+# ==========================================
+st.divider()
+st.subheader("💰 나의 실시간 자산 관리")
+with st.form(key='portfolio_form', clear_on_submit=True):
+    cols = st.columns([2, 1, 1])
+    n_in = cols[0].text_input("종목명/코인")
+    b_in = cols[1].number_input("매수가", step=100.0)
+    if cols[2].form_submit_button("➕ 추가"):
+        if n_in: st.session_state.my_portfolio.append({"name": n_in.upper(), "buy": b_in})
+
+for i, p in enumerate(st.session_state.my_portfolio):
+    curr = get_live_price(p['name'])
+    if curr == 0: continue
+    st.markdown("---")
+    st.write(f"### 📈 {p['name']} (매수: {int(p['buy']):,})")
+    
+    # 전략 테이블
+    df_guide = pd.DataFrame({"구분": ["현재가", "익절(7%)", "손절(6%)", "관망"], 
+                             "가격": [f"{int(curr):,}", f"{int(p['buy']*1.07):,}", f"{int(p['buy']*0.94):,}", f"{int(p['buy']*0.98):,}"]})
+    st.table(df_guide)
+    st.metric("수익률", f"{((curr - p['buy']) / p['buy']) * 100:.2f}%")
+    
+    if curr >= p['buy']*1.07: st.success("✅ [익절] 실현하세요!")
+    elif curr <= p['buy']*0.94: st.error("🚨 [손절] 즉시 대응!")
+    else: st.warning("⚖️ [관망] 안전합니다.")
+        
+    if st.button(f"❌ 삭제 {p['name']}", key=f"del_{i}", use_container_width=True):
+        st.session_state.my_portfolio.pop(i)
+        st.rerun()
