@@ -166,10 +166,8 @@ import pandas as pd
 import json
 import os
 
-# ==========================================
-# 0. 데이터 저장 로직
-# ==========================================
 DATA_FILE = "portfolio.json"
+
 def load_portfolio():
     if os.path.exists(DATA_FILE):
         try:
@@ -180,58 +178,47 @@ def load_portfolio():
 def save_portfolio(data):
     with open(DATA_FILE, "w") as f: json.dump(data, f)
 
-# ==========================================
-# 1. 성능 최적화된 캐시 함수 (삭제 속도 개선)
-# ==========================================
-@st.cache_data(ttl=60) # 1분간 결과 유지
+# 가격 및 종목 정보 조회 (캐시 적용으로 속도 향상)
+@st.cache_data(ttl=60)
 def get_stock_info(name):
-    # 코인
+    # 1. 코인 (알파벳으로만 구성된 경우)
     if name.isalpha():
         try:
             price = pyupbit.get_current_price(f"KRW-{name.upper()}")
             if price: return name.upper(), price, "KRW"
         except: pass
     
-    # 주식
+    # 2. 주식
     try:
-        ticker_input = name
-        if name.isdigit() and len(name) == 6:
-            for ext in [".KS", ".KQ"]:
-                ticker = yf.Ticker(name + ext)
-                info = ticker.info
-                data = ticker.history(period="1d")
-                if not data.empty:
-                    return info.get('longName', f"종목코드 {name}"), data['Close'].iloc[-1], "KRW"
-        else:
-            ticker = yf.Ticker(ticker_input)
-            info = ticker.info
+        # 6자리 숫자는 국내 주식으로 판단
+        ticker_input = name + ".KS" if name.isdigit() and len(name) == 6 else name
+        ticker = yf.Ticker(ticker_input)
+        info = ticker.info
+        data = ticker.history(period="1d")
+        
+        # 데이터가 없으면 .KQ로 재시도 (국내 주식일 경우)
+        if data.empty and name.isdigit():
+            ticker = yf.Ticker(name + ".KQ")
             data = ticker.history(period="1d")
-            if not data.empty:
-                return info.get('longName', name), data['Close'].iloc[-1], "USD"
+            
+        if not data.empty:
+            curr = data['Close'].iloc[-1]
+            return info.get('longName', name), curr, "KRW" if ".KS" in ticker_input or ".KQ" in str(ticker.ticker) else "USD"
     except: pass
     return None, 0, "KRW"
 
-# ==========================================
-# 2. UI 및 자산 관리
-# ==========================================
 st.set_page_config(page_title="Tae Scanner", layout="wide")
 st.title("🚀 Tae's Smart Scanner")
 
 if 'my_portfolio' not in st.session_state:
     st.session_state.my_portfolio = load_portfolio()
 
-# 삭제 처리 로직을 버튼 클릭 시 바로 실행
-def delete_item(idx):
-    st.session_state.my_portfolio.pop(idx)
-    save_portfolio(st.session_state.my_portfolio)
-    st.rerun()
-
 with st.form(key='portfolio_form', clear_on_submit=True):
     cols = st.columns([2, 1, 1])
-    n_in = cols[0].text_input("국내(숫자6자리) / 해외(티커) / 코인(심볼)")
-    b_in = cols[1].number_input("매수가", step=1.0)
+    n_in = cols[0].text_input("종목코드(005930) / 티커(PLTR) / 코인(BTC)")
+    b_in = cols[1].number_input("매수가", min_value=0.0, value=0.0, step=100.0)
     if cols[2].form_submit_button("➕ 추가"):
-        if n_in:
+        if n_in and b_in > 0:
             st.session_state.my_portfolio.append({"name": n_in.strip(), "buy": float(b_in)})
             save_portfolio(st.session_state.my_portfolio)
             st.rerun()
@@ -241,21 +228,28 @@ for i, p in enumerate(st.session_state.my_portfolio):
     stock_name, curr, currency = get_stock_info(name)
     
     if curr == 0:
-        st.error(f"⚠️ {name} 조회 실패.")
-        if st.button(f"❌ 삭제 {name}", key=f"del_{i}"): delete_item(i)
+        st.error(f"⚠️ {name} 조회 실패. 코드/티커 확인")
+        if st.button(f"❌ 삭제 {name}", key=f"del_{i}"):
+            st.session_state.my_portfolio.pop(i)
+            save_portfolio(st.session_state.my_portfolio)
+            st.rerun()
         continue
     
+    # 수익률 계산 시 0 나누기 방지
+    profit_rate = ((curr - buy) / buy * 100) if buy > 0 else 0
     sym = "$" if currency == "USD" else "₩"
+    
     st.markdown("---")
-    st.write(f"### 📈 {stock_name} ({name})")
+    st.write(f"### 📈 {stock_name if stock_name else name} ({name})")
     
     df_guide = pd.DataFrame({
         "구분": ["현재가", "익절(7%)", "관망(2%하락)", "손절(6%하락)"],
         "가격": [f"{sym}{curr:,.2f}", f"{sym}{buy*1.07:,.2f}", f"{sym}{buy*0.98:,.2f}", f"{sym}{buy*0.94:,.2f}"]
     })
     st.table(df_guide)
-    st.metric("수익률", f"{((curr - buy) / buy) * 100:.2f}%")
+    st.metric("수익률", f"{profit_rate:.2f}%")
     
-    # 삭제 버튼 (즉시 반응)
     if st.button(f"❌ 삭제 {name}", key=f"del_{i}"):
-        delete_item(i)
+        st.session_state.my_portfolio.pop(i)
+        save_portfolio(st.session_state.my_portfolio)
+        st.rerun()
