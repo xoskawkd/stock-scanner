@@ -3,11 +3,36 @@ import pyupbit
 import yfinance as yf
 import pandas as pd
 import requests
+import json
+import os
 from ta.momentum import RSIIndicator
 from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
-# 1. 캐시 함수 (속도 최적화)
+# 0. 데이터 영구 저장 로직 (데이터 유지용)
+# ==========================================
+DATA_FILE = "portfolio.json"
+
+def load_portfolio():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r") as f: return json.load(f)
+        except: return []
+    return []
+
+def save_portfolio(data):
+    with open(DATA_FILE, "w") as f: json.dump(data, f)
+
+# ==========================================
+# 1. 페이지 설정 및 상태 초기화
+# ==========================================
+st.set_page_config(page_title="Tae Scanner", layout="wide")
+
+if 'my_portfolio' not in st.session_state:
+    st.session_state.my_portfolio = load_portfolio()
+
+# ==========================================
+# 2. 캐시 함수 및 스캐너 로직 (대표님 기능 그대로)
 # ==========================================
 @st.cache_data(ttl=30)
 def get_live_price(name):
@@ -19,9 +44,6 @@ def get_live_price(name):
         return data['Close'].iloc[-1] if not data.empty else 0
     except: return 0
 
-# ==========================================
-# 2. 스캐너 로직 (기존 기능)
-# ==========================================
 @st.cache_data(ttl=1800)
 def get_safe_kr_themes():
     tickers_dict = {}
@@ -112,18 +134,14 @@ def get_market_status():
     except: return "50", "중립", "1,350.00"
 
 # ==========================================
-# 3. UI 및 상태 관리
+# 3. UI 렌더링
 # ==========================================
-st.set_page_config(page_title="Tae Scanner", layout="wide")
-if 'my_portfolio' not in st.session_state: st.session_state.my_portfolio = []
-
 fg_val, fg_txt, exchange = get_market_status()
 st.sidebar.title("🛡️ Safety Theme Pulse")
 st.sidebar.metric("공포탐욕지수", f"{fg_val} ({fg_txt})")
 st.sidebar.metric("환율 (USD/KRW)", f"{exchange} 원")
 st.title("🚀 Tae's Balanced Smart TOP 3 Scanner")
 
-# 실행 및 렌더링
 kr_live_dict = get_safe_kr_themes()
 us_live_list = get_safe_us_movers()
 coins = pyupbit.get_tickers(fiat="KRW")
@@ -142,16 +160,19 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
             st.markdown(f"### 🥇 {item[key]}\n* 🔥 점수: `{item['점수']}점`\n* 💰 현재가: {sym}{item['현재가']:,}\n* 🎯 타점: `{item['매수구간']}`\n* 📈 목표: {sym}{item['목표가']:,}\n* 📉 손절: {sym}{item['손절가']:,}")
 
 # ==========================================
-# 4. 실시간 자산 관리 모듈 (완전체)
+# 4. 실시간 자산 관리 (완전체)
 # ==========================================
 st.divider()
 st.subheader("💰 나의 실시간 자산 관리")
+
 with st.form(key='portfolio_form', clear_on_submit=True):
     cols = st.columns([2, 1, 1])
     n_in = cols[0].text_input("종목명/코인")
     b_in = cols[1].number_input("매수가", step=100.0)
     if cols[2].form_submit_button("➕ 추가"):
-        if n_in: st.session_state.my_portfolio.append({"name": n_in.upper(), "buy": b_in})
+        if n_in:
+            st.session_state.my_portfolio.append({"name": n_in.upper(), "buy": b_in})
+            save_portfolio(st.session_state.my_portfolio) # 파일 저장
 
 for i, p in enumerate(st.session_state.my_portfolio):
     curr = get_live_price(p['name'])
@@ -159,7 +180,6 @@ for i, p in enumerate(st.session_state.my_portfolio):
     st.markdown("---")
     st.write(f"### 📈 {p['name']} (매수: {int(p['buy']):,})")
     
-    # 전략 테이블
     df_guide = pd.DataFrame({"구분": ["현재가", "익절(7%)", "손절(6%)", "관망"], 
                              "가격": [f"{int(curr):,}", f"{int(p['buy']*1.07):,}", f"{int(p['buy']*0.94):,}", f"{int(p['buy']*0.98):,}"]})
     st.table(df_guide)
@@ -171,4 +191,5 @@ for i, p in enumerate(st.session_state.my_portfolio):
         
     if st.button(f"❌ 삭제 {p['name']}", key=f"del_{i}", use_container_width=True):
         st.session_state.my_portfolio.pop(i)
+        save_portfolio(st.session_state.my_portfolio) # 삭제 후 저장
         st.rerun()
