@@ -183,7 +183,7 @@ def save_portfolio(data):
     with open(DATA_FILE, "w") as f: json.dump(data, f)
 
 # ==========================================
-# 1. 통합 분석 엔진 (TOP3와 동일한 계산식)
+# 1. 분석 엔진
 # ==========================================
 def calculate_swing_score(df):
     if len(df) < 25: return 0, 0, 0
@@ -199,81 +199,78 @@ def calculate_swing_score(df):
     return int(score), float(current), float(rsi)
 
 @st.cache_data(ttl=60)
-def get_detailed_info(name):
-    # 1. 코인
-    if name.isalpha():
-        try:
+def get_market_data(name):
+    try:
+        if name.isalpha(): # 코인
             df = pyupbit.get_ohlcv(f"KRW-{name.upper()}", interval="day", count=40)
             if df is not None:
                 df = df.rename(columns={"close": "Close", "volume": "Volume"})
-                score, curr, rsi = calculate_swing_score(df)
-                return name.upper(), curr, score, rsi, "KRW"
-        except: pass
-    
-    # 2. 주식
-    try:
-        ticker_input = name + ".KS" if name.isdigit() and len(name) == 6 else name
-        ticker = yf.Ticker(ticker_input)
-        df = ticker.history(period="3mo")
-        # 실패 시 .KQ 재시도
-        if df.empty and name.isdigit():
-            ticker = yf.Ticker(name + ".KQ")
+                s, c, r = calculate_swing_score(df)
+                return name.upper(), c, s, r, "KRW"
+        else: # 주식
+            ticker_input = name + ".KS" if name.isdigit() and len(name) == 6 else name
+            ticker = yf.Ticker(ticker_input)
             df = ticker.history(period="3mo")
-            
-        if not df.empty:
-            score, curr, rsi = calculate_swing_score(df)
-            currency = "KRW" if (".KS" in str(ticker.ticker) or ".KQ" in str(ticker.ticker)) else "USD"
-            return ticker.info.get('longName', name), curr, score, rsi, currency
+            if df.empty and name.isdigit():
+                ticker = yf.Ticker(name + ".KQ")
+                df = ticker.history(period="3mo")
+            if not df.empty:
+                s, c, r = calculate_swing_score(df)
+                curr = c
+                return ticker.info.get('longName', name), curr, s, r, "KRW" if ".KS" in str(ticker.ticker) or ".KQ" in str(ticker.ticker) else "USD"
     except: pass
     return None, 0, 0, 0, "KRW"
 
 # ==========================================
-# 2. UI 및 자산 관리
+# 2. UI
 # ==========================================
 st.set_page_config(page_title="Tae Scanner", layout="wide")
 st.title("🚀 Tae's Smart Scanner")
 
-if 'my_portfolio' not in st.session_state:
-    st.session_state.my_portfolio = load_portfolio()
+# [PART 1] TOP 3 스캐너 (기존 로직 유지)
+st.header("🔥 추천 테마 대장주 TOP 3")
+cols = st.columns(3)
+top_tickers = [("005930", "삼성전자"), ("PLTR", "팔란티어"), ("BTC", "비트코인")]
+for i, (t, n) in enumerate(top_tickers):
+    name, curr, score, rsi, curr_type = get_market_data(t)
+    if curr > 0:
+        cols[i].markdown(f"### {n}\n현재가: {curr:,.0f}\n점수: {score}점")
+
+st.divider()
+
+# [PART 2] 자산 관리 (현재가 기준 계산으로 수정!)
+st.subheader("💰 나의 실시간 자산 관리")
+if 'my_portfolio' not in st.session_state: st.session_state.my_portfolio = load_portfolio()
 
 with st.form(key='portfolio_form', clear_on_submit=True):
-    cols = st.columns([2, 1, 1])
-    n_in = cols[0].text_input("코드(005930) / 티커(PLTR) / 코인(BTC)")
-    b_in = cols[1].number_input("매수가", min_value=0.0, value=0.0, step=100.0)
-    if cols[2].form_submit_button("➕ 추가"):
+    c1, c2, c3 = st.columns([2, 1, 1])
+    n_in = c1.text_input("종목 입력")
+    b_in = c2.number_input("매수가", min_value=0.0, value=0.0, step=100.0)
+    if c3.form_submit_button("➕ 추가"):
         if n_in and b_in >= 0:
             st.session_state.my_portfolio.append({"name": n_in.strip(), "buy": float(b_in)})
             save_portfolio(st.session_state.my_portfolio)
             st.rerun()
 
-# 보유 종목 출력
 for i, p in enumerate(st.session_state.my_portfolio):
     name, buy = p['name'], p['buy']
-    stock_name, curr, score, rsi, currency = get_detailed_info(name)
+    stock_name, curr, score, rsi, currency = get_market_data(name)
     
-    if curr == 0:
-        st.error(f"⚠️ {name} 조회 실패.")
-        if st.button(f"❌ 삭제 {name}", key=f"del_{i}"):
-            st.session_state.my_portfolio.pop(i)
-            save_portfolio(st.session_state.my_portfolio)
-            st.rerun()
-        continue
+    if curr == 0: continue
     
-    profit = ((curr - buy) / buy * 100) if buy > 0 else 0
     sym = "$" if currency == "USD" else "₩"
+    profit = ((curr - buy) / buy * 100) if buy > 0 else 0
     
+    # 핵심 변경: 익절/손절가를 '매수가'가 아닌 '현재가' 기준 7%, 6%로 설정
     st.markdown("---")
-    st.write(f"### 📈 {stock_name if stock_name else name} ({name})")
-    
-    # TOP3처럼 분석 점수 표기
-    st.info(f"📊 **분석 점수:** `{score}점` | **RSI:** `{rsi:.1f}`")
+    st.write(f"### 📈 {stock_name} ({name}) | 수익률: {profit:.2f}%")
+    st.info(f"📊 점수: {score}점 | RSI: {rsi:.1f}")
     
     df_guide = pd.DataFrame({
-        "구분": ["현재가", "익절(7%)", "손절(6%)"],
-        "가격": [f"{sym}{curr:,.2f}", f"{sym}{buy*1.07:,.2f}", f"{sym}{buy*0.94:,.2f}"]
+        "구분": ["현재가", "목표익절(+7%)", "방어손절(-6%)"],
+        "가격": [f"{sym}{curr:,.2f}", f"{sym}{curr*1.07:,.2f}", f"{sym}{curr*0.94:,.2f}"]
     })
     st.table(df_guide)
-    st.metric("수익률", f"{profit:.2f}%")
     
     if st.button(f"❌ 삭제 {name}", key=f"del_{i}"):
         st.session_state.my_portfolio.pop(i)
