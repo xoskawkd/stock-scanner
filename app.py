@@ -207,31 +207,31 @@ def get_market_data(name):
             df = pyupbit.get_ohlcv(f"KRW-{name.upper()}", interval="day", count=40)
             if df is not None:
                 s, c, r = calculate_swing_score(df)
-                return name.upper(), c, s, r, "KRW"
+                return name.upper(), c, s, r, "KRW", "Crypto"
         except: pass
     # 주식 처리
     try:
-        if name.isdigit() and len(name) == 6:
-            for suffix in [".KS", ".KQ"]:
-                ticker = yf.Ticker(name + suffix)
-                hist = ticker.history(period="3mo")
-                if not hist.empty:
-                    s, c, r = calculate_swing_score(hist)
-                    return f"{name}{suffix}", hist["Close"].iloc[-1], s, r, "KRW"
-        else:
-            ticker = yf.Ticker(name)
+        is_kr = name.isdigit() and len(name) == 6
+        ticker_name = f"{name}.KS" if is_kr else name
+        ticker = yf.Ticker(ticker_name)
+        hist = ticker.history(period="3mo")
+        if hist.empty and is_kr: # KQ 확인
+            ticker = yf.Ticker(f"{name}.KQ")
             hist = ticker.history(period="3mo")
-            if not hist.empty:
-                s, c, r = calculate_swing_score(hist)
-                return name.upper(), hist["Close"].iloc[-1], s, r, "USD"
+            
+        if not hist.empty:
+            s, c, r = calculate_swing_score(hist)
+            currency = "KRW" if is_kr else "USD"
+            category = "Stock"
+            return ticker.ticker, hist["Close"].iloc[-1], s, r, currency, category
     except: pass
-    return None, 0, 0, 0, "USD"
+    return None, 0, 0, 0, "USD", "Stock"
 
 # ==========================================
 # 2. UI 및 메인 로직
 # ==========================================
 st.set_page_config(page_title="Tae Scanner", layout="wide")
-st.title("🚀 Tae's Smart Scanner (Final Ver)")
+st.title("🚀 Tae's Smart Scanner (Advanced Ver)")
 
 if 'my_portfolio' not in st.session_state: st.session_state.my_portfolio = load_portfolio()
 
@@ -251,7 +251,7 @@ st.divider()
 # 자산 리스트 출력
 for i, p in enumerate(st.session_state.my_portfolio):
     name, buy = p['name'], p['buy']
-    stock_label, curr, score, rsi, currency = get_market_data(name)
+    stock_label, curr, score, rsi, currency, cat = get_market_data(name)
     
     if curr == 0:
         st.error(f"⚠️ {name} 조회 불가.")
@@ -264,7 +264,11 @@ for i, p in enumerate(st.session_state.my_portfolio):
     profit = ((curr - buy) / buy * 100) if buy > 0 else 0
     sym = "$" if currency == "USD" else "₩"
     
-    st.markdown("---")
+    # [핵심] 변동성 감안한 타점 (코인/성장주는 8%, 일반 주식은 6% 손절)
+    stop_rate = 0.08 if cat == "Crypto" else 0.06
+    target_rate = 0.10 if cat == "Crypto" else 0.07
+    
+    st.markdown(f"---")
     st.write(f"### 📈 {stock_label}")
     col_a, col_b = st.columns(2)
     col_a.write(f"**매수가:** {sym}{buy:,.2f}")
@@ -272,11 +276,12 @@ for i, p in enumerate(st.session_state.my_portfolio):
     st.info(f"📊 분석 점수: {score}점 | RSI: {rsi:.1f}")
     
     df_guide = pd.DataFrame({
-        "구분": ["현재가", "목표익절(+7%)", "방어손절(-6%)"],
-        "가격": [f"{sym}{curr:,.2f}", f"{sym}{curr*1.07:,.2f}", f"{sym}{curr*0.94:,.2f}"]
+        "구분": ["현재가", f"목표익절({int(target_rate*100)}%)", f"방어손절({int(stop_rate*100)}%)"],
+        "가격": [f"{sym}{curr:,.2f}", f"{sym}{curr*(1+target_rate):,.2f}", f"{sym}{curr*(1-stop_rate):,.2f}"]
     })
     st.table(df_guide)
     
     if st.button(f"❌ 삭제 {name}", key=f"del_{i}"):
         st.session_state.my_portfolio.pop(i)
         save_portfolio(st.session_state.my_portfolio)
+        st.rerun()
