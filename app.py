@@ -157,7 +157,8 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
     for i, item in enumerate(data):
         with cols[i]:
             key = "종목" if "종목" in item else "코인"
-            st.markdown(f"### 🥇 {item[key]}\n* 🔥 점수: `{item['점수']}점`\n* 💰 현재가: {sym}{item['현재가']:,}\n* 🎯 타점: `{item['매수구간']}`\n* 📈 목표: {sym}{item['목표가']:,}\n* 📉 손절: {sym}{item['손절가']:,}")
+            medal = "🥇" if item['점수'] >= 60 else "🥈" if item['점수'] >= 40 else "🥉"
+            st.markdown(f"### {medal} {item[key]}\n* 🔥 점수: `{item['점수']}점`\n* 📊 RSI: `{item['RSI']}점`\n* 💰 현재가: {sym}{item['현재가']:,}\n* 🎯 타점: `{item['매수구간']}`\n* 📈 목표: {sym}{item['목표가']:,}\n* 📉 손절: {sym}{item['손절가']:,}")
 
 import streamlit as st
 import pyupbit
@@ -279,4 +280,3 @@ for i, p in enumerate(st.session_state.my_portfolio):
     if st.button(f"❌ 삭제 {name}", key=f"del_{i}"):
         st.session_state.my_portfolio.pop(i)
         save_portfolio(st.session_state.my_portfolio)
-        st.rerun()
