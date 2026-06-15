@@ -59,7 +59,7 @@ def calculate_swing_score(df):
         return 0, 0, 0
 
 # ==========================================
-# 3. 실시간 크롤러 및 스캐너 로직
+# 3. 실시간 마켓 현황 및 해외/코인 로직
 # ==========================================
 @st.cache_data(ttl=30)
 def get_market_status():
@@ -74,7 +74,7 @@ def get_market_status():
 @st.cache_data(ttl=120)
 def get_safe_kr_themes():
     tickers_dict = {}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     for sosok in [0, 1]:
         try:
             url = f"https://finance.naver.com/sise/sise_quant.naver?sosok={sosok}"
@@ -129,41 +129,57 @@ def fetch_kr(item):
     return None
 
 # ==========================================
-# 4. 포트폴리오 전용 마켓 파인더 (한글 종목명 매핑 기능 보완)
+# 4. 포트폴리오 전용 - 네이버 다이렉트 명칭 철벽 파서
 # ==========================================
 def get_portfolio_market_data(name):
     name = name.strip().upper()
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    # 1. 국내주식 판별 및 네이버 다이렉트 한글 이름 추출
+    # 1. 국내주식 판별 (6자리 숫자)
     if name.isdigit() and len(name) == 6:
-        kr_name = name  # 이름 파싱 실패시 기본값은 코드번호
+        kr_name = None
+        real_current_price = 0
         try:
-            # 네이버 금융에서 해당 종목 이름 긁어오기
+            # 네이버 금융 실시간 시세 페이지 호출
             n_url = f"https://finance.naver.com/item/main.naver?code={name}"
             n_res = requests.get(n_url, headers=headers)
             n_res.encoding = 'euc-kr'
-            name_match = re.search(r'<title>(.*?) : 네이버 페이 증권</title>', n_res.text)
+            
+            # 정밀 필터 1단계: H1 태그나 타이틀에서 순수 종목 이름만 완벽 분리 추출
+            name_match = re.search(r'<h2><a href=".*?">(.*?)</a></h2>', n_res.text)
             if name_match:
                 kr_name = name_match.group(1).strip()
+            else:
+                # 백업용 타이틀 파싱
+                title_match = re.search(r'<title>(.*?) : 네이버 페이 증권</title>', n_res.text)
+                if title_match:
+                    kr_name = title_match.group(1).split(":")[0].strip()
+
+            # 정밀 필터 2단계: 실시간 현재가 추출
+            price_match = re.search(r'<dd>현재가 ([\d,]+)', n_res.text)
+            if price_match:
+                real_current_price = float(price_match.group(1).replace(",", ""))
         except: pass
 
-        for suffix in [".KS", ".KQ"]:
-            try:
-                df = yf.Ticker(f"{name}{suffix}").history(period="1mo")
-                if not df.empty and len(df) >= 5:
-                    s, c, r = calculate_swing_score(df)
-                    if c > 0: 
-                        return f"{name} ({kr_name})", c, s, r, "KRW", "Stock"
-            except: continue
+        # 만약 네이버 검색결과가 있다면 무조건 화면 표출 준비
+        if kr_name and real_current_price > 0:
+            s, r = 50, 50.0  # 기본 차트 점수 백업값
+            # 기술 지표용 보조 데이터 수집 (야후)
+            for suffix in [".KS", ".KQ"]:
+                try:
+                    df = yf.Ticker(f"{name}{suffix}").history(period="1mo")
+                    if not df.empty and len(df) >= 5:
+                        s, _, r = calculate_swing_score(df)
+                        break
+                except: continue
+            return f"{name} ({kr_name})", real_current_price, s, r, "KRW", "Stock"
 
     # 2. 미국 주식 판별
     try:
         df = yf.Ticker(name).history(period="3mo")
         if not df.empty and len(df) >= 5:
             s, c, r = calculate_swing_score(df)
-            if c > 0:
-                return name, c, s, r, "USD", "Stock"
+            if c > 0: return name, c, s, r, "USD", "Stock"
     except: pass
 
     # 3. 코인 판별
@@ -172,8 +188,7 @@ def get_portfolio_market_data(name):
             df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=40)
             if df is not None and not df.empty:
                 s, c, r = calculate_swing_score(df)
-                if c > 0: 
-                    return f"{name} (업비트 코인)", c, s, r, "KRW", "Crypto"
+                if c > 0: return f"{name} (업비트 코인)", c, s, r, "KRW", "Crypto"
         except: pass
 
     return None, 0, 0, 0, "USD", "Stock"
@@ -260,7 +275,6 @@ if st.session_state.my_portfolio:
         stop_rate = 0.08 if cat == "Crypto" else 0.06
         target_rate = 0.10 if cat == "Crypto" else 0.07
         
-        # 주식 라벨 출력 파트 개편 완료
         st.markdown(f"### 📈 자산 대응 리포트: **{stock_label}**")
         
         col_m1, col_m2, col_m3 = st.columns(3)
