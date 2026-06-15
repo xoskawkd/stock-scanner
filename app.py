@@ -5,6 +5,7 @@ import pandas as pd
 import requests
 import json
 import os
+import re
 from ta.momentum import RSIIndicator
 from concurrent.futures import ThreadPoolExecutor
 
@@ -70,33 +71,23 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=120)
 def get_safe_kr_themes():
     tickers_dict = {}
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     for sosok in [0, 1]:
         try:
             url = f"https://finance.naver.com/sise/sise_quant.naver?sosok={sosok}"
             res = requests.get(url, headers=headers)
-            dfs = pd.read_html(res.text)
-            df = dfs[1].dropna(subset=['종목명'])
-            df = df[~df['종목명'].str.contains('ETN|ETF|레버리지|인버스|스팩|금융투자|우|우B|고려|지수', na=False)]
-            df = df[(df['현재가'] >= 3000) & (df['현재가'] <= 150000)]
-            super_heavy = ["삼성전자", "SK하이닉스", "현대차", "기아", "LG에너지솔루션", "삼성바이오로직스", "셀트리온"]
-            df = df[~df['종목명'].isin(super_heavy)]
-            
-            for _, row in df.head(10).iterrows():
-                name = row['종목명']
-                try:
-                    search_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={name}"
-                    s_res = requests.get(search_url, headers=headers).json()
-                    symbol = s_res['quotes'][0]['symbol']
-                    if ".KQ" in symbol or ".KS" in symbol:
-                        code = symbol.split(".")[0]
-                        tickers_dict[code] = name
-                except: pass
+            res.encoding = 'euc-kr'
+            pattern = r'href="/item/main\.naver\?code=(\d{6})".*?class="tltle">(.*?)</a>'
+            matches = re.findall(pattern, res.text)
+            for code, name in matches[:25]:
+                if any(x in name for x in ['ETN', 'ETF', '레버리지', '인버스', '스팩', '우', '금융투자', '지수']): continue
+                if name in ["삼성전자", "SK하이닉스", "현대차", "기아", "LG에너지솔루션", "삼성바이오로직스", "셀트리온"]: continue
+                tickers_dict[code] = name
+                if len(tickers_dict) >= 15: break
         except: pass
-
     if not tickers_dict:
         tickers_dict = {"293490": "카카오게임즈", "066970": "엘앤에프", "036570": "엔씨소프트"}
     return tickers_dict
@@ -126,54 +117,63 @@ def fetch_crypto(coin):
 
 def fetch_kr(item):
     code, name = item
-    try:
-        df = yf.Ticker(f"{code}.KS").history(period="3mo")
-        suffix = ".KS"
-        if df.empty:
-            df = yf.Ticker(f"{code}.KQ").history(period="3mo")
-            suffix = ".KQ"
-        if df.empty: return None
-        score, current, rsi = calculate_swing_score(df)
-        if current == 0: return None
-        return {"ticker": f"{code}{suffix}", "종목": name, "점수": score, "현재가": int(current), "RSI": round(rsi, 1),
-                "매수구간": f"{int(current * 0.96):,} ~ {int(current):,}", "목표가": int(current * 1.07), "손절가": int(current * 0.94)}
-    except: return None
+    for suffix in [".KS", ".KQ"]:
+        try:
+            df = yf.Ticker(f"{code}{suffix}").history(period="3mo")
+            if df.empty or len(df) < 15: continue
+            score, current, rsi = calculate_swing_score(df)
+            if current == 0: continue
+            return {"ticker": f"{code}{suffix}", "종목": name, "점수": score, "현재가": int(current), "RSI": round(rsi, 1),
+                    "매수구간": f"{int(current * 0.96):,} ~ {int(current):,}", "목표가": int(current * 1.07), "손절가": int(current * 0.94)}
+        except: pass
+    return None
 
 # ==========================================
-# 4. 포트폴리오 전용 실시간 마켓 파인더 (캐싱 제거 및 순서 전면 개편)
+# 4. 포트폴리오 전용 마켓 파인더 (한글 종목명 매핑 기능 보완)
 # ==========================================
 def get_portfolio_market_data(name):
-    """캐시를 안 태우고 매번 실시간 강제 조회하도록 설정"""
     name = name.strip().upper()
+    headers = {"User-Agent": "Mozilla/5.0"}
     
-    # 1. 국내주식 판별 (6자리 숫자)
+    # 1. 국내주식 판별 및 네이버 다이렉트 한글 이름 추출
     if name.isdigit() and len(name) == 6:
+        kr_name = name  # 이름 파싱 실패시 기본값은 코드번호
+        try:
+            # 네이버 금융에서 해당 종목 이름 긁어오기
+            n_url = f"https://finance.naver.com/item/main.naver?code={name}"
+            n_res = requests.get(n_url, headers=headers)
+            n_res.encoding = 'euc-kr'
+            name_match = re.search(r'<title>(.*?) : 네이버 페이 증권</title>', n_res.text)
+            if name_match:
+                kr_name = name_match.group(1).strip()
+        except: pass
+
         for suffix in [".KS", ".KQ"]:
             try:
                 df = yf.Ticker(f"{name}{suffix}").history(period="1mo")
                 if not df.empty and len(df) >= 5:
                     s, c, r = calculate_swing_score(df)
-                    if c > 0: return f"{name}{suffix}", c, s, r, "KRW", "Stock"
+                    if c > 0: 
+                        return f"{name} ({kr_name})", c, s, r, "KRW", "Stock"
             except: continue
 
-    # 2. 미국 주식 먼저 판별 시도 (코인보다 미국 주식을 우선 순위로 탐색하여 VUZI, PLTR 선오류 방지)
+    # 2. 미국 주식 판별
     try:
-        # 업비트 자산과 겹치지 않는지 크로스체크 후 야후 조회
         df = yf.Ticker(name).history(period="3mo")
         if not df.empty and len(df) >= 5:
             s, c, r = calculate_swing_score(df)
             if c > 0:
-                currency = "KRW" if (".KS" in name or ".KQ" in name) else "USD"
-                return name, c, s, r, currency, "Stock"
+                return name, c, s, r, "USD", "Stock"
     except: pass
 
-    # 3. 코인 판별 시도 (알파벳이고 미국 주식에서 안 잡힌 경우)
+    # 3. 코인 판별
     if name.isalpha():
         try:
             df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=40)
             if df is not None and not df.empty:
                 s, c, r = calculate_swing_score(df)
-                if c > 0: return name, c, s, r, "KRW", "Crypto"
+                if c > 0: 
+                    return f"{name} (업비트 코인)", c, s, r, "KRW", "Crypto"
         except: pass
 
     return None, 0, 0, 0, "USD", "Stock"
@@ -260,6 +260,7 @@ if st.session_state.my_portfolio:
         stop_rate = 0.08 if cat == "Crypto" else 0.06
         target_rate = 0.10 if cat == "Crypto" else 0.07
         
+        # 주식 라벨 출력 파트 개편 완료
         st.markdown(f"### 📈 자산 대응 리포트: **{stock_label}**")
         
         col_m1, col_m2, col_m3 = st.columns(3)
