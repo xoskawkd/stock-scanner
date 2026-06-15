@@ -2,4 +2,4 @@ yfinance
 ta
 pyupbit
 pandas
-streamlit-gsheets==0.1.0
+streamlit-gsheets
