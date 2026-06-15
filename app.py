@@ -212,6 +212,14 @@ def fetch_crypto(coin):
         volume_bonus = min(int(volume_ratio * 3), 20)
 
         final_score = min(score + volume_bonus, 100)
+        if current < 1:
+           buy_range = f"{buy_min:.6f} ~ {buy_max:.6f}"
+           target = round(current * 1.08, 6)
+           stop = round(min(buy_min * 0.98, current * 0.94), 6)
+        else:
+           buy_range = f"{int(buy_min):,} ~ {int(buy_max):,}"
+           target = round(current * 1.08, 0)
+           stop = round(min(buy_min * 0.98, current * 0.94), 0)
 
 
         return {
@@ -220,10 +228,7 @@ def fetch_crypto(coin):
             "점수": final_score,
             "현재가": current,
             "RSI": round(rsi, 1),
-            "매수구간": if current < 1:
-    buy_range = f"{buy_min:.6f} ~ {buy_max:.6f}"
-else:
-    buy_range = f"{int(buy_min):,} ~ {int(buy_max):,}"
+            "매수구간": buy_range,
             "목표가": round(current * 1.08, 0),
             "손절가": round(min(buy_min * 0.98, current * 0.94), 0)
         }
