@@ -129,7 +129,7 @@ def fetch_kr(item):
     return None
 
 # ==========================================
-# 4. 포트폴리오 전용 - 네이버 다이렉트 명칭 철벽 파서
+# 4. 포트폴리오 전용 - 실시간 마켓 파인더
 # ==========================================
 def get_portfolio_market_data(name):
     name = name.strip().upper()
@@ -140,31 +140,25 @@ def get_portfolio_market_data(name):
         kr_name = None
         real_current_price = 0
         try:
-            # 네이버 금융 실시간 시세 페이지 호출
             n_url = f"https://finance.naver.com/item/main.naver?code={name}"
             n_res = requests.get(n_url, headers=headers)
             n_res.encoding = 'euc-kr'
             
-            # 정밀 필터 1단계: H1 태그나 타이틀에서 순수 종목 이름만 완벽 분리 추출
             name_match = re.search(r'<h2><a href=".*?">(.*?)</a></h2>', n_res.text)
             if name_match:
                 kr_name = name_match.group(1).strip()
             else:
-                # 백업용 타이틀 파싱
                 title_match = re.search(r'<title>(.*?) : 네이버 페이 증권</title>', n_res.text)
                 if title_match:
                     kr_name = title_match.group(1).split(":")[0].strip()
 
-            # 정밀 필터 2단계: 실시간 현재가 추출
             price_match = re.search(r'<dd>현재가 ([\d,]+)', n_res.text)
             if price_match:
                 real_current_price = float(price_match.group(1).replace(",", ""))
         except: pass
 
-        # 만약 네이버 검색결과가 있다면 무조건 화면 표출 준비
         if kr_name and real_current_price > 0:
-            s, r = 50, 50.0  # 기본 차트 점수 백업값
-            # 기술 지표용 보조 데이터 수집 (야후)
+            s, r = 50, 50.0
             for suffix in [".KS", ".KQ"]:
                 try:
                     df = yf.Ticker(f"{name}{suffix}").history(period="1mo")
@@ -257,16 +251,18 @@ with st.form(key='portfolio_form', clear_on_submit=True):
             st.rerun()
 
 if st.session_state.my_portfolio:
+    # 안전하게 인덱스로 삭제를 핸들링하기 위해 역순 처리 또는 내부 매핑 처리
+    to_remove = None
+    
     for i, p in enumerate(st.session_state.my_portfolio):
         name, buy = p['name'], p['buy']
         stock_label, curr, score, rsi, currency, cat = get_portfolio_market_data(name)
         
         if curr == 0:
             st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다. (티커 오타 또는 거래소 일시 통신 지연)")
-            if st.button(f"❌ 목록에서 삭제", key=f"del_{i}"):
-                st.session_state.my_portfolio.pop(i)
-                save_portfolio(st.session_state.my_portfolio)
-                st.rerun()
+            # 이 개별 에러 자산을 즉시 날려버릴 철벽 삭제 버튼
+            if st.button(f"❌ {name} 강제 누적 에러 삭제", key=f"err_del_{i}"):
+                to_remove = i
             continue
         
         profit = ((curr - buy) / buy * 100) if buy > 0 else 0
@@ -293,9 +289,12 @@ if st.session_state.my_portfolio:
         st.table(df_guide)
         
         if st.button(f"🗑️ {name} 삭제", key=f"del_final_{i}"):
-            st.session_state.my_portfolio.pop(i)
-            save_portfolio(st.session_state.my_portfolio)
-            st.rerun()
+            to_remove = i
         st.markdown("<br>", unsafe_allow_html=True)
+        
+    if to_remove is not None:
+        st.session_state.my_portfolio.pop(to_remove)
+        save_portfolio(st.session_state.my_portfolio)
+        st.rerun()
 else:
     st.info("현재 등록된 관심 자산이 없습니다. 위 입력창에 등록해 보세요!")
