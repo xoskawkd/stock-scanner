@@ -209,9 +209,10 @@ def fetch_crypto(coin):
         if vol_avg > 0:
             volume_ratio = vol_now / vol_avg
 
-        volume_bonus = min(int(volume_ratio * 10), 50)
+        volume_bonus = min(int(volume_ratio * 3), 20)
 
-        final_score = score + volume_bonus
+        final_score = min(score + volume_bonus, 100)
+
 
         return {
             "ticker": None,
