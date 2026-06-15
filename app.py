@@ -74,19 +74,24 @@ def get_market_status():
 @st.cache_data(ttl=120)
 def get_safe_kr_themes():
     tickers_dict = {}
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
     for sosok in [0, 1]:
         try:
             url = f"https://finance.naver.com/sise/sise_quant.naver?sosok={sosok}"
-            res = requests.get(url, headers=headers)
+            res = requests.get(url, headers=headers, timeout=5)
             res.encoding = 'euc-kr'
             pattern = r'href="/item/main\.naver\?code=(\d{6})".*?class="tltle">(.*?)</a>'
             matches = re.findall(pattern, res.text)
-            for code, name in matches[:25]:
-                if any(x in name for x in ['ETN', 'ETF', '레버리지', '인버스', '스팩', '우', '금융투자', '지수']): continue
+            for code, name in matches[:40]:  # 더 넓게 긁어서 필터링 진행
+                # [필터 1] ETF, ETN, 스팩, 우선주, 홀딩스(지주사형 잡주) 무조건 제거
+                if any(x in name for x in ['ETN', 'ETF', '레버리지', '인버스', '스팩', '우', '금융투자', '지수', '홀딩스', '투자']): continue
+                # [필터 2] 시가총액 너무 거대한 초고래주 제외
                 if name in ["삼성전자", "SK하이닉스", "현대차", "기아", "LG에너지솔루션", "삼성바이오로직스", "셀트리온"]: continue
+                
                 tickers_dict[code] = name
-                if len(tickers_dict) >= 15: break
+                if len(tickers_dict) >= 20: break
         except: pass
     if not tickers_dict:
         tickers_dict = {"293490": "카카오게임즈", "066970": "엘앤에프", "036570": "엔씨소프트"}
@@ -119,56 +124,61 @@ def fetch_kr(item):
     code, name = item
     for suffix in [".KS", ".KQ"]:
         try:
-            df = yf.Ticker(f"{code}{suffix}").history(period="3mo")
+            ticker_obj = yf.Ticker(f"{code}{suffix}")
+            df = ticker_obj.history(period="3mo")
             if df.empty or len(df) < 15: continue
             score, current, rsi = calculate_swing_score(df)
             if current == 0: continue
+            
+            # [필터 3] 주가 2,500원 이하의 동전주/개잡주는 대장주 추천에서 강제 탈락
+            if current < 2500: continue
+                
             return {"ticker": f"{code}{suffix}", "종목": name, "점수": score, "현재가": int(current), "RSI": round(rsi, 1),
                     "매수구간": f"{int(current * 0.96):,} ~ {int(current):,}", "목표가": int(current * 1.07), "손절가": int(current * 0.94)}
         except: pass
     return None
 
 # ==========================================
-# 4. 포트폴리오 전용 - 실시간 마켓 파인더
+# 4. 포트폴리오 전용 - 이중 철벽 파인더
 # ==========================================
 def get_portfolio_market_data(name):
     name = name.strip().upper()
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://finance.naver.com/"
+    }
     
-    # 1. 국내주식 판별 (6자리 숫자)
     if name.isdigit() and len(name) == 6:
         kr_name = None
         real_current_price = 0
         try:
             n_url = f"https://finance.naver.com/item/main.naver?code={name}"
-            n_res = requests.get(n_url, headers=headers)
-            n_res.encoding = 'euc-kr'
-            
-            name_match = re.search(r'<h2><a href=".*?">(.*?)</a></h2>', n_res.text)
-            if name_match:
-                kr_name = name_match.group(1).strip()
-            else:
-                title_match = re.search(r'<title>(.*?) : 네이버 페이 증권</title>', n_res.text)
-                if title_match:
-                    kr_name = title_match.group(1).split(":")[0].strip()
+            n_res = requests.get(n_url, headers=headers, timeout=4)
+            if n_res.status_code == 200:
+                n_res.encoding = 'euc-kr'
+                name_match = re.search(r'<h2><a href=".*?">(.*?)</a></h2>', n_res.text)
+                if name_match: kr_name = name_match.group(1).strip()
+                else:
+                    title_match = re.search(r'<title>(.*?) : 네이버 페이 증권</title>', n_res.text)
+                    if title_match: kr_name = title_match.group(1).split(":")[0].strip()
 
-            price_match = re.search(r'<dd>현재가 ([\d,]+)', n_res.text)
-            if price_match:
-                real_current_price = float(price_match.group(1).replace(",", ""))
+                price_match = re.search(r'<dd>현재가 ([\d,]+)', n_res.text)
+                if price_match: real_current_price = float(price_match.group(1).replace(",", ""))
         except: pass
 
+        for suffix in [".KS", ".KQ"]:
+            try:
+                df = yf.Ticker(f"{name}{suffix}").history(period="1mo")
+                if not df.empty and len(df) >= 3:
+                    s, c, r = calculate_swing_score(df)
+                    final_name = kr_name if kr_name else f"국내주식 {name}"
+                    final_price = real_current_price if real_current_price > 0 else c
+                    if final_price > 0:
+                        return f"{name} ({final_name})", final_price, s, r, "KRW", "Stock"
+            except: continue
         if kr_name and real_current_price > 0:
-            s, r = 50, 50.0
-            for suffix in [".KS", ".KQ"]:
-                try:
-                    df = yf.Ticker(f"{name}{suffix}").history(period="1mo")
-                    if not df.empty and len(df) >= 5:
-                        s, _, r = calculate_swing_score(df)
-                        break
-                except: continue
-            return f"{name} ({kr_name})", real_current_price, s, r, "KRW", "Stock"
+            return f"{name} ({kr_name})", real_current_price, 50, 50.0, "KRW", "Stock"
 
-    # 2. 미국 주식 판별
     try:
         df = yf.Ticker(name).history(period="3mo")
         if not df.empty and len(df) >= 5:
@@ -176,7 +186,6 @@ def get_portfolio_market_data(name):
             if c > 0: return name, c, s, r, "USD", "Stock"
     except: pass
 
-    # 3. 코인 판별
     if name.isalpha():
         try:
             df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=40)
@@ -251,35 +260,29 @@ with st.form(key='portfolio_form', clear_on_submit=True):
             st.rerun()
 
 if st.session_state.my_portfolio:
-    # 안전하게 인덱스로 삭제를 핸들링하기 위해 역순 처리 또는 내부 매핑 처리
     to_remove = None
-    
     for i, p in enumerate(st.session_state.my_portfolio):
         name, buy = p['name'], p['buy']
         stock_label, curr, score, rsi, currency, cat = get_portfolio_market_data(name)
         
         if curr == 0:
             st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다. (티커 오타 또는 거래소 일시 통신 지연)")
-            # 이 개별 에러 자산을 즉시 날려버릴 철벽 삭제 버튼
             if st.button(f"❌ {name} 강제 누적 에러 삭제", key=f"err_del_{i}"):
                 to_remove = i
             continue
         
         profit = ((curr - buy) / buy * 100) if buy > 0 else 0
         sym = "$" if currency == "USD" else "₩"
-        
         stop_rate = 0.08 if cat == "Crypto" else 0.06
         target_rate = 0.10 if cat == "Crypto" else 0.07
         
         st.markdown(f"### 📈 자산 대응 리포트: **{stock_label}**")
-        
         col_m1, col_m2, col_m3 = st.columns(3)
         col_m1.metric("내 평단가", f"{sym}{buy:,.2f}")
         col_m2.metric("실시간 현재가", f"{sym}{curr:,.2f}")
         
         color_trend = "+" if profit >= 0 else ""
         col_m3.metric("실시간 수익률", f"{color_trend}{profit:.2f}%")
-        
         st.caption(f"📊 스윙 스코어: **{score}점** | 현재 RSI 상태: **{rsi}**")
         
         df_guide = pd.DataFrame({
