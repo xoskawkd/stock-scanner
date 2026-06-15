@@ -3,4 +3,3 @@ ta
 pyupbit
 pandas
 streamlit-gsheets
-
