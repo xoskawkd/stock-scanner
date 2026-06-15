@@ -59,7 +59,60 @@ def calculate_swing_score(df):
         return 0, 0, 0
 
 # ==========================================
-# 3. 실시간 마켓 현황 및 변동성 테마주 추출 로직
+# [신규 추가] 순수 국내 주식용 100% 실시간 채점 엔진 (야후 파이낸스 완벽 배제)
+# ==========================================
+def calculate_kr_realtime_score(code):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        # 네이버 금융 일별 시세 페이지 크롤링 (최근 20거래일 데이터 확보)
+        url = f"https://finance.naver.com/item/sise_day.naver?code={code}"
+        res = requests.get(url, headers=headers, timeout=3)
+        res.encoding = 'euc-kr'
+        
+        # 날짜, 종가, 거래량 추출
+        prices = [int(p.replace(",", "")) for p in re.findall(r'num">([\d,]+)</td>', res.text)[::5]]
+        volumes = [int(v.replace(",", "")) for v in re.findall(r'num">([\d,]+)</td>', res.text)[3::5]]
+        
+        if len(prices) < 15: return 40, 0, 50.0  # 데이터 부족시 기본값
+        
+        # 역순 정렬로 시계열 배열 생성 (과거 -> 현재)
+        prices.reverse()
+        volumes.reverse()
+        
+        # 실시간 네이버 현재가 API 매싱
+        api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
+        api_res = requests.get(api_url, headers=headers, timeout=3).json()
+        current = float(api_res['result']['areas'][0]['datas'][0]['nv'])
+        
+        # 오늘 실시간 거래량 매싱
+        volume_now = float(api_res['result']['areas'][0]['datas'][0]['aq'])
+        
+        # 리스트 마지막 요소를 오늘 장중 데이터로 업데이트
+        prices[-1] = current
+        volumes[-1] = volume_now
+        
+        df = pd.DataFrame({"close": prices, "volume": volumes})
+        
+        # 지표 계산
+        rsi = float(RSIIndicator(df["close"]).rsi().iloc[-1])
+        if pd.isna(rsi): rsi = 50.0
+        ma10 = float(df["close"].rolling(10).mean().iloc[-1])
+        ma20 = float(df["close"].rolling(20).mean().iloc[-1])
+        volume_avg = float(df["volume"].rolling(len(df)-1).mean().iloc[-2]) # 어제까지의 평균 거래량
+        
+        score = 0
+        if 40 <= rsi <= 60: score += 40
+        elif rsi < 40: score += 20
+        if current > ma10: score += 20
+        if current > ma20: score += 20
+        if volume_now > volume_avg * 1.5: score += 40  # 장중 거래량 폭발 조건
+        
+        return int(score), current, rsi
+    except:
+        return 40, 0, 50.0
+
+# ==========================================
+# 3. 실시간 마켓 현황 및 추출 로직
 # ==========================================
 @st.cache_data(ttl=30)
 def get_market_status():
@@ -71,10 +124,10 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=40)
 def get_realtime_kr_hot_stocks():
     tickers_dict = {}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
     for sosok in [0, 1]:
         try:
@@ -86,11 +139,11 @@ def get_realtime_kr_hot_stocks():
             for code, name in matches:
                 if any(x in name for x in ['ETN', 'ETF', '레버리지', '인버스', '스팩', '우', '지수', '홀딩스', '투자', '삼성전자', 'SK하이닉스', '현대차', '기아', 'LG에너지', '셀트리온']): continue
                 tickers_dict[code] = name
-                if len(tickers_dict) >= 25: break
+                if len(tickers_dict) >= 30: break
         except: pass
         
     if not tickers_dict:
-        tickers_dict = {"000500": "가온전선", "011000": "진원생명과학", "234340": "씨티씨바이오"}
+        tickers_dict = {"028300": "에이치엘비", "207940": "삼성바이오로직스", "086520": "에코프로"}
     return tickers_dict
 
 def get_safe_us_movers():
@@ -116,31 +169,10 @@ def fetch_crypto(coin):
                 "매수구간": f"{current * 0.96:,.0f} ~ {current:,.0f}", "목표가": round(current * 1.08, 0), "손절가": round(current * 0.94, 0)}
     except: return None
 
-# [핵심 수정] 국내 주식 TOP 3 데이터 연산 시 네이버 실시간 현재가 다이렉트 바인딩
 def fetch_kr(item):
     code, name = item
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    
-    # 1. 실시간 가격 네이버 API 호출 (지연 0초)
-    real_price = 0
-    try:
-        url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
-        res = requests.get(url, headers=headers, timeout=3).json()
-        real_price = float(res['result']['areas'][0]['datas'][0]['nv'])
-    except: pass
-
-    # 2. 지표 연산용 백엔드 버퍼
-    score, rsi = 40, 50.0
-    for suffix in [".KS", ".KQ"]:
-        try:
-            df = yf.Ticker(f"{code}{suffix}").history(period="3mo")
-            if df.empty or len(df) < 15: continue
-            s, c, r = calculate_swing_score(df)
-            score, rsi = s, r
-            if real_price == 0: real_price = c
-            break
-        except: pass
-        
+    # 완전한 국내 실시간 연산 엔진으로 호출
+    score, real_price, rsi = calculate_kr_realtime_score(code)
     if real_price == 0: return None
     
     return {"ticker": code, "종목": name, "점수": score, "현재가": int(real_price), "RSI": round(rsi, 1),
@@ -151,40 +183,18 @@ def fetch_kr(item):
 # ==========================================
 def get_portfolio_market_data(name):
     name = name.strip().upper()
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
     if name.isdigit() and len(name) == 6:
-        real_price = 0
+        # 내 포트폴리오도 국내주식이면 100% 국산 엔진으로 실시간 채점하도록 바인딩 변경
+        score, real_price, rsi = calculate_kr_realtime_score(name)
         kr_name = None
-        
         try:
             url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{name}"
-            res = requests.get(url, headers=headers, timeout=4).json()
-            item_data = res['result']['areas'][0]['datas'][0]
-            real_price = float(item_data['nv'])
-            kr_name = item_data['nm']
-        except:
-            try:
-                web_url = f"https://finance.naver.com/item/main.naver?code={name}"
-                r = requests.get(web_url, headers=headers, timeout=4)
-                r.encoding = 'euc-kr'
-                p_match = re.search(r'<dd>현재가 ([\d,]+)', r.text)
-                if p_match: real_price = float(p_match.group(1).replace(",", ""))
-                n_match = re.search(r'<title>(.*?) : 네이버 페이 증권</title>', r.text)
-                if n_match: kr_name = n_match.group(1).split(":")[0].strip()
-            except: pass
-
-        score, rsi = 40, 41.8
-        for suffix in [".KS", ".KQ"]:
-            try:
-                df = yf.Ticker(f"{name}{suffix}").history(period="1mo")
-                if not df.empty:
-                    s, c, r = calculate_swing_score(df)
-                    score, rsi = s, r
-                    if real_price == 0: real_price = c
-                    break
-            except: pass
-            
+            res = requests.get(url, headers=headers, timeout=2).json()
+            kr_name = res['result']['areas'][0]['datas'][0]['nm']
+        except: pass
+        
         if real_price > 0:
             final_name = kr_name if kr_name else f"국내주식 {name}"
             return f"{name} ({final_name})", real_price, score, rsi, "KRW", "Stock"
