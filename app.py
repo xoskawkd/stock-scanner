@@ -8,58 +8,29 @@ import os
 import re
 from ta.momentum import RSIIndicator
 from concurrent.futures import ThreadPoolExecutor
-from streamlit_gsheets import GSheetsConnection  # 💡 구글 시트 커넥션 추가
 
 # ==========================================
-# 0. [무적 영구 저장] 구글 시트 연동 핵심 로직
+# 0. 데이터 영구 저장 로직
 # ==========================================
-# ⚠️ 형님이 2단계에서 공유 권한(편집자) 열고 복사한 구글 시트 주소를 아래에 정확히 붙여넣으세요!
-GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1-J26d9OYVa2W0daVREDIYHiqTszWDXkLL6pj_TaguqY/edit?usp=sharing"
+DATA_FILE = "portfolio.json"
 
+def load_portfolio():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r") as f: return json.load(f)
+        except: return []
+    return []
 
-def load_portfolio_from_sheets():
-    try:
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        # ttl="0d" 설정으로 캐시 없이 매번 구글 시트에서 실시간 쌩 데이터를 읽어옵니다.
-        df = conn.read(spreadsheet=GOOGLE_SHEET_URL, ttl="0d")
-        
-        # 빈 시트이거나 컬럼이 깨졌을 때 방어벽
-        if df.empty or "ticker" not in df.columns:
-            return []
-            
-        # 구글 시트 장부를 파이썬 리스트 형태로 변환해서 프로그램에 주입
-        portfolio = []
-        for _, row in df.iterrows():
-            if pd.isna(row["ticker"]) or str(row["ticker"]).strip() == "" or row["ticker"] == "ticker":
-                continue
-            portfolio.append({"name": str(row["ticker"]).strip().upper(), "buy": float(row["buy_price"])})
-        return portfolio
-    except:
-        return []
-
-def save_portfolio_to_sheets(portfolio_list):
-    try:
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        # 리스트 데이터를 다시 깔끔한 엑셀 장부(DataFrame)로 변환
-        if not portfolio_list:
-            df = pd.DataFrame(columns=["ticker", "buy_price"])
-        else:
-            df = pd.DataFrame([{"ticker": p["name"], "buy_price": p["buy"]} for p in portfolio_list])
-            
-        # 구글 시트에 실시간으로 덮어쓰기 오버라이딩 실행
-        conn.update(spreadsheet=GOOGLE_SHEET_URL, data=df)
-        return True
-    except:
-        return False
+def save_portfolio(data):
+    with open(DATA_FILE, "w") as f: json.dump(data, f)
 
 # ==========================================
 # 1. 페이지 설정 및 상태 초기화
 # ==========================================
 st.set_page_config(page_title="Tae Scanner", layout="wide")
 
-# 💡 이제 세션 상태가 날아가도 새로고침 하면 구글 시트에서 실시간으로 긁어와서 완벽 복구됩니다.
 if 'my_portfolio' not in st.session_state:
-    st.session_state.my_portfolio = load_portfolio_from_sheets()
+    st.session_state.my_portfolio = load_portfolio()
 
 # ==========================================
 # 2. 통합 핵심 분석 및 [정석 지지선] 타점 산출 엔진
@@ -72,12 +43,14 @@ def calculate_swing_score_and_bands(df):
         current = float(df["close"].iloc[-1])
         rsi = float(RSIIndicator(df["close"]).rsi().iloc[-1])
         
+        # ⚠️ 핵심 업그레이드: 진짜 지지선(10일 이동평균선, 20일 이동평균선) 확보
         ma10 = float(df["close"].rolling(10).mean().iloc[-1])
         ma20 = float(df["close"].rolling(20).mean().iloc[-1])
         
         volume_now = float(df["volume"].iloc[-1])
         volume_avg = float(df["volume"].rolling(20).mean().iloc[-1])
         
+        # 점수 계산 체계
         score = 0
         if 40 <= rsi <= 60: score += 40
         elif rsi < 40: score += 20
@@ -85,6 +58,8 @@ def calculate_swing_score_and_bands(df):
         if current > ma20: score += 20
         if volume_now > volume_avg * 1.5: score += 40
         
+        # 🎯 [정석 지지선 방식 수식]: 10일선과 20일선 사이를 매수 밴드로 정의 (고정 타점)
+        # 만약 10일선이 20일선보다 위에 있다면 (정배열 눌림목 정석)
         if ma10 >= ma20:
             buy_min, buy_max = ma20, ma10
         else:
@@ -94,15 +69,20 @@ def calculate_swing_score_and_bands(df):
     except:
         return 40, 0, 50.0, 0, 0, 0
 
+# ==========================================
+# 100% 국산 실시간 매싱 + 지지선 타점 연산 결합
+# ==========================================
 def calculate_kr_realtime_score(code):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
+        # 1. 네이버 실시간 Polling API 가동
         api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
         api_res = requests.get(api_url, headers=headers, timeout=3).json()
         item_data = api_res['result']['areas'][0]['datas'][0]
         current = float(item_data['nv']) 
         volume_now = float(item_data['aq']) 
         
+        # 2. 차단 리스크 없는 우회용 야후 파이낸스 버퍼 호출
         df = yf.Ticker(f"{code}.KS").history(period="3mo")
         if df.empty or len(df) < 20:
             df = yf.Ticker(f"{code}.KQ").history(period="3mo")
@@ -110,13 +90,16 @@ def calculate_kr_realtime_score(code):
         if df.empty:
             return 40, current, 50.0, f"{int(current*0.96):,} ~ {int(current):,}", int(current*1.07), int(current*0.94)
             
+        # 마지막 행 실시간 오버라이딩 매싱
         df.iloc[-1, df.columns.get_loc('Close')] = current
         df.iloc[-1, df.columns.get_loc('Volume')] = volume_now
         
         score, _, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
         
+        # 가독성 인터페이스 포맷팅
         buy_range = f"{int(buy_min):,} ~ {int(buy_max):,}"
         target_price = int(current * 1.07)
+        # 정석 손절선: 지지선의 최하단인 20일선(buy_min)을 -2% 하회하거나 현재가 기준 -6% 중 보수적 적용
         stop_price = int(min(buy_min * 0.98, current * 0.94))
         
         return score, current, rsi, buy_range, target_price, stop_price
@@ -275,7 +258,7 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
 st.divider()
 
 # ==========================================
-# 6. 내 포트폴리오 관리 시스템 (구글 시트 실시간 연동 완료)
+# 6. 내 포트폴리오 관리 시스템
 # ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
 
@@ -285,10 +268,8 @@ with st.form(key='portfolio_form', clear_on_submit=True):
     b_in = c2.number_input("내 매수가", min_value=0.0, step=0.01, format="%.2f")
     if c3.form_submit_button("➕ 포트폴리오 추가"):
         if n_in:
-            # 1. 기존 세션에 추가
             st.session_state.my_portfolio.append({"name": n_in.strip().upper(), "buy": float(b_in)})
-            # 2. 구글 시트로 실시간 백업 발송 🚀
-            save_portfolio_to_sheets(st.session_state.my_portfolio)
+            save_portfolio(st.session_state.my_portfolio)
             st.rerun()
 
 if st.session_state.my_portfolio:
@@ -325,14 +306,13 @@ if st.session_state.my_portfolio:
         })
         st.table(df_guide)
         
-        # 💡 삭제 버튼 누르면 구글 시트에서도 실시간으로 지워집니다.
         if st.button(f"🗑️ {name} 삭제", key=f"del_final_{i}"):
             to_remove = i
         st.markdown("<br>", unsafe_allow_html=True)
         
     if to_remove is not None:
-        # 1. 세션에서 종목 제거
         st.session_state.my_portfolio.pop(to_remove)
-        # 2. 구글 시트 장부에 동기화시켜서 그 줄 지워버림 🗑️
-        save_portfolio_to_sheets(st.session_state.my_portfolio)
+        save_portfolio(st.session_state.my_portfolio)
         st.rerun()
+else:
+    st.info("현재 등록된 관심 자산이 없습니다. 위 입력창에 등록해 보세요!")
