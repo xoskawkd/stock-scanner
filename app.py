@@ -98,15 +98,29 @@ def calculate_kr_realtime_score(code):
         
         if current == 0: return 0, 0, 50.0, "거래정지/정보없음", 0, 0
         
-        # 스윙 점수 계산
-        score = 50 if change_rate > 3.0 else (30 if change_rate > 0 else 10)
+# [수정된 스윙 점수 산출 로직]
+        # 등락률 기반 점수 산출 (급등주 과열 방지 및 눌림목 가점)
+        score = 0
         
+        # 0.5% ~ 5.0% 상승 중일 때 눌림목/추세 유지로 판단하여 가점
+        if 0.5 <= change_rate <= 5.0: 
+            score = 60
+        # 5% 이상 급등 시 상투 가능성 고려하여 점수 분산
+        elif change_rate > 5.0: 
+            score = 30 
+        # 보합권은 안정적
+        elif -2.0 <= change_rate < 0.5: 
+            score = 40
+        # 급락 중일 때
+        else: 
+            score = 10
+            
+        # 목표가(7% 상단) 및 손절가(6% 하단) 산출
         buy_range = f"{int(current * 0.96):,} ~ {int(current * 0.98):,}"
-        return score, current, 50.0, buy_range, int(current * 1.07), int(current * 0.94)
+        target_price = int(current * 1.07)
+        stop_price = int(current * 0.94)
         
-    except Exception as e:
-        print(f"DEBUG ERROR ({code}): {e}")
-        return 0, 0, 50.0, "통신오류", 0, 0
+        return score, current, 50.0, buy_range, target_price, stop_price
 
 # ==========================================
 # 3. 실시간 마켓 현황 및 추출 로직
