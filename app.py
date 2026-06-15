@@ -73,54 +73,38 @@ def calculate_swing_score_and_bands(df):
 # 100% 국산 실시간 매싱 + 지지선 타점 연산 결합
 # ==========================================
 def calculate_kr_realtime_score(code):
-    # User-Agent를 조금 더 일반적인 브라우저 형태로 강화
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": f"https://finance.naver.com/item/main.naver?code={code}"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
+        # 1. 네이버 실시간 Polling API 가동
         api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
-        res = requests.get(api_url, headers=headers, timeout=5) # 타임아웃 5초로 여유 확보
+        api_res = requests.get(api_url, headers=headers, timeout=3).json()
+        item_data = api_res['result']['areas'][0]['datas'][0]
+        current = float(item_data['nv']) 
+        volume_now = float(item_data['aq']) 
         
-        if res.status_code != 200:
-            return 0, 0, 50.0, "API 연결실패", 0, 0
+        # 2. 차단 리스크 없는 우회용 야후 파이낸스 버퍼 호출
+        df = yf.Ticker(f"{code}.KS").history(period="3mo")
+        if df.empty or len(df) < 20:
+            df = yf.Ticker(f"{code}.KQ").history(period="3mo")
             
-        json_data = res.json()
-        # 데이터 유효성 검사 (데이터가 비어있는지 확인)
-        areas = json_data.get('result', {}).get('areas', [])
-        if not areas or not areas[0].get('datas'):
-            return 0, 0, 50.0, "데이터 없음", 0, 0
+        if df.empty:
+            return 40, current, 50.0, f"{int(current*0.96):,} ~ {int(current):,}", int(current*1.07), int(current*0.94)
             
-        item = areas[0]['datas'][0]
+        # 마지막 행 실시간 오버라이딩 매싱
+        df.iloc[-1, df.columns.get_loc('Close')] = current
+        df.iloc[-1, df.columns.get_loc('Volume')] = volume_now
         
-        current = float(item.get('nv', 0))
-        change_rate = float(item.get('cr', 0))
+        score, _, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
         
-        if current == 0: return 0, 0, 50.0, "거래정지/정보없음", 0, 0
-        
-# [수정된 스윙 점수 산출 로직]
-        # 등락률 기반 점수 산출 (급등주 과열 방지 및 눌림목 가점)
-        score = 0
-        
-        # 0.5% ~ 5.0% 상승 중일 때 눌림목/추세 유지로 판단하여 가점
-        if 0.5 <= change_rate <= 5.0: 
-            score = 60
-        # 5% 이상 급등 시 상투 가능성 고려하여 점수 분산
-        elif change_rate > 5.0: 
-            score = 30 
-        # 보합권은 안정적
-        elif -2.0 <= change_rate < 0.5: 
-            score = 40
-        # 급락 중일 때
-        else: 
-            score = 10
-            
-        # 목표가(7% 상단) 및 손절가(6% 하단) 산출
-        buy_range = f"{int(current * 0.96):,} ~ {int(current * 0.98):,}"
+        # 가독성 인터페이스 포맷팅
+        buy_range = f"{int(buy_min):,} ~ {int(buy_max):,}"
         target_price = int(current * 1.07)
-        stop_price = int(current * 0.94)
+        # 정석 손절선: 지지선의 최하단인 20일선(buy_min)을 -2% 하회하거나 현재가 기준 -6% 중 보수적 적용
+        stop_price = int(min(buy_min * 0.98, current * 0.94))
         
-        return score, current, 50.0, buy_range, target_price, stop_price
+        return score, current, rsi, buy_range, target_price, stop_price
+    except:
+        return 40, 0, 50.0, "데이터 동기화 실패", 0, 0
 
 # ==========================================
 # 3. 실시간 마켓 현황 및 추출 로직
