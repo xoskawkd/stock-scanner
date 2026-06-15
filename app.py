@@ -35,26 +35,30 @@ if 'my_portfolio' not in st.session_state:
 # 2. 통합 핵심 분석 엔진
 # ==========================================
 def calculate_swing_score(df):
-    if len(df) < 20: return 0, 0, 0
-    df.columns = [c.lower() for c in df.columns]
-    current = df["close"].iloc[-1]
-    rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
-    ma10 = df["close"].rolling(10).mean().iloc[-1]
-    ma20 = df["close"].rolling(20).mean().iloc[-1]
-    
-    volume_now = df["volume"].iloc[-1]
-    volume_avg = df["volume"].rolling(20).mean().iloc[-1]
-    
-    score = 0
-    if 40 <= rsi <= 60: score += 40
-    elif rsi < 40: score += 20
-    if current > ma10: score += 20
-    if current > ma20: score += 20
-    if volume_now > volume_avg * 1.8: score += 40
-    return int(score), float(current), float(rsi)
+    if df is None or len(df) < 20: return 0, 0, 0
+    try:
+        df = df.copy()
+        df.columns = [c.lower() for c in df.columns]
+        current = float(df["close"].iloc[-1])
+        rsi = float(RSIIndicator(df["close"]).rsi().iloc[-1])
+        ma10 = float(df["close"].rolling(10).mean().iloc[-1])
+        ma20 = float(df["close"].rolling(20).mean().iloc[-1])
+        
+        volume_now = float(df["volume"].iloc[-1])
+        volume_avg = float(df["volume"].rolling(20).mean().iloc[-1])
+        
+        score = 0
+        if 40 <= rsi <= 60: score += 40
+        elif rsi < 40: score += 20
+        if current > ma10: score += 20
+        if current > ma20: score += 20
+        if volume_now > volume_avg * 1.8: score += 40
+        return int(score), current, rsi
+    except:
+        return 0, 0, 0
 
 # ==========================================
-# 3. 실시간 크롤러 및 스캐너 로직 (국내 테마/급등주 발굴단)
+# 3. 실시간 크롤러 및 스캐너 로직
 # ==========================================
 @st.cache_data(ttl=30)
 def get_market_status():
@@ -68,60 +72,44 @@ def get_market_status():
 
 @st.cache_data(ttl=600)
 def get_safe_kr_themes():
-    """네이버 금융 거래상위에서 대형주를 제외한 실시간 유망 종목 추출"""
     tickers_dict = {}
     headers = {"User-Agent": "Mozilla/5.0"}
-    
-    # 코스피(sosok=0) 및 코스닥(sosok=1) 거래상위 둘 다 긁기
     for sosok in [0, 1]:
         try:
             url = f"https://finance.naver.com/sise/sise_quant.naver?sosok={sosok}"
             res = requests.get(url, headers=headers)
             dfs = pd.read_html(res.text)
             df = dfs[1].dropna(subset=['종목명'])
-            
-            # 잡주/지수연동 품목 필터링
             df = df[~df['종목명'].str.contains('ETN|ETF|레버리지|인버스|스팩|금융투자|우|우B|고려|지수', na=False)]
-            # 가격 필터 (동전주 제외 및 너무 무거운 주식 제외 -> 3천원 ~ 15만원 사이의 테마성 좋은 종목들)
             df = df[(df['현재가'] >= 3000) & (df['현재가'] <= 150000)]
-            
-            # 시가총액 초상위 대형주 강제 필터링 제거 (움직임 가벼운 중소형/테마 대장주 위주)
-            super_heavy = ["삼성전자", "SK하이닉스", "현대차", "기아", "LG에너지솔루션", "삼성바이오로직스", "셀트리온", "POSCO홀딩스", "네이버", "카카오"]
+            super_heavy = ["삼성전자", "SK하이닉스", "현대차", "기아", "LG에너지솔루션", "삼성바이오로직스", "셀트리온"]
             df = df[~df['종목명'].isin(super_heavy)]
             
-            # 상위 10개씩 뽑아서 종목코드 매핑
             for _, row in df.head(10).iterrows():
                 name = row['종목명']
-                # 네이버 테이블 구조상 코드를 직접 파싱하기 까다로우므로 야후 파이낸스 검색 API로 티커 치환
                 try:
                     search_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={name}"
                     s_res = requests.get(search_url, headers=headers).json()
                     symbol = s_res['quotes'][0]['symbol']
                     if ".KQ" in symbol or ".KS" in symbol:
-                        # 티커에서 6자리 숫자 코드 추출
                         code = symbol.split(".")[0]
                         tickers_dict[code] = name
                 except: pass
         except: pass
 
-    # 만약 크롤링이 일시적으로 막힐 때를 대비한 핫한 테마/성장주 베이스라인 셋업 (대형주 제외 버전)
     if not tickers_dict:
-        tickers_dict = {
-            "293490": "카카오게임즈", "066970": "엘앤에프", "271560": "오리온", 
-            "035760": "CJ ENM", "036570": "엔씨소프트", "192820": "코스맥스",
-            "403550": "Alcera", "253450": "스튜디오드래곤", "028300": "에이치엘비"
-        }
+        tickers_dict = {"293490": "카카오게임즈", "066970": "엘앤에프", "036570": "엔씨소프트"}
     return tickers_dict
 
 def get_safe_us_movers():
-    return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN", "IONQ", "COIN"]
+    return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
 
-# 개별 자산 페칭 함수들
 def fetch_us(stock):
     try:
         df = yf.Ticker(stock).history(period="3mo")
         if df.empty: return None
         score, current, rsi = calculate_swing_score(df)
+        if current == 0: return None
         return {"ticker": stock, "종목": stock, "점수": score, "현재가": round(current, 2), "RSI": round(rsi, 1),
                 "매수구간": f"${round(current * 0.96, 2)} ~ ${round(current, 2)}", "목표가": round(current * 1.07, 2), "손절가": round(current * 0.94, 2)}
     except: return None
@@ -131,6 +119,7 @@ def fetch_crypto(coin):
         df = pyupbit.get_ohlcv(coin, interval="day", count=40)
         if df is None or df.empty: return None
         score, current, rsi = calculate_swing_score(df)
+        if current == 0: return None
         return {"ticker": None, "코인": coin.replace("KRW-", ""), "점수": score, "현재가": current, "RSI": round(rsi, 1),
                 "매수구간": f"{current * 0.96:,.0f} ~ {current:,.0f}", "목표가": round(current * 1.08, 0), "손절가": round(current * 0.94, 0)}
     except: return None
@@ -138,56 +127,54 @@ def fetch_crypto(coin):
 def fetch_kr(item):
     code, name = item
     try:
-        suffix = ".KS" if not code.startswith("3") and not code.startswith("2") and not code.startswith("0") else ".KQ"
-        # 0으로 시작하는 코스피 종목 예외처리 조정
-        if code in ["005930", "000660", "035420"]: suffix = ".KS"
-        
-        # 실제 등록된 시장 체크를 위해 양쪽 다 스캔 보완
         df = yf.Ticker(f"{code}.KS").history(period="3mo")
+        suffix = ".KS"
         if df.empty:
             df = yf.Ticker(f"{code}.KQ").history(period="3mo")
             suffix = ".KQ"
-            
         if df.empty: return None
         score, current, rsi = calculate_swing_score(df)
+        if current == 0: return None
         return {"ticker": f"{code}{suffix}", "종목": name, "점수": score, "현재가": int(current), "RSI": round(rsi, 1),
                 "매수구간": f"{int(current * 0.96):,} ~ {int(current):,}", "목표가": int(current * 1.07), "손절가": int(current * 0.94)}
     except: return None
 
 # ==========================================
-# 4. 포트폴리오 전용 실시간 마켓 파인더 (해외주식 철벽 방어 완료)
+# 4. 포트폴리오 전용 실시간 마켓 파인더 (캐싱 제거 및 순서 전면 개편)
 # ==========================================
-@st.cache_data(ttl=15)
 def get_portfolio_market_data(name):
+    """캐시를 안 태우고 매번 실시간 강제 조회하도록 설정"""
     name = name.strip().upper()
     
-    # 1. 국내주식 판별 (6자리 숫자인 경우)
+    # 1. 국내주식 판별 (6자리 숫자)
     if name.isdigit() and len(name) == 6:
         for suffix in [".KS", ".KQ"]:
             try:
                 df = yf.Ticker(f"{name}{suffix}").history(period="1mo")
                 if not df.empty and len(df) >= 5:
                     s, c, r = calculate_swing_score(df)
-                    return f"{name}{suffix}", df["Close"].iloc[-1], s, r, "KRW", "Stock"
+                    if c > 0: return f"{name}{suffix}", c, s, r, "KRW", "Stock"
             except: continue
 
-    # 2. 코인 판별 시도 (알파벳 2~5자리 자산 중 업비트에 실제 있는 경우)
-    if name.isalpha() and 2 <= len(name) <= 5:
+    # 2. 미국 주식 먼저 판별 시도 (코인보다 미국 주식을 우선 순위로 탐색하여 VUZI, PLTR 선오류 방지)
+    try:
+        # 업비트 자산과 겹치지 않는지 크로스체크 후 야후 조회
+        df = yf.Ticker(name).history(period="3mo")
+        if not df.empty and len(df) >= 5:
+            s, c, r = calculate_swing_score(df)
+            if c > 0:
+                currency = "KRW" if (".KS" in name or ".KQ" in name) else "USD"
+                return name, c, s, r, currency, "Stock"
+    except: pass
+
+    # 3. 코인 판별 시도 (알파벳이고 미국 주식에서 안 잡힌 경우)
+    if name.isalpha():
         try:
             df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=40)
             if df is not None and not df.empty:
                 s, c, r = calculate_swing_score(df)
-                return name, df["close"].iloc[-1], s, r, "KRW", "Crypto"
+                if c > 0: return name, c, s, r, "KRW", "Crypto"
         except: pass
-
-    # 3. 해외 주식 판별 (코인 조회에 실패했거나 미국 티커(VUZI, PLTR 등)인 경우 일로 빠짐)
-    try:
-        df = yf.Ticker(name).history(period="3mo")
-        if not df.empty and len(df) >= 5:
-            s, c, r = calculate_swing_score(df)
-            currency = "KRW" if (".KS" in name or ".KQ" in name) else "USD"
-            return name, df["Close"].iloc[-1], s, r, currency, "Stock"
-    except: pass
 
     return None, 0, 0, 0, "USD", "Stock"
 
@@ -201,25 +188,20 @@ st.sidebar.metric("환율 (USD/KRW)", f"{exchange} 원")
 
 st.title("🚀 Tae's Balanced Smart TOP 3 Scanner")
 
-# 풀 소스 데이터 로드
 kr_live_dict = get_safe_kr_themes()
 us_live_list = get_safe_us_movers()
-try:
-    coins_list = pyupbit.get_tickers(fiat="KRW")[:30]
-except:
-    coins_list = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE", "KRW-AVAX"]
+try: coins_list = pyupbit.get_tickers(fiat="KRW")[:30]
+except: coins_list = ["KRW-BTC", "KRW-ETH", "KRW-XRP"]
 
-# 멀티스레딩 고속 연산 스캔
 with ThreadPoolExecutor(max_workers=20) as executor:
     us_top = sorted([r for r in executor.map(fetch_us, us_live_list) if r], key=lambda x: x["점수"], reverse=True)[:3]
     crypto_top = sorted([r for r in executor.map(fetch_crypto, coins_list) if r], key=lambda x: x["점수"], reverse=True)[:3]
     kr_top = sorted([r for r in executor.map(fetch_kr, kr_live_dict.items()) if r], key=lambda x: x["점수"], reverse=True)[:3]
 
-# 스캐너 카드 대시보드 출력
 for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$"), ("🪙 코인 TOP 3", crypto_top, ""), ("🇰🇷 국내 테마 대장주 TOP 3", kr_top, "")]:
     st.header(title)
     if not data:
-        st.warning("시장 데이터를 분석 레이어에 동기화 중입니다.")
+        st.warning("시장 데이터를 동기화 중입니다.")
         continue
     cols = st.columns(3)
     for i, item in enumerate(data):
@@ -249,7 +231,6 @@ st.divider()
 # ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
 
-# 자산 등록 양식
 with st.form(key='portfolio_form', clear_on_submit=True):
     c1, c2, c3 = st.columns([2, 1, 1])
     n_in = c1.text_input("종목코드(예: 005930) / 티커(예: PLTR, VUZI, BTC)", placeholder="국내주식은 6자리 숫자, 해외주식/코인은 영문 티커 입력")
@@ -258,10 +239,8 @@ with st.form(key='portfolio_form', clear_on_submit=True):
         if n_in:
             st.session_state.my_portfolio.append({"name": n_in.strip().upper(), "buy": float(b_in)})
             save_portfolio(st.session_state.my_portfolio)
-            st.success(f"✅ {n_in} 등록 성공! 대시보드를 갱신합니다.")
             st.rerun()
 
-# 포트폴리오 리스트 뷰어
 if st.session_state.my_portfolio:
     for i, p in enumerate(st.session_state.my_portfolio):
         name, buy = p['name'], p['buy']
