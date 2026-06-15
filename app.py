@@ -33,7 +33,7 @@ if 'my_portfolio' not in st.session_state:
     st.session_state.my_portfolio = load_portfolio()
 
 # ==========================================
-# 2. 통합 핵심 분석 엔진
+# 2. 통합 핵심 분석 및 [정석 지지선] 타점 산출 엔진
 # ==========================================
 def calculate_swing_score_and_bands(df):
     if df is None or len(df) < 20: return 0, 0, 0, "계산불가", 0, 0
@@ -42,11 +42,15 @@ def calculate_swing_score_and_bands(df):
         df.columns = [c.lower() for c in df.columns]
         current = float(df["close"].iloc[-1])
         rsi = float(RSIIndicator(df["close"]).rsi().iloc[-1])
+        
+        # ⚠️ 핵심 업그레이드: 진짜 지지선(10일 이동평균선, 20일 이동평균선) 확보
         ma10 = float(df["close"].rolling(10).mean().iloc[-1])
         ma20 = float(df["close"].rolling(20).mean().iloc[-1])
+        
         volume_now = float(df["volume"].iloc[-1])
         volume_avg = float(df["volume"].rolling(20).mean().iloc[-1])
         
+        # 점수 계산 체계
         score = 0
         if 40 <= rsi <= 60: score += 40
         elif rsi < 40: score += 20
@@ -54,48 +58,57 @@ def calculate_swing_score_and_bands(df):
         if current > ma20: score += 20
         if volume_now > volume_avg * 1.5: score += 40
         
-        if ma10 >= ma20: buy_min, buy_max = ma20, ma10
-        else: buy_min, buy_max = ma10, ma20
+        # 🎯 [정석 지지선 방식 수식]: 10일선과 20일선 사이를 매수 밴드로 정의 (고정 타점)
+        # 만약 10일선이 20일선보다 위에 있다면 (정배열 눌림목 정석)
+        if ma10 >= ma20:
+            buy_min, buy_max = ma20, ma10
+        else:
+            buy_min, buy_max = ma10, ma20
             
         return int(score), current, rsi, buy_min, buy_max, ma20
     except:
         return 40, 0, 50.0, 0, 0, 0
 
 # ==========================================
-# 3. 실시간 매싱 (거래량 필터 적용 완료)
+# 100% 국산 실시간 매싱 + 지지선 타점 연산 결합
 # ==========================================
-def fetch_crypto(coin):
-    try:
-        df = pyupbit.get_ohlcv(coin, interval="day", count=40)
-        if df is None or df.empty: return None
-        
-        # 🎯 [핵심] 거래대금 50억 미만 필터링 (거래 안 되는 잡코인 제거)
-        if (df['volume'].iloc[-1] * df['close'].iloc[-1]) < 5000000000:
-            return None
-            
-        score, current, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
-        if current == 0: return None
-        return {"ticker": None, "코인": coin.replace("KRW-", ""), "점수": score, "현재가": current, "RSI": round(rsi, 1),
-                "매수구간": f"{int(buy_min):,} ~ {int(buy_max):,}", "목표가": round(current * 1.08, 0), "손절가": round(min(buy_min*0.98, current * 0.94), 0)}
-    except: return None
-
-# (나머지 국내 주식, 해외 주식 로직은 그대로 유지)
 def calculate_kr_realtime_score(code):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
+        # 1. 네이버 실시간 Polling API 가동
         api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
         api_res = requests.get(api_url, headers=headers, timeout=3).json()
         item_data = api_res['result']['areas'][0]['datas'][0]
         current = float(item_data['nv']) 
         volume_now = float(item_data['aq']) 
+        
+        # 2. 차단 리스크 없는 우회용 야후 파이낸스 버퍼 호출
         df = yf.Ticker(f"{code}.KS").history(period="3mo")
-        if df.empty: df = yf.Ticker(f"{code}.KQ").history(period="3mo")
+        if df.empty or len(df) < 20:
+            df = yf.Ticker(f"{code}.KQ").history(period="3mo")
+            
+        if df.empty:
+            return 40, current, 50.0, f"{int(current*0.96):,} ~ {int(current):,}", int(current*1.07), int(current*0.94)
+            
+        # 마지막 행 실시간 오버라이딩 매싱
         df.iloc[-1, df.columns.get_loc('Close')] = current
         df.iloc[-1, df.columns.get_loc('Volume')] = volume_now
+        
         score, _, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
-        return score, current, rsi, f"{int(buy_min):,} ~ {int(buy_max):,}", int(current * 1.07), int(min(buy_min * 0.98, current * 0.94))
-    except: return 40, 0, 50.0, "데이터 동기화 실패", 0, 0
+        
+        # 가독성 인터페이스 포맷팅
+        buy_range = f"{int(buy_min):,} ~ {int(buy_max):,}"
+        target_price = int(current * 1.07)
+        # 정석 손절선: 지지선의 최하단인 20일선(buy_min)을 -2% 하회하거나 현재가 기준 -6% 중 보수적 적용
+        stop_price = int(min(buy_min * 0.98, current * 0.94))
+        
+        return score, current, rsi, buy_range, target_price, stop_price
+    except:
+        return 40, 0, 50.0, "데이터 동기화 실패", 0, 0
 
+# ==========================================
+# 3. 실시간 마켓 현황 및 추출 로직
+# ==========================================
 @st.cache_data(ttl=30)
 def get_market_status():
     try:
@@ -110,20 +123,26 @@ def get_market_status():
 def get_realtime_kr_hot_stocks():
     tickers_dict = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
     for sosok in [0, 1]:
         try:
             url = f"https://finance.naver.com/sise/sise_tr_amount.naver?sosok={sosok}"
             res = requests.get(url, headers=headers, timeout=5)
             res.encoding = 'euc-kr'
             matches = re.findall(r'href="/item/main\.naver\?code=(\d{6})".*?class="tltle">(.*?)</a>', res.text)
+            
             for code, name in matches:
                 if any(x in name for x in ['ETN', 'ETF', '레버리지', '인버스', '스팩', '우', '지수', '홀딩스', '투자', '삼성전자', 'SK하이닉스', '현대차', '기아', 'LG에너지', '셀트리온']): continue
                 tickers_dict[code] = name
                 if len(tickers_dict) >= 20: break
         except: pass
+        
+    if not tickers_dict:
+        tickers_dict = {"028300": "에이치엘비", "086520": "에코프로", "196170": "알테오젠"}
     return tickers_dict
 
-def get_safe_us_movers(): return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
+def get_safe_us_movers():
+    return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
 
 def fetch_us(stock):
     try:
@@ -135,38 +154,75 @@ def fetch_us(stock):
                 "매수구간": f"${round(buy_min, 2)} ~ ${round(buy_max, 2)}", "목표가": round(current * 1.07, 2), "손절가": round(min(buy_min*0.98, current * 0.94), 2)}
     except: return None
 
+# 🎯 [핵심] 거래대금 50억 필터 적용된 코인 함수
+def fetch_crypto(coin):
+    try:
+        df = pyupbit.get_ohlcv(coin, interval="day", count=40)
+        if df is None or df.empty: return None
+        
+        # [거래대금 50억 필터 로직]
+        if (df['volume'].iloc[-1] * df['close'].iloc[-1]) < 5000000000:
+            return None
+            
+        score, current, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
+        if current == 0: return None
+        return {"ticker": None, "코인": coin.replace("KRW-", ""), "점수": score, "현재가": current, "RSI": round(rsi, 1),
+                "매수구간": f"{int(buy_min):,} ~ {int(buy_max):,}", "목표가": round(current * 1.08, 0), "손절가": round(min(buy_min*0.98, current * 0.94), 0)}
+    except: return None
+
 def fetch_kr(item):
     code, name = item
     score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(code)
     if real_price == 0: return None
+    
     return {"ticker": code, "종목": name, "점수": score, "현재가": int(real_price), "RSI": round(rsi, 1),
             "매수구간": buy_range, "목표가": target_price, "손절가": stop_price}
 
+# ==========================================
+# 4. 포트폴리오 자산 실시간 매싱 연동
+# ==========================================
 def get_portfolio_market_data(name):
     name = name.strip().upper()
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
     if name.isdigit() and len(name) == 6:
         score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(name)
-        if real_price > 0: return f"국내주식 {name}", real_price, score, rsi, "KRW", "Stock", stop_price, target_price
+        kr_name = None
+        try:
+            url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{name}"
+            res = requests.get(url, headers=headers, timeout=2).json()
+            kr_name = res['result']['areas'][0]['datas'][0]['nm']
+        except: pass
+        
+        if real_price > 0:
+            final_name = kr_name if kr_name else f"국내주식 {name}"
+            return f"{name} ({final_name})", real_price, score, rsi, "KRW", "Stock", stop_price, target_price
+
     try:
         df = yf.Ticker(name).history(period="3mo")
         if not df.empty and len(df) >= 5:
             s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
             if c > 0: return name, c, s, r, "USD", "Stock", min(b_min*0.98, c*0.94), c*1.07
     except: pass
+
     if name.isalpha():
         try:
             df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=40)
             if df is not None and not df.empty:
                 s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-                if c > 0: return f"{name} (코인)", c, s, r, "KRW", "Crypto", min(b_min*0.98, c*0.92), c*1.10
+                if c > 0: return f"{name} (업비트 코인)", c, s, r, "KRW", "Crypto", min(b_min*0.98, c*0.92), c*1.10
         except: pass
+
     return None, 0, 0, 0, "USD", "Stock", 0, 0
 
-# (UI 대시보드 및 포트폴리오 관리 로직은 기존과 동일)
+# ==========================================
+# 5. UI 메인 대시보드 렌더링
+# ==========================================
 fg_val, fg_txt, exchange = get_market_status()
 st.sidebar.title("🛡️ Safety Theme Pulse")
 st.sidebar.metric("공포탐욕지수", f"{fg_val} ({fg_txt})")
 st.sidebar.metric("환율 (USD/KRW)", f"{exchange} 원")
+
 st.title("🚀 Tae's Balanced Smart TOP 3 Scanner")
 
 kr_live_dict = get_realtime_kr_hot_stocks()
@@ -181,32 +237,88 @@ with ThreadPoolExecutor(max_workers=20) as executor:
 
 for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$"), ("🪙 코인 TOP 3", crypto_top, ""), ("🔥 국내 테마/거래대금 대장주 TOP 3", kr_top, "₩")]:
     st.header(title)
-    if not data: st.warning("시장 데이터를 동기화 중입니다.")
-    else:
-        cols = st.columns(3)
-        for i, item in enumerate(data):
-            with cols[i]:
-                key = "종목" if "종목" in item else "코인"
-                st.markdown(f"""<div style="background-color:#1e293b; padding:20px; border-radius:10px; border-left: 5px solid #10b981;">
-                    <h3>{item[key]}</h3><ul><li>점수: <b>{item['점수']}</b></li><li>현재가: <b>{sym}{item['현재가']:,}</b></li><li>매수구간: {item['매수구간']}</li></ul></div>""", unsafe_allow_html=True)
+    if not data:
+        st.warning("시장 데이터를 동기화 중입니다.")
+        continue
+    cols = st.columns(3)
+    for i, item in enumerate(data):
+        with cols[i]:
+            key = "종목" if "종목" in item else "코인"
+            medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉"
+            st.markdown(
+                f"""
+                <div style="background-color:#1e293b; padding:20px; border-radius:10px; border-left: 5px solid #10b981; margin-bottom:10px;">
+                    <h3 style="margin-top:0;">{medal} {item[key]}</h3>
+                    <ul>
+                        <li>🔥 스윙 점수: <b>{item['점수']}점</b></li>
+                        <li>📊 실시간 RSI: <code>{item['RSI']}</code></li>
+                        <li>💰 현재가: <b>{sym}{item['현재가']:,}</b></li>
+                        <li>🎯 정석 지지타점: <span style="color:#10b981;"><b>{item['매수구간']}</b></span></li>
+                        <li>📈 목표가: <span style="color:#3b82f6;">{sym}{item['목표가']:,}</span></li>
+                        <li>📉 손절선: <span style="color:#ef4444;">{sym}{item['손절가']:,}</span></li>
+                    </ul>
+                </div>
+                """, unsafe_html=True
+            )
 
-st.header("💼 실시간 내 자산 관리")
+st.divider()
+
+# ==========================================
+# 6. 내 포트폴리오 관리 시스템
+# ==========================================
+st.header("💼 실시간 내 자산 관리 피드")
+
 with st.form(key='portfolio_form', clear_on_submit=True):
     c1, c2, c3 = st.columns([2, 1, 1])
-    n_in = c1.text_input("종목코드/티커 입력")
-    b_in = c2.number_input("내 매수가", min_value=0.0, step=0.01)
-    if c3.form_submit_button("➕ 추가"):
-        st.session_state.my_portfolio.append({"name": n_in.strip().upper(), "buy": float(b_in)})
-        save_portfolio(st.session_state.my_portfolio)
-        st.rerun()
+    n_in = c1.text_input("종목코드(예: 005930) / 티커(예: PLTR, VUZI, BTC)", placeholder="국내주식은 6자리 숫자, 해외주식/코인은 영문 티커 입력")
+    b_in = c2.number_input("내 매수가", min_value=0.0, step=0.01, format="%.2f")
+    if c3.form_submit_button("➕ 포트폴리오 추가"):
+        if n_in:
+            st.session_state.my_portfolio.append({"name": n_in.strip().upper(), "buy": float(b_in)})
+            save_portfolio(st.session_state.my_portfolio)
+            st.rerun()
 
 if st.session_state.my_portfolio:
+    to_remove = None
     for i, p in enumerate(st.session_state.my_portfolio):
         name, buy = p['name'], p['buy']
         stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = get_portfolio_market_data(name)
-        if curr > 0:
-            st.write(f"**{stock_label}**: 현재 {curr:,} | 수익률 {((curr-buy)/buy*100):.2f}%")
-            if st.button(f"삭제", key=f"del_{i}"):
-                st.session_state.my_portfolio.pop(i)
-                save_portfolio(st.session_state.my_portfolio)
-                st.rerun()
+        
+        if curr == 0:
+            st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다. (티커 오타 또는 거래소 일시 통신 지연)")
+            if st.button(f"❌ {name} 강제 누적 에러 삭제", key=f"err_del_{i}"):
+                to_remove = i
+            continue
+        
+        profit = ((curr - buy) / buy * 100) if buy > 0 else 0
+        sym = "₩" if currency == "KRW" else "$"
+        
+        st.markdown(f"### 📈 자산 대응 리포트: **{stock_label}**")
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("내 평단가", f"{sym}{buy:,.0f}" if currency == "KRW" else f"{sym}{buy:,.2f}")
+        col_m2.metric("실시간 현재가", f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}")
+        
+        color_trend = "+" if profit >= 0 else ""
+        col_m3.metric("실시간 수익률", f"{color_trend}{profit:.2f}%")
+        st.caption(f"📊 스윙 스코어: **{score}점** | 현재 RSI 상태: **{rsi}**")
+        
+        df_guide = pd.DataFrame({
+            "포지션 전략": ["현재가 스탠스", "목표 익절가 (정밀)", "리스크 손절가 (지지선 이탈)"],
+            "대응 가격 단가": [
+                f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}", 
+                f"{sym}{calc_target:,.0f}" if currency == "KRW" else f"{sym}{calc_target:,.2f}", 
+                f"{sym}{calc_stop:,.0f}" if currency == "KRW" else f"{sym}{calc_stop:,.2f}"
+            ]
+        })
+        st.table(df_guide)
+        
+        if st.button(f"🗑️ {name} 삭제", key=f"del_final_{i}"):
+            to_remove = i
+        st.markdown("<br>", unsafe_html=True)
+        
+    if to_remove is not None:
+        st.session_state.my_portfolio.pop(to_remove)
+        save_portfolio(st.session_state.my_portfolio)
+        st.rerun()
+else:
+    st.info("현재 등록된 관심 자산이 없습니다. 위 입력창에 등록해 보세요!")
