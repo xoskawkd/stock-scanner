@@ -143,10 +143,10 @@ def get_realtime_kr_hot_stocks():
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def get_hot_volume_coins():
     try:
-        tickers = pyupbit.get_tickers(fiat="KRW")
+        tickers = pyupbit.get_tickers(fiat="KRW")[:50]
         volume_rank = []
 
         for coin in tickers:
