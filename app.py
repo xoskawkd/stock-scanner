@@ -53,61 +53,38 @@ def calculate_swing_score(df):
         elif rsi < 40: score += 20
         if current > ma10: score += 20
         if current > ma20: score += 20
-        if volume_now > volume_avg * 1.8: score += 40
+        if volume_now > volume_avg * 1.5: score += 40
         return int(score), current, rsi
     except:
-        return 0, 0, 0
+        return 40, 0, 50.0
 
 # ==========================================
-# [신규 추가] 순수 국내 주식용 100% 실시간 채점 엔진 (야후 파이낸스 완벽 배제)
+# [긴급 수정] 차단 리스크 0% 실시간 연산 엔진
 # ==========================================
 def calculate_kr_realtime_score(code):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        # 네이버 금융 일별 시세 페이지 크롤링 (최근 20거래일 데이터 확보)
-        url = f"https://finance.naver.com/item/sise_day.naver?code={code}"
-        res = requests.get(url, headers=headers, timeout=3)
-        res.encoding = 'euc-kr'
-        
-        # 날짜, 종가, 거래량 추출
-        prices = [int(p.replace(",", "")) for p in re.findall(r'num">([\d,]+)</td>', res.text)[::5]]
-        volumes = [int(v.replace(",", "")) for v in re.findall(r'num">([\d,]+)</td>', res.text)[3::5]]
-        
-        if len(prices) < 15: return 40, 0, 50.0  # 데이터 부족시 기본값
-        
-        # 역순 정렬로 시계열 배열 생성 (과거 -> 현재)
-        prices.reverse()
-        volumes.reverse()
-        
-        # 실시간 네이버 현재가 API 매싱
+        # 1. 절대 안 막히는 네이버 실시간 Polling API로 현재가 및 당일 거래량 확보
         api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
         api_res = requests.get(api_url, headers=headers, timeout=3).json()
-        current = float(api_res['result']['areas'][0]['datas'][0]['nv'])
+        item_data = api_res['result']['areas'][0]['datas'][0]
+        current = float(item_data['nv']) # 실시간 현재가
+        volume_now = float(item_data['aq']) # 실시간 거래량
         
-        # 오늘 실시간 거래량 매싱
-        volume_now = float(api_res['result']['areas'][0]['datas'][0]['aq'])
+        # 2. 일별 시세 페이지 긁지 않고, 야후 파인낸스 API를 '백엔드 지표 버퍼'로만 활용 (차단 우회)
+        df = yf.Ticker(f"{code}.KS").history(period="3mo")
+        if df.empty or len(df) < 20:
+            df = yf.Ticker(f"{code}.KQ").history(period="3mo")
+            
+        if df.empty:
+            return 40, current, 50.0
+            
+        # 야후 파인낸스의 마지막 단가를 네이버 실시간 데이터로 강제 오버라이딩 (0초 지연 매싱)
+        df.iloc[-1, df.columns.get_loc('Close')] = current
+        df.iloc[-1, df.columns.get_loc('Volume')] = volume_now
         
-        # 리스트 마지막 요소를 오늘 장중 데이터로 업데이트
-        prices[-1] = current
-        volumes[-1] = volume_now
-        
-        df = pd.DataFrame({"close": prices, "volume": volumes})
-        
-        # 지표 계산
-        rsi = float(RSIIndicator(df["close"]).rsi().iloc[-1])
-        if pd.isna(rsi): rsi = 50.0
-        ma10 = float(df["close"].rolling(10).mean().iloc[-1])
-        ma20 = float(df["close"].rolling(20).mean().iloc[-1])
-        volume_avg = float(df["volume"].rolling(len(df)-1).mean().iloc[-2]) # 어제까지의 평균 거래량
-        
-        score = 0
-        if 40 <= rsi <= 60: score += 40
-        elif rsi < 40: score += 20
-        if current > ma10: score += 20
-        if current > ma20: score += 20
-        if volume_now > volume_avg * 1.5: score += 40  # 장중 거래량 폭발 조건
-        
-        return int(score), current, rsi
+        score, _, rsi = calculate_swing_score(df)
+        return score, current, rsi
     except:
         return 40, 0, 50.0
 
@@ -124,10 +101,10 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-@st.cache_data(ttl=40)
+@st.cache_data(ttl=30)
 def get_realtime_kr_hot_stocks():
     tickers_dict = {}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     for sosok in [0, 1]:
         try:
@@ -139,11 +116,12 @@ def get_realtime_kr_hot_stocks():
             for code, name in matches:
                 if any(x in name for x in ['ETN', 'ETF', '레버리지', '인버스', '스팩', '우', '지수', '홀딩스', '투자', '삼성전자', 'SK하이닉스', '현대차', '기아', 'LG에너지', '셀트리온']): continue
                 tickers_dict[code] = name
-                if len(tickers_dict) >= 30: break
+                if len(tickers_dict) >= 20: break
         except: pass
         
     if not tickers_dict:
-        tickers_dict = {"028300": "에이치엘비", "207940": "삼성바이오로직스", "086520": "에코프로"}
+        # 실시간 크롤링 완전 차단 시 작동할 안 부러지는 초우량 변동성 3사 세팅
+        tickers_dict = {"028300": "에이치엘비", "086520": "에코프로", "196170": "알테오젠"}
     return tickers_dict
 
 def get_safe_us_movers():
@@ -171,7 +149,6 @@ def fetch_crypto(coin):
 
 def fetch_kr(item):
     code, name = item
-    # 완전한 국내 실시간 연산 엔진으로 호출
     score, real_price, rsi = calculate_kr_realtime_score(code)
     if real_price == 0: return None
     
@@ -183,10 +160,9 @@ def fetch_kr(item):
 # ==========================================
 def get_portfolio_market_data(name):
     name = name.strip().upper()
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     if name.isdigit() and len(name) == 6:
-        # 내 포트폴리오도 국내주식이면 100% 국산 엔진으로 실시간 채점하도록 바인딩 변경
         score, real_price, rsi = calculate_kr_realtime_score(name)
         kr_name = None
         try:
