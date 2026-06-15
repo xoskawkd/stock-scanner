@@ -33,60 +33,78 @@ if 'my_portfolio' not in st.session_state:
     st.session_state.my_portfolio = load_portfolio()
 
 # ==========================================
-# 2. 통합 핵심 분석 엔진
+# 2. 통합 핵심 분석 및 [정석 지지선] 타점 산출 엔진
 # ==========================================
-def calculate_swing_score(df):
-    if df is None or len(df) < 20: return 0, 0, 0
+def calculate_swing_score_and_bands(df):
+    if df is None or len(df) < 20: return 0, 0, 0, "계산불가", 0, 0
     try:
         df = df.copy()
         df.columns = [c.lower() for c in df.columns]
         current = float(df["close"].iloc[-1])
         rsi = float(RSIIndicator(df["close"]).rsi().iloc[-1])
+        
+        # ⚠️ 핵심 업그레이드: 진짜 지지선(10일 이동평균선, 20일 이동평균선) 확보
         ma10 = float(df["close"].rolling(10).mean().iloc[-1])
         ma20 = float(df["close"].rolling(20).mean().iloc[-1])
         
         volume_now = float(df["volume"].iloc[-1])
         volume_avg = float(df["volume"].rolling(20).mean().iloc[-1])
         
+        # 점수 계산 체계
         score = 0
         if 40 <= rsi <= 60: score += 40
         elif rsi < 40: score += 20
         if current > ma10: score += 20
         if current > ma20: score += 20
         if volume_now > volume_avg * 1.5: score += 40
-        return int(score), current, rsi
+        
+        # 🎯 [정석 지지선 방식 수식]: 10일선과 20일선 사이를 매수 밴드로 정의 (고정 타점)
+        # 만약 10일선이 20일선보다 위에 있다면 (정배열 눌림목 정석)
+        if ma10 >= ma20:
+            buy_min, buy_max = ma20, ma10
+        else:
+            buy_min, buy_max = ma10, ma20
+            
+        return int(score), current, rsi, buy_min, buy_max, ma20
     except:
-        return 40, 0, 50.0
+        return 40, 0, 50.0, 0, 0, 0
 
 # ==========================================
-# [긴급 수정] 차단 리스크 0% 실시간 연산 엔진
+# 100% 국산 실시간 매싱 + 지지선 타점 연산 결합
 # ==========================================
 def calculate_kr_realtime_score(code):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        # 1. 절대 안 막히는 네이버 실시간 Polling API로 현재가 및 당일 거래량 확보
+        # 1. 네이버 실시간 Polling API 가동
         api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
         api_res = requests.get(api_url, headers=headers, timeout=3).json()
         item_data = api_res['result']['areas'][0]['datas'][0]
-        current = float(item_data['nv']) # 실시간 현재가
-        volume_now = float(item_data['aq']) # 실시간 거래량
+        current = float(item_data['nv']) 
+        volume_now = float(item_data['aq']) 
         
-        # 2. 일별 시세 페이지 긁지 않고, 야후 파인낸스 API를 '백엔드 지표 버퍼'로만 활용 (차단 우회)
+        # 2. 차단 리스크 없는 우회용 야후 파이낸스 버퍼 호출
         df = yf.Ticker(f"{code}.KS").history(period="3mo")
         if df.empty or len(df) < 20:
             df = yf.Ticker(f"{code}.KQ").history(period="3mo")
             
         if df.empty:
-            return 40, current, 50.0
+            return 40, current, 50.0, f"{int(current*0.96):,} ~ {int(current):,}", int(current*1.07), int(current*0.94)
             
-        # 야후 파인낸스의 마지막 단가를 네이버 실시간 데이터로 강제 오버라이딩 (0초 지연 매싱)
+        # 마지막 행 실시간 오버라이딩 매싱
         df.iloc[-1, df.columns.get_loc('Close')] = current
         df.iloc[-1, df.columns.get_loc('Volume')] = volume_now
         
-        score, _, rsi = calculate_swing_score(df)
-        return score, current, rsi
+        score, _, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
+        
+        # 가독성 인터페이스 포맷팅
+        buy_range = f"{int(buy_min):,} ~ {int(buy_max):,}"
+        target_price = int(current * 1.07)
+        # 정석 손절선: 지지선의 최하단인 20일선(buy_min)을 -2% 하회하거나 현재가 기준 -6% 중 보수적 적용
+        stop_price = int(min(buy_min * 0.98, current * 0.94))
+        
+        return score, current, rsi, buy_range, target_price, stop_price
     except:
-        return 40, 0, 50.0
+        return 40, 0, 50.0, "데이터 동기화 실패", 0, 0
 
 # ==========================================
 # 3. 실시간 마켓 현황 및 추출 로직
@@ -120,7 +138,6 @@ def get_realtime_kr_hot_stocks():
         except: pass
         
     if not tickers_dict:
-        # 실시간 크롤링 완전 차단 시 작동할 안 부러지는 초우량 변동성 3사 세팅
         tickers_dict = {"028300": "에이치엘비", "086520": "에코프로", "196170": "알테오젠"}
     return tickers_dict
 
@@ -131,39 +148,39 @@ def fetch_us(stock):
     try:
         df = yf.Ticker(stock).history(period="3mo")
         if df.empty: return None
-        score, current, rsi = calculate_swing_score(df)
+        score, current, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
         if current == 0: return None
         return {"ticker": stock, "종목": stock, "점수": score, "현재가": round(current, 2), "RSI": round(rsi, 1),
-                "매수구간": f"${round(current * 0.96, 2)} ~ ${round(current, 2)}", "목표가": round(current * 1.07, 2), "손절가": round(current * 0.94, 2)}
+                "매수구간": f"${round(buy_min, 2)} ~ ${round(buy_max, 2)}", "목표가": round(current * 1.07, 2), "손절가": round(min(buy_min*0.98, current * 0.94), 2)}
     except: return None
 
 def fetch_crypto(coin):
     try:
         df = pyupbit.get_ohlcv(coin, interval="day", count=40)
         if df is None or df.empty: return None
-        score, current, rsi = calculate_swing_score(df)
+        score, current, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
         if current == 0: return None
         return {"ticker": None, "코인": coin.replace("KRW-", ""), "점수": score, "현재가": current, "RSI": round(rsi, 1),
-                "매수구간": f"{current * 0.96:,.0f} ~ {current:,.0f}", "목표가": round(current * 1.08, 0), "손절가": round(current * 0.94, 0)}
+                "매수구간": f"{int(buy_min):,} ~ {int(buy_max):,}", "목표가": round(current * 1.08, 0), "손절가": round(min(buy_min*0.98, current * 0.94), 0)}
     except: return None
 
 def fetch_kr(item):
     code, name = item
-    score, real_price, rsi = calculate_kr_realtime_score(code)
+    score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(code)
     if real_price == 0: return None
     
     return {"ticker": code, "종목": name, "점수": score, "현재가": int(real_price), "RSI": round(rsi, 1),
-            "매수구간": f"{int(real_price * 0.96):,} ~ {int(real_price):,}", "목표가": int(real_price * 1.07), "손절가": int(real_price * 0.94)}
+            "매수구간": buy_range, "목표가": target_price, "손절가": stop_price}
 
 # ==========================================
-# 4. 포트폴리오 전용 - 100% 실시간 단가 획득 보장 로직
+# 4. 포트폴리오 자산 실시간 매싱 연동
 # ==========================================
 def get_portfolio_market_data(name):
     name = name.strip().upper()
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     if name.isdigit() and len(name) == 6:
-        score, real_price, rsi = calculate_kr_realtime_score(name)
+        score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(name)
         kr_name = None
         try:
             url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{name}"
@@ -173,24 +190,24 @@ def get_portfolio_market_data(name):
         
         if real_price > 0:
             final_name = kr_name if kr_name else f"국내주식 {name}"
-            return f"{name} ({final_name})", real_price, score, rsi, "KRW", "Stock"
+            return f"{name} ({final_name})", real_price, score, rsi, "KRW", "Stock", stop_price, target_price
 
     try:
         df = yf.Ticker(name).history(period="3mo")
         if not df.empty and len(df) >= 5:
-            s, c, r = calculate_swing_score(df)
-            if c > 0: return name, c, s, r, "USD", "Stock"
+            s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+            if c > 0: return name, c, s, r, "USD", "Stock", min(b_min*0.98, c*0.94), c*1.07
     except: pass
 
     if name.isalpha():
         try:
             df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=40)
             if df is not None and not df.empty:
-                s, c, r = calculate_swing_score(df)
-                if c > 0: return f"{name} (업비트 코인)", c, s, r, "KRW", "Crypto"
+                s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+                if c > 0: return f"{name} (업비트 코인)", c, s, r, "KRW", "Crypto", min(b_min*0.98, c*0.92), c*1.10
         except: pass
 
-    return None, 0, 0, 0, "USD", "Stock"
+    return None, 0, 0, 0, "USD", "Stock", 0, 0
 
 # ==========================================
 # 5. UI 메인 대시보드 렌더링
@@ -224,13 +241,13 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
             medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉"
             st.markdown(
                 f"""
-                <div style="background-color:#1e293b; padding:20px; border-radius:10px; border-left: 5px solid #3b82f6; margin-bottom:10px;">
+                <div style="background-color:#1e293b; padding:20px; border-radius:10px; border-left: 5px solid #10b981; margin-bottom:10px;">
                     <h3 style="margin-top:0;">{medal} {item[key]}</h3>
                     <ul>
                         <li>🔥 스윙 점수: <b>{item['점수']}점</b></li>
                         <li>📊 실시간 RSI: <code>{item['RSI']}</code></li>
                         <li>💰 현재가: <b>{sym}{item['현재가']:,}</b></li>
-                        <li>🎯 권장타점: <span style="color:#10b981;"><b>{item['매수구간']}</b></span></li>
+                        <li>🎯 정석 지지타점: <span style="color:#10b981;"><b>{item['매수구간']}</b></span></li>
                         <li>📈 목표가: <span style="color:#3b82f6;">{sym}{item['목표가']:,}</span></li>
                         <li>📉 손절선: <span style="color:#ef4444;">{sym}{item['손절가']:,}</span></li>
                     </ul>
@@ -241,7 +258,7 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
 st.divider()
 
 # ==========================================
-# 6. 내 포트폴리오 관리 실시간 시스템
+# 6. 내 포트폴리오 관리 시스템
 # ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
 
@@ -259,7 +276,7 @@ if st.session_state.my_portfolio:
     to_remove = None
     for i, p in enumerate(st.session_state.my_portfolio):
         name, buy = p['name'], p['buy']
-        stock_label, curr, score, rsi, currency, cat = get_portfolio_market_data(name)
+        stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = get_portfolio_market_data(name)
         
         if curr == 0:
             st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다. (티커 오타 또는 거래소 일시 통신 지연)")
@@ -269,8 +286,6 @@ if st.session_state.my_portfolio:
         
         profit = ((curr - buy) / buy * 100) if buy > 0 else 0
         sym = "₩" if currency == "KRW" else "$"
-        stop_rate = 0.08 if cat == "Crypto" else 0.06
-        target_rate = 0.10 if cat == "Crypto" else 0.07
         
         st.markdown(f"### 📈 자산 대응 리포트: **{stock_label}**")
         col_m1, col_m2, col_m3 = st.columns(3)
@@ -282,11 +297,11 @@ if st.session_state.my_portfolio:
         st.caption(f"📊 스윙 스코어: **{score}점** | 현재 RSI 상태: **{rsi}**")
         
         df_guide = pd.DataFrame({
-            "포지션 전략": ["현재가 스탠스", f"목표 익절가 (+{int(target_rate*100)}%)", f"리스크 손절가 (-{int(stop_rate*100)}%)"],
+            "포지션 전략": ["현재가 스탠스", "목표 익절가 (정밀)", "리스크 손절가 (지지선 이탈)"],
             "대응 가격 단가": [
                 f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}", 
-                f"{sym}{curr*(1+target_rate):,.0f}" if currency == "KRW" else f"{sym}{curr*(1+target_rate):,.2f}", 
-                f"{sym}{curr*(1-stop_rate):,.0f}" if currency == "KRW" else f"{sym}{curr*(1-stop_rate):,.2f}"
+                f"{sym}{calc_target:,.0f}" if currency == "KRW" else f"{sym}{calc_target:,.2f}", 
+                f"{sym}{calc_stop:,.0f}" if currency == "KRW" else f"{sym}{calc_stop:,.2f}"
             ]
         })
         st.table(df_guide)
