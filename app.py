@@ -158,20 +158,16 @@ def fetch_crypto(coin):
     try:
         df = pyupbit.get_ohlcv(coin, interval="day", count=40)
         if df is None or df.empty: return None
-        # [중요] 거래량 필터링(is_crypto=True)이 적용된 로직을 호출합니다.
-        score, current, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df, is_crypto=True)
-        # 점수가 0점(거래량 미달)이면 리스트에서 제외
-        if score <= 0 or current == 0: return None
-        
+        score, current, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
+        if current == 0: return None
         return {"ticker": None, "코인": coin.replace("KRW-", ""), "점수": score, "현재가": current, "RSI": round(rsi, 1),
-                "매수구간": f"{int(buy_min):,} ~ {int(buy_max):,}", "목표가": int(current * 1.08), "손절가": int(min(buy_min*0.98, current * 0.94))}
+                "매수구간": f"{int(buy_min):,} ~ {int(buy_max):,}", "목표가": round(current * 1.08, 0), "손절가": round(min(buy_min*0.98, current * 0.94), 0)}
     except: return None
 
 def fetch_kr(item):
     code, name = item
     score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(code)
-    # 국내 주식은 이미 실시간 매싱 엔진에서 필터링이 되므로 score <= 0 체크 유지
-    if score <= 0 or real_price == 0: return None
+    if real_price == 0: return None
     
     return {"ticker": code, "종목": name, "점수": score, "현재가": int(real_price), "RSI": round(rsi, 1),
             "매수구간": buy_range, "목표가": target_price, "손절가": stop_price}
