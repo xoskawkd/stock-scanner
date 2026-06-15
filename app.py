@@ -159,7 +159,7 @@ def fetch_crypto(coin):
         df = pyupbit.get_ohlcv(coin, interval="day", count=40)
         if df is None or df.empty: return None
         
-        # ⚠️ 코인 거래량 필터링 로직 추가
+        # ⚠️ 수정된 거래량 2배 필터링 로직
         volume_now = float(df['volume'].iloc[-1])
         volume_avg = float(df['volume'].rolling(20).mean().iloc[-1])
         if volume_now < (volume_avg * 2.0): return None
