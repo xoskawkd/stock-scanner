@@ -73,11 +73,9 @@ def get_market_status():
 
 @st.cache_data(ttl=60)
 def get_realtime_kr_hot_stocks():
-    """삼성/하이닉스 같은 무거운 주식 전면 제외, 실시간 거래대금 상위 급등주만 추출"""
     tickers_dict = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    # 네이버 거래대금 상위 페이지 (코스피/코스닥 핫종목 다이렉트 소스)
     for sosok in [0, 1]:
         try:
             url = f"https://finance.naver.com/sise/sise_tr_amount.naver?sosok={sosok}"
@@ -86,14 +84,12 @@ def get_realtime_kr_hot_stocks():
             matches = re.findall(r'href="/item/main\.naver\?code=(\d{6})".*?class="tltle">(.*?)</a>', res.text)
             
             for code, name in matches:
-                # 엉덩이 무거운 대형주 및 방해 종목 필터링 제거
                 if any(x in name for x in ['ETN', 'ETF', '레버리지', '인버스', '스팩', '우', '지수', '홀딩스', '투자', '삼성전자', 'SK하이닉스', '현대차', '기아', 'LG에너지', '셀트리온']): continue
                 tickers_dict[code] = name
                 if len(tickers_dict) >= 25: break
         except: pass
         
     if not tickers_dict:
-        # 삑날 때를 대비한 백업조차 요즘 핫한 변동성 종목으로 배치
         tickers_dict = {"000500": "가온전선", "011000": "진원생명과학", "234340": "씨티씨바이오"}
     return tickers_dict
 
@@ -120,18 +116,35 @@ def fetch_crypto(coin):
                 "매수구간": f"{current * 0.96:,.0f} ~ {current:,.0f}", "목표가": round(current * 1.08, 0), "손절가": round(current * 0.94, 0)}
     except: return None
 
+# [핵심 수정] 국내 주식 TOP 3 데이터 연산 시 네이버 실시간 현재가 다이렉트 바인딩
 def fetch_kr(item):
     code, name = item
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    # 1. 실시간 가격 네이버 API 호출 (지연 0초)
+    real_price = 0
+    try:
+        url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
+        res = requests.get(url, headers=headers, timeout=3).json()
+        real_price = float(res['result']['areas'][0]['datas'][0]['nv'])
+    except: pass
+
+    # 2. 지표 연산용 백엔드 버퍼
+    score, rsi = 40, 50.0
     for suffix in [".KS", ".KQ"]:
         try:
             df = yf.Ticker(f"{code}{suffix}").history(period="3mo")
             if df.empty or len(df) < 15: continue
-            score, current, rsi = calculate_swing_score(df)
-            if current == 0: continue
-            return {"ticker": code, "종목": name, "점수": score, "현재가": int(current), "RSI": round(rsi, 1),
-                    "매수구간": f"{int(current * 0.96):,} ~ {int(current):,}", "목표가": int(current * 1.07), "손절가": int(current * 0.94)}
+            s, c, r = calculate_swing_score(df)
+            score, rsi = s, r
+            if real_price == 0: real_price = c
+            break
         except: pass
-    return None
+        
+    if real_price == 0: return None
+    
+    return {"ticker": code, "종목": name, "점수": score, "현재가": int(real_price), "RSI": round(rsi, 1),
+            "매수구간": f"{int(real_price * 0.96):,} ~ {int(real_price):,}", "목표가": int(real_price * 1.07), "손절가": int(real_price * 0.94)}
 
 # ==========================================
 # 4. 포트폴리오 전용 - 100% 실시간 단가 획득 보장 로직
@@ -144,15 +157,13 @@ def get_portfolio_market_data(name):
         real_price = 0
         kr_name = None
         
-        # [1단계] 네이버 실시간 주가 현재가 전용 JSON 데이터 다이렉트 스크랩 (절대 안 막힘)
         try:
             url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{name}"
             res = requests.get(url, headers=headers, timeout=4).json()
             item_data = res['result']['areas'][0]['datas'][0]
-            real_price = float(item_data['nv'])  # 실시간 현재가 변수 추출
-            kr_name = item_data['nm']            # 실시간 한글 종목명 추출 (가온전선 100% 호출)
+            real_price = float(item_data['nv'])
+            kr_name = item_data['nm']
         except:
-            # 백업 크롤링
             try:
                 web_url = f"https://finance.naver.com/item/main.naver?code={name}"
                 r = requests.get(web_url, headers=headers, timeout=4)
@@ -163,7 +174,6 @@ def get_portfolio_market_data(name):
                 if n_match: kr_name = n_match.group(1).split(":")[0].strip()
             except: pass
 
-        # [2단계] 기술지표(RSI/스윙 점수)는 야후 파인낸스로 보완 연산
         score, rsi = 40, 41.8
         for suffix in [".KS", ".KQ"]:
             try:
@@ -171,7 +181,6 @@ def get_portfolio_market_data(name):
                 if not df.empty:
                     s, c, r = calculate_swing_score(df)
                     score, rsi = s, r
-                    # 만약 네이버 API가 일시 지연될 경우 야후 가격이라도 대체 투입하여 에러창 원천 봉쇄
                     if real_price == 0: real_price = c
                     break
             except: pass
@@ -180,7 +189,6 @@ def get_portfolio_market_data(name):
             final_name = kr_name if kr_name else f"국내주식 {name}"
             return f"{name} ({final_name})", real_price, score, rsi, "KRW", "Stock"
 
-    # 미국 주식 처리
     try:
         df = yf.Ticker(name).history(period="3mo")
         if not df.empty and len(df) >= 5:
@@ -188,7 +196,6 @@ def get_portfolio_market_data(name):
             if c > 0: return name, c, s, r, "USD", "Stock"
     except: pass
 
-    # 코인 처리
     if name.isalpha():
         try:
             df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=40)
