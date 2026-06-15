@@ -143,7 +143,42 @@ def get_realtime_kr_hot_stocks():
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
+@st.cache_data(ttl=60)
+def get_hot_volume_coins():
+    try:
+        tickers = pyupbit.get_tickers(fiat="KRW")
+        volume_rank = []
 
+        for coin in tickers:
+            try:
+                df = pyupbit.get_ohlcv(coin, interval="day", count=30)
+
+                if df is None or len(df) < 25:
+                    continue
+
+                today_vol = float(df["volume"].iloc[-1])
+                avg_vol = float(df["volume"].rolling(20).mean().iloc[-1])
+
+                if avg_vol <= 0:
+                    continue
+
+                volume_ratio = today_vol / avg_vol
+
+                volume_rank.append((coin, volume_ratio))
+
+            except:
+                continue
+
+        volume_rank = sorted(
+            volume_rank,
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        return [x[0] for x in volume_rank[:30]]
+
+    except:
+        return ["KRW-BTC", "KRW-ETH", "KRW-XRP"]
 def fetch_us(stock):
     try:
         df = yf.Ticker(stock).history(period="3mo")
@@ -157,12 +192,40 @@ def fetch_us(stock):
 def fetch_crypto(coin):
     try:
         df = pyupbit.get_ohlcv(coin, interval="day", count=40)
-        if df is None or df.empty: return None
+
+        if df is None or df.empty:
+            return None
+
         score, current, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
-        if current == 0: return None
-        return {"ticker": None, "코인": coin.replace("KRW-", ""), "점수": score, "현재가": current, "RSI": round(rsi, 1),
-                "매수구간": f"{int(buy_min):,} ~ {int(buy_max):,}", "목표가": round(current * 1.08, 0), "손절가": round(min(buy_min*0.98, current * 0.94), 0)}
-    except: return None
+
+        if current == 0:
+            return None
+
+        vol_now = float(df["volume"].iloc[-1])
+        vol_avg = float(df["volume"].rolling(20).mean().iloc[-1])
+
+        volume_ratio = 1
+
+        if vol_avg > 0:
+            volume_ratio = vol_now / vol_avg
+
+        volume_bonus = min(int(volume_ratio * 10), 50)
+
+        final_score = score + volume_bonus
+
+        return {
+            "ticker": None,
+            "코인": coin.replace("KRW-", ""),
+            "점수": final_score,
+            "현재가": current,
+            "RSI": round(rsi, 1),
+            "매수구간": f"{int(buy_min):,} ~ {int(buy_max):,}",
+            "목표가": round(current * 1.08, 0),
+            "손절가": round(min(buy_min * 0.98, current * 0.94), 0)
+        }
+
+    except:
+        return None
 
 def fetch_kr(item):
     code, name = item
@@ -221,8 +284,7 @@ st.title("🚀 Tae's Balanced Smart TOP 3 Scanner")
 
 kr_live_dict = get_realtime_kr_hot_stocks()
 us_live_list = get_safe_us_movers()
-try: coins_list = pyupbit.get_tickers(fiat="KRW")[:30]
-except: coins_list = ["KRW-BTC", "KRW-ETH", "KRW-XRP"]
+coins_list = get_hot_volume_coins()
 
 with ThreadPoolExecutor(max_workers=20) as executor:
     us_top = sorted([r for r in executor.map(fetch_us, us_live_list) if r], key=lambda x: x["점수"], reverse=True)[:3]
