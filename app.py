@@ -73,36 +73,40 @@ def calculate_swing_score_and_bands(df):
 # 100% 국산 실시간 매싱 + 지지선 타점 연산 결합
 # ==========================================
 def calculate_kr_realtime_score(code):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    # User-Agent를 조금 더 일반적인 브라우저 형태로 강화
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": f"https://finance.naver.com/item/main.naver?code={code}"
+    }
     try:
-        # 네이버 실시간 Polling API 호출
         api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
-        res = requests.get(api_url, headers=headers, timeout=3).json()
-        item = res['result']['areas'][0]['datas'][0]
+        res = requests.get(api_url, headers=headers, timeout=5) # 타임아웃 5초로 여유 확보
         
-        # 네이버에서 제공하는 필수 정보 추출
-        current = float(item['nv'])   # 현재가
-        prev_close = float(item['pv']) # 전일 종가
-        change_rate = float(item['cr']) # 등락률
+        if res.status_code != 200:
+            return 0, 0, 50.0, "API 연결실패", 0, 0
+            
+        json_data = res.json()
+        # 데이터 유효성 검사 (데이터가 비어있는지 확인)
+        areas = json_data.get('result', {}).get('areas', [])
+        if not areas or not areas[0].get('datas'):
+            return 0, 0, 50.0, "데이터 없음", 0, 0
+            
+        item = areas[0]['datas'][0]
         
-        # 1. 스윙 점수 산출 로직 (야후 데이터 없이 네이버 정보로 대체)
-        # 등락률이 좋거나 거래량이 많을수록 높은 점수 부여
-        score = 0
-        if change_rate > 3.0: score += 50
-        elif change_rate > 0: score += 30
-        else: score += 10
+        current = float(item.get('nv', 0))
+        change_rate = float(item.get('cr', 0))
         
-        # 2. 매수/목표/손절가 산출 (현재가 기준 보수적 고정 산출)
-        # 0.98~0.96배 지점(눌림목 예상) ~ 목표가 1.07배 ~ 손절가 0.94배
+        if current == 0: return 0, 0, 50.0, "거래정지/정보없음", 0, 0
+        
+        # 스윙 점수 계산
+        score = 50 if change_rate > 3.0 else (30 if change_rate > 0 else 10)
+        
         buy_range = f"{int(current * 0.96):,} ~ {int(current * 0.98):,}"
-        target_price = int(current * 1.07)
-        stop_price = int(current * 0.94)
+        return score, current, 50.0, buy_range, int(current * 1.07), int(current * 0.94)
         
-        return score, current, 50.0, buy_range, target_price, stop_price
     except Exception as e:
-        # 에러 발생 시 로그 출력 (어떤 종목에서 문제인지 확인 가능)
-        print(f"네이버 데이터 호출 에러 ({code}): {e}")
-        return 0, 0, 50.0, "데이터 수신 불가", 0, 0
+        print(f"DEBUG ERROR ({code}): {e}")
+        return 0, 0, 50.0, "통신오류", 0, 0
 
 # ==========================================
 # 3. 실시간 마켓 현황 및 추출 로직
