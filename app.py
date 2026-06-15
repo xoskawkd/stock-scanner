@@ -75,36 +75,34 @@ def calculate_swing_score_and_bands(df):
 def calculate_kr_realtime_score(code):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        # 1. 네이버 실시간 Polling API 가동
+        # 네이버 실시간 Polling API 호출
         api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
-        api_res = requests.get(api_url, headers=headers, timeout=3).json()
-        item_data = api_res['result']['areas'][0]['datas'][0]
-        current = float(item_data['nv']) 
-        volume_now = float(item_data['aq']) 
+        res = requests.get(api_url, headers=headers, timeout=3).json()
+        item = res['result']['areas'][0]['datas'][0]
         
-        # 2. 차단 리스크 없는 우회용 야후 파이낸스 버퍼 호출
-        df = yf.Ticker(f"{code}.KS").history(period="3mo")
-        if df.empty or len(df) < 20:
-            df = yf.Ticker(f"{code}.KQ").history(period="3mo")
-            
-        if df.empty:
-            return 40, current, 50.0, f"{int(current*0.96):,} ~ {int(current):,}", int(current*1.07), int(current*0.94)
-            
-        # 마지막 행 실시간 오버라이딩 매싱
-        df.iloc[-1, df.columns.get_loc('Close')] = current
-        df.iloc[-1, df.columns.get_loc('Volume')] = volume_now
+        # 네이버에서 제공하는 필수 정보 추출
+        current = float(item['nv'])   # 현재가
+        prev_close = float(item['pv']) # 전일 종가
+        change_rate = float(item['cr']) # 등락률
         
-        score, _, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
+        # 1. 스윙 점수 산출 로직 (야후 데이터 없이 네이버 정보로 대체)
+        # 등락률이 좋거나 거래량이 많을수록 높은 점수 부여
+        score = 0
+        if change_rate > 3.0: score += 50
+        elif change_rate > 0: score += 30
+        else: score += 10
         
-        # 가독성 인터페이스 포맷팅
-        buy_range = f"{int(buy_min):,} ~ {int(buy_max):,}"
+        # 2. 매수/목표/손절가 산출 (현재가 기준 보수적 고정 산출)
+        # 0.98~0.96배 지점(눌림목 예상) ~ 목표가 1.07배 ~ 손절가 0.94배
+        buy_range = f"{int(current * 0.96):,} ~ {int(current * 0.98):,}"
         target_price = int(current * 1.07)
-        # 정석 손절선: 지지선의 최하단인 20일선(buy_min)을 -2% 하회하거나 현재가 기준 -6% 중 보수적 적용
-        stop_price = int(min(buy_min * 0.98, current * 0.94))
+        stop_price = int(current * 0.94)
         
-        return score, current, rsi, buy_range, target_price, stop_price
-    except:
-        return 40, 0, 50.0, "데이터 동기화 실패", 0, 0
+        return score, current, 50.0, buy_range, target_price, stop_price
+    except Exception as e:
+        # 에러 발생 시 로그 출력 (어떤 종목에서 문제인지 확인 가능)
+        print(f"네이버 데이터 호출 에러 ({code}): {e}")
+        return 0, 0, 50.0, "데이터 수신 불가", 0, 0
 
 # ==========================================
 # 3. 실시간 마켓 현황 및 추출 로직
