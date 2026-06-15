@@ -154,13 +154,13 @@ def fetch_us(stock):
                 "매수구간": f"${round(buy_min, 2)} ~ ${round(buy_max, 2)}", "목표가": round(current * 1.07, 2), "손절가": round(min(buy_min*0.98, current * 0.94), 2)}
     except: return None
 
-# 🎯 [핵심] 거래대금 50억 필터 적용된 코인 함수
+# 🎯 [핵심] 거래대금 50억 필터 적용
 def fetch_crypto(coin):
     try:
         df = pyupbit.get_ohlcv(coin, interval="day", count=40)
         if df is None or df.empty: return None
         
-        # [거래대금 50억 필터 로직]
+        # ⚠️ 거래대금 50억 미만 필터링
         if (df['volume'].iloc[-1] * df['close'].iloc[-1]) < 5000000000:
             return None
             
@@ -238,7 +238,7 @@ with ThreadPoolExecutor(max_workers=20) as executor:
 for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$"), ("🪙 코인 TOP 3", crypto_top, ""), ("🔥 국내 테마/거래대금 대장주 TOP 3", kr_top, "₩")]:
     st.header(title)
     if not data:
-        st.warning("시장 데이터를 동기화 중입니다.")
+        st.warning("시장 데이터를 동기화 중이거나 거래대금 50억 미만입니다.")
         continue
     cols = st.columns(3)
     for i, item in enumerate(data):
@@ -258,7 +258,7 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
                         <li>📉 손절선: <span style="color:#ef4444;">{sym}{item['손절가']:,}</span></li>
                     </ul>
                 </div>
-                """, unsafe_html=True
+                """, unsafe_allow_html=True
             )
 
 st.divider()
@@ -314,7 +314,7 @@ if st.session_state.my_portfolio:
         
         if st.button(f"🗑️ {name} 삭제", key=f"del_final_{i}"):
             to_remove = i
-        st.markdown("<br>", unsafe_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
         
     if to_remove is not None:
         st.session_state.my_portfolio.pop(to_remove)
