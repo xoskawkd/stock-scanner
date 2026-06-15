@@ -36,45 +36,70 @@ if 'my_portfolio' not in st.session_state:
 # 2. 통합 핵심 분석 및 [정석 지지선] 타점 산출 엔진
 # ==========================================
 def calculate_swing_score_and_bands(df):
-    if df is None or len(df) < 60: return 0, 0, 0, "계산불가", 0, 0
+
+    if df is None or len(df) < 20: return 0, 0, 0, "계산불가", 0, 0
+
     try:
+
         df = df.copy()
+
         df.columns = [c.lower() for c in df.columns]
+
         current = float(df["close"].iloc[-1])
+
         rsi = float(RSIIndicator(df["close"]).rsi().iloc[-1])
+
         
-        # 이동평균선 3종 세트
+
+        # ⚠️ 핵심 업그레이드: 진짜 지지선(10일 이동평균선, 20일 이동평균선) 확보
+
         ma10 = float(df["close"].rolling(10).mean().iloc[-1])
+
         ma20 = float(df["close"].rolling(20).mean().iloc[-1])
-        ma60 = float(df["close"].rolling(60).mean().iloc[-1])
+
         
-        vol_now = float(df["volume"].iloc[-1])
-        vol_avg = float(df["volume"].rolling(20).mean().iloc[-1])
-        vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1
+
+        volume_now = float(df["volume"].iloc[-1])
+
+        volume_avg = float(df["volume"].rolling(20).mean().iloc[-1])
+
         
-        # 1. 점수 계산 체계 (개선: 거래량 과열 시 점수 차감)
+
+        # 점수 계산 체계
+
         score = 0
+
         if 40 <= rsi <= 60: score += 40
+
         elif rsi < 40: score += 20
-        
-        # 거래량 필터: 평균의 0.8배 ~ 1.3배일 때가 가장 이상적인 눌림목
-        if 0.8 <= vol_ratio <= 1.3: score += 40
-        elif vol_ratio > 2.0: score -= 20 # 이미 거래량이 터진 상투 구간은 점수 차감
-            
+
         if current > ma10: score += 20
+
         if current > ma20: score += 20
+
+        if volume_now > volume_avg * 1.5: score += 40
+
         
-        # 2. 동적 타점 로직 (시장 상황별 밴드 확장)
-        if rsi < 40: 
-            # 시장 급락(과매도) 시 20일~60일선까지 넓게 확장
-            buy_min, buy_max = ma60, ma20
-        else: 
-            # 일반적인 눌림목 시 10일~20일선 사용
-            buy_min, buy_max = (ma20, ma10) if ma10 >= ma20 else (ma10, ma20)
+
+        # 🎯 [정석 지지선 방식 수식]: 10일선과 20일선 사이를 매수 밴드로 정의 (고정 타점)
+
+        # 만약 10일선이 20일선보다 위에 있다면 (정배열 눌림목 정석)
+
+        if ma10 >= ma20:
+
+            buy_min, buy_max = ma20, ma10
+
+        else:
+
+            buy_min, buy_max = ma10, ma20
+
             
-        return int(score), current, rsi, f"{int(buy_min):,} ~ {int(buy_max):,}", int(current*1.07), int(min(buy_min*0.98, current*0.94))
+
+        return int(score), current, rsi, buy_min, buy_max, ma20
+
     except:
-        return 0, 0, 50.0, "계산불가", 0, 0
+
+        return 40, 0, 50.0, 0, 0, 0
 # ==========================================
 # 100% 국산 실시간 매싱 + 지지선 타점 연산 결합
 # ==========================================
