@@ -36,70 +36,45 @@ if 'my_portfolio' not in st.session_state:
 # 2. 통합 핵심 분석 및 [정석 지지선] 타점 산출 엔진
 # ==========================================
 def calculate_swing_score_and_bands(df):
-
-    if df is None or len(df) < 20: return 0, 0, 0, "계산불가", 0, 0
-
+    if df is None or len(df) < 60: return 0, 0, 0, "계산불가", 0, 0
     try:
-
         df = df.copy()
-
         df.columns = [c.lower() for c in df.columns]
-
         current = float(df["close"].iloc[-1])
-
         rsi = float(RSIIndicator(df["close"]).rsi().iloc[-1])
-
         
-
-        # ⚠️ 핵심 업그레이드: 진짜 지지선(10일 이동평균선, 20일 이동평균선) 확보
-
+        # 이동평균선 3종 세트
         ma10 = float(df["close"].rolling(10).mean().iloc[-1])
-
         ma20 = float(df["close"].rolling(20).mean().iloc[-1])
-
+        ma60 = float(df["close"].rolling(60).mean().iloc[-1])
         
-
-        volume_now = float(df["volume"].iloc[-1])
-
-        volume_avg = float(df["volume"].rolling(20).mean().iloc[-1])
-
+        vol_now = float(df["volume"].iloc[-1])
+        vol_avg = float(df["volume"].rolling(20).mean().iloc[-1])
+        vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1
         
-
-        # 점수 계산 체계
-
+        # 1. 점수 계산 체계 (개선: 거래량 과열 시 점수 차감)
         score = 0
-
         if 40 <= rsi <= 60: score += 40
-
         elif rsi < 40: score += 20
-
-        if current > ma10: score += 20
-
-        if current > ma20: score += 20
-
-        if volume_now > volume_avg * 1.5: score += 40
-
         
-
-        # 🎯 [정석 지지선 방식 수식]: 10일선과 20일선 사이를 매수 밴드로 정의 (고정 타점)
-
-        # 만약 10일선이 20일선보다 위에 있다면 (정배열 눌림목 정석)
-
-        if ma10 >= ma20:
-
-            buy_min, buy_max = ma20, ma10
-
-        else:
-
-            buy_min, buy_max = ma10, ma20
-
+        # 거래량 필터: 평균의 0.8배 ~ 1.3배일 때가 가장 이상적인 눌림목
+        if 0.8 <= vol_ratio <= 1.3: score += 40
+        elif vol_ratio > 2.0: score -= 20 # 이미 거래량이 터진 상투 구간은 점수 차감
             
-
-        return int(score), current, rsi, buy_min, buy_max, ma20
-
+        if current > ma10: score += 20
+        if current > ma20: score += 20
+        
+        # 2. 동적 타점 로직 (시장 상황별 밴드 확장)
+        if rsi < 40: 
+            # 시장 급락(과매도) 시 20일~60일선까지 넓게 확장
+            buy_min, buy_max = ma60, ma20
+        else: 
+            # 일반적인 눌림목 시 10일~20일선 사용
+            buy_min, buy_max = (ma20, ma10) if ma10 >= ma20 else (ma10, ma20)
+            
+        return int(score), current, rsi, f"{int(buy_min):,} ~ {int(buy_max):,}", int(current*1.07), int(min(buy_min*0.98, current*0.94))
     except:
-
-        return 40, 0, 50.0, 0, 0, 0
+        return 0, 0, 50.0, "계산불가", 0, 0
 # ==========================================
 # 100% 국산 실시간 매싱 + 지지선 타점 연산 결합
 # ==========================================
@@ -213,7 +188,7 @@ def get_portfolio_market_data(name):
         kr_name = None
         try:
             url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{name}"
-            res = requests.get(url, headers=headers, timeout=2).json()
+            res = requests.get(url, headers=headers, timeout=10).json()
             kr_name = res['result']['areas'][0]['datas'][0]['nm']
         except: pass
         
@@ -253,38 +228,26 @@ us_live_list = get_safe_us_movers()
 try: coins_list = pyupbit.get_tickers(fiat="KRW")[:30]
 except: coins_list = ["KRW-BTC", "KRW-ETH", "KRW-XRP"]
 
-with ThreadPoolExecutor(max_workers=20) as executor:
-    us_top = sorted([r for r in executor.map(fetch_us, us_live_list) if r], key=lambda x: x["점수"], reverse=True)[:3]
-    crypto_top = sorted([r for r in executor.map(fetch_crypto, coins_list) if r], key=lambda x: x["점수"], reverse=True)[:3]
-    kr_top = sorted([r for r in executor.map(fetch_kr, kr_live_dict.items()) if r], key=lambda x: x["점수"], reverse=True)[:3]
+# 5. UI 메인 대시보드 데이터 수집 (안정화 버전)
+us_top = []
+for stock in us_live_list:
+    res = fetch_us(stock)
+    if res: us_top.append(res)
+us_top = sorted(us_top, key=lambda x: x["점수"], reverse=True)[:3]
 
-for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$"), ("🪙 코인 TOP 3", crypto_top, ""), ("🔥 국내 테마/거래대금 대장주 TOP 3", kr_top, "₩")]:
-    st.header(title)
-    if not data:
-        st.warning("시장 데이터를 동기화 중입니다.")
-        continue
-    cols = st.columns(3)
-    for i, item in enumerate(data):
-        with cols[i]:
-            key = "종목" if "종목" in item else "코인"
-            medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉"
-            st.markdown(
-                f"""
-                <div style="background-color:#1e293b; padding:20px; border-radius:10px; border-left: 5px solid #10b981; margin-bottom:10px;">
-                    <h3 style="margin-top:0;">{medal} {item[key]}</h3>
-                    <ul>
-                        <li>🔥 스윙 점수: <b>{item['점수']}점</b></li>
-                        <li>📊 실시간 RSI: <code>{item['RSI']}</code></li>
-                        <li>💰 현재가: <b>{sym}{item['현재가']:,}</b></li>
-                        <li>🎯 정석 지지타점: <span style="color:#10b981;"><b>{item['매수구간']}</b></span></li>
-                        <li>📈 목표가: <span style="color:#3b82f6;">{sym}{item['목표가']:,}</span></li>
-                        <li>📉 손절선: <span style="color:#ef4444;">{sym}{item['손절가']:,}</span></li>
-                    </ul>
-                </div>
-                """, unsafe_allow_html=True
-            )
+crypto_top = []
+for coin in coins_list[:15]: # 코인은 변동성이 심하니 15개만 확인
+    res = fetch_crypto(coin)
+    if res: crypto_top.append(res)
+crypto_top = sorted(crypto_top, key=lambda x: x["점수"], reverse=True)[:3]
 
-st.divider()
+kr_top = []
+for item in list(kr_live_dict.items())[:15]: # 국내주식도 15개만 순차 확인
+    res = fetch_kr(item)
+    if res: kr_top.append(res)
+kr_top = sorted(kr_top, key=lambda x: x["점수"], reverse=True)[:3]
+
+# 이후 기존의 for title, data, sym in [...] 렌더링 코드는 그대로 사용하세요!
 
 # ==========================================
 # 6. 내 포트폴리오 관리 시스템
