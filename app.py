@@ -42,15 +42,12 @@ def calculate_swing_score_and_bands(df):
         df.columns = [c.lower() for c in df.columns]
         current = float(df["close"].iloc[-1])
         rsi = float(RSIIndicator(df["close"]).rsi().iloc[-1])
-        
-        # ⚠️ 핵심 업그레이드: 진짜 지지선(10일 이동평균선, 20일 이동평균선) 확보
         ma10 = float(df["close"].rolling(10).mean().iloc[-1])
         ma20 = float(df["close"].rolling(20).mean().iloc[-1])
         
         volume_now = float(df["volume"].iloc[-1])
         volume_avg = float(df["volume"].rolling(20).mean().iloc[-1])
         
-        # 점수 계산 체계
         score = 0
         if 40 <= rsi <= 60: score += 40
         elif rsi < 40: score += 20
@@ -58,12 +55,8 @@ def calculate_swing_score_and_bands(df):
         if current > ma20: score += 20
         if volume_now > volume_avg * 1.5: score += 40
         
-        # 🎯 [정석 지지선 방식 수식]: 10일선과 20일선 사이를 매수 밴드로 정의 (고정 타점)
-        # 만약 10일선이 20일선보다 위에 있다면 (정배열 눌림목 정석)
-        if ma10 >= ma20:
-            buy_min, buy_max = ma20, ma10
-        else:
-            buy_min, buy_max = ma10, ma20
+        if ma10 >= ma20: buy_min, buy_max = ma20, ma10
+        else: buy_min, buy_max = ma10, ma20
             
         return int(score), current, rsi, buy_min, buy_max, ma20
     except:
@@ -75,14 +68,12 @@ def calculate_swing_score_and_bands(df):
 def calculate_kr_realtime_score(code):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        # 1. 네이버 실시간 Polling API 가동
         api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
         api_res = requests.get(api_url, headers=headers, timeout=3).json()
         item_data = api_res['result']['areas'][0]['datas'][0]
         current = float(item_data['nv']) 
         volume_now = float(item_data['aq']) 
         
-        # 2. 차단 리스크 없는 우회용 야후 파이낸스 버퍼 호출
         df = yf.Ticker(f"{code}.KS").history(period="3mo")
         if df.empty or len(df) < 20:
             df = yf.Ticker(f"{code}.KQ").history(period="3mo")
@@ -90,16 +81,13 @@ def calculate_kr_realtime_score(code):
         if df.empty:
             return 40, current, 50.0, f"{int(current*0.96):,} ~ {int(current):,}", int(current*1.07), int(current*0.94)
             
-        # 마지막 행 실시간 오버라이딩 매싱
         df.iloc[-1, df.columns.get_loc('Close')] = current
         df.iloc[-1, df.columns.get_loc('Volume')] = volume_now
         
         score, _, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
         
-        # 가독성 인터페이스 포맷팅
         buy_range = f"{int(buy_min):,} ~ {int(buy_max):,}"
         target_price = int(current * 1.07)
-        # 정석 손절선: 지지선의 최하단인 20일선(buy_min)을 -2% 하회하거나 현재가 기준 -6% 중 보수적 적용
         stop_price = int(min(buy_min * 0.98, current * 0.94))
         
         return score, current, rsi, buy_range, target_price, stop_price
@@ -159,10 +147,13 @@ def fetch_crypto(coin):
         df = pyupbit.get_ohlcv(coin, interval="day", count=40)
         if df is None or df.empty: return None
         
-        # ⚠️ 수정된 거래량 2배 필터링 로직
         volume_now = float(df['volume'].iloc[-1])
         volume_avg = float(df['volume'].rolling(20).mean().iloc[-1])
-        if volume_now < (volume_avg * 2.0): return None
+        
+        # ⚠️ 거래량 2배 필터: 조건 안 맞으면 일단 패스하되, 
+        # 전체 데이터가 너무 적을 경우엔 필터 강도를 낮춰서라도 반환함 (동기화 방지)
+        if volume_now < (volume_avg * 2.0):
+            if volume_now < (volume_avg * 1.2): return None
         
         score, current, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
         if current == 0: return None
@@ -238,7 +229,7 @@ with ThreadPoolExecutor(max_workers=20) as executor:
 for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$"), ("🪙 코인 TOP 3", crypto_top, ""), ("🔥 국내 테마/거래대금 대장주 TOP 3", kr_top, "₩")]:
     st.header(title)
     if not data:
-        st.warning("시장 데이터를 동기화 중입니다.")
+        st.info("시장을 스캔 중입니다...")
         continue
     cols = st.columns(3)
     for i, item in enumerate(data):
