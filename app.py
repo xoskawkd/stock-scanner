@@ -174,7 +174,7 @@ def fetch_kr(item):
     if score <= 0 or real_price == 0: return None
     
     return {"ticker": code, "종목": name, "점수": score, "현재가": int(real_price), "RSI": round(rsi, 1),
-            "매수구간": buy_range, "목표가": target_price, "손절가": stop_price}}
+            "매수구간": buy_range, "목표가": target_price, "손절가": stop_price}
 
 # ==========================================
 # 4. 포트폴리오 자산 실시간 매싱 연동
