@@ -2,3 +2,5 @@ yfinance
 ta
 pyupbit
 pandas
+streamlit-gsheets
+
