@@ -316,12 +316,22 @@ def get_portfolio_market_data(name):
 
     # 1. 국내주식 (기존 로직 유지)
     # 국내주식 (네이버 크롤링 대신 fdr 사용으로 변경)
+   # 국내주식 (가장 안정적인 yfinance 우회 방식)
     if name.isdigit() and len(name) == 6:
         try:
-            # fdr을 사용하여 가장 최근 종가를 가져옴
-            df = fdr.DataReader(name, count=60)
+            # 코스피/코스닥 구분하여 티커 생성
+            ticker_name = f"{name}.KS" # 일단 코스피로 시도
+            ticker = yf.Ticker(ticker_name)
+            # 데이터를 가져와보고 없으면 코스닥(.KQ)으로 시도
+            df = ticker.history(period="3mo", interval="1d")
+            
+            if df.empty:
+                ticker_name = f"{name}.KQ"
+                ticker = yf.Ticker(ticker_name)
+                df = ticker.history(period="3mo", interval="1d")
+            
             if not df.empty:
-                curr = float(df['Close'].iloc[-1])
+                curr = float(ticker.fast_info['last_price'])
                 s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
                 return (
                     f"{name} (국내주식)",
@@ -334,7 +344,7 @@ def get_portfolio_market_data(name):
                     curr * 1.07
                 )
         except Exception as e:
-            st.error(f"국내주식 데이터 조회 오류: {e}")
+            st.error(f"국내주식 조회 불가: {name}")
 
     # 2. 해외주식 (실시간성에 최적화된 수정본)
     try:
