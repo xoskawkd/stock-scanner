@@ -128,18 +128,22 @@ import FinanceDataReader as fdr
 def get_realtime_kr_hot_stocks():
     df = fdr.StockListing('KRX')
     
-    # [가장 안전한 로직] 
-    # 데이터 형식이 무엇이든 무시하고, 단순히 상위 종목을 뽑는 데 집중합니다.
-    # 에러의 원인인 'Amount'나 'Change' 변환 로직을 아예 뺍니다.
+    # 1. 시총 5천억 이상(잡주 제외) & 주가가 너무 높지 않은(상승률 0% ~ 2% 내외) 종목만 추출
+    # 이렇게 하면 10% 이상 폭등한 대장주는 자동으로 제외됩니다.
+    df = df[df['Marcap'] > 500000000000] # 시총 5천억
     
-    # 1. 시가총액 상위 100개만 가져옴
-    if 'Marcap' in df.columns:
-        df = df.sort_values(by='Marcap', ascending=False).head(100)
-    
-    # 2. 거래량이 있을 법한 우량주들 중에서 5개 랜덤 추출
+    # 2. 오늘 시가보다 현재가가 살짝 눌린 상태인 놈들만 필터 (이미 튄 놈 제외)
+    # ChangeRate가 0 ~ 2% 사이인 종목 (너무 급등한 건 빼고, 이제 시작하려는 애들)
+    if 'ChangeRate' in df.columns:
+        df = df[(df['ChangeRate'] > 0) & (df['ChangeRate'] < 2.0)]
+    elif 'Change' in df.columns:
+        df = df[(df['Change'] > 0) & (df['Change'] < 2.0)]
+        
+    # 3. 그중에서 랜덤 5개 추출
     sampled = df.sample(n=min(5, len(df)))
     
     return dict(zip(sampled['Code'], sampled['Name']))
+
 
 
 
