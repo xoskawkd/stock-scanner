@@ -128,49 +128,60 @@ import FinanceDataReader as fdr
 def get_realtime_kr_hot_stocks():
     import FinanceDataReader as fdr
     import pandas as pd
-    
-    # 1. 대상 종목 추출
+    from datetime import datetime, timedelta
+
     df_list = fdr.StockListing('KRX')
     df_list = df_list[(df_list['Marcap'] > 500_000_000_000) & (df_list['Amount'] >= 10_000_000_000)]
     df_list = df_list.sort_values(by='Amount', ascending=False).head(30)
-    
+
     valid_stocks = []
-    
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=120) # 넉넉히 120일치만 가져옴
+
     for code, name in zip(df_list['Code'], df_list['Name']):
         try:
-            price = fdr.DataReader(code, start='2026-03-01')
-            if len(price) < 40: continue
-            
+            # [속도 개선] 기간을 지정해서 가져옴
+            price = fdr.DataReader(code, start=start_date, end=end_date)
+            if len(price) < 60: continue
+
             close = price['Close']
             last = close.iloc[-1]
-            
-            # 지표 계산
+
+            # RSI 계산
             delta = close.diff()
-            rsi = 100 - (100 / (1 + (delta.where(delta > 0, 0).rolling(14).mean() / (-delta.where(delta < 0, 0).rolling(14).mean()))))
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rs = gain / loss
+            rsi = 100 - (100 / (1 + rs))
+            rsi_last = rsi.iloc[-1]
+
+            # 이평선 및 위치 계산
             ma20 = close.rolling(20).mean().iloc[-1]
-            high60 = close.rolling(40).max().iloc[-1]
+            high60 = close.rolling(60).max().iloc[-1]
             position = last / high60
             ma_diff = (last - ma20) / ma20 * 100
+
+            # [수정된 스윙 초입 필터]
+            # 1. RSI: 과매도도 아니고 과매수도 아닌 40~60 구간 (안정적)
+            if not (40 <= rsi_last <= 60): continue
             
-            # [강력 필터] 기본 조건 만족 시에만 점수 부여
-            if (rsi.iloc[-1] < 50) and (last > ma20) and (0.70 <= position <= 0.85):
-                
-                # [점수 공식: 스윙 초입 최적화]
-                # 1. RSI가 낮을수록 가점 (바닥권)
-                score = (50 - rsi.iloc[-1]) * 1.5
-                # 2. 고점 눌림목 구간 (0.75에 가까울수록 최고점)
-                score += (0.85 - position) * 150
-                # 3. 이평선 이격도 (0~5% 사이면 가점, 10% 초과면 급등주 감점)
-                if 0 <= ma_diff <= 5: score += 50
-                elif ma_diff > 10: score -= 100
-                
-                valid_stocks.append({'Code': code, 'Name': name, 'Score': int(score)})
+            # 2. 고점 대비: 0.70 ~ 0.85 구간 (이미 0.85 넘은 고점주 제외)
+            if not (0.70 <= position <= 0.85): continue
+            
+            # 3. 추세 및 이격: 20일선 위에 있고 이격이 3% 이내 (눌림목)
+            if (last < ma20) or (ma_diff > 3): continue
+
+            # 4. [점수 계산] 낮은 위치일수록 고득점
+            # 0.70에 가까울수록(깊은 눌림) 점수 상승
+            score = (0.85 - position) * 1000 + (60 - rsi_last) * 2
+            
+            valid_stocks.append({'Code': code, 'Name': name, 'Score': int(score)})
         except:
             continue
-    
-    # 점수 정렬 (높은 순) 후 상위 5개 반환
+
     valid_stocks = sorted(valid_stocks, key=lambda x: x['Score'], reverse=True)[:5]
     return {s['Code']: s['Name'] for s in valid_stocks}
+
 
 
 
