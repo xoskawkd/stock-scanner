@@ -126,24 +126,30 @@ import FinanceDataReader as fdr
 
 @st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
+    # 1. KRX 전체 리스트
     df = fdr.StockListing('KRX')
     
-    # [방어 로직] 'Change'가 없으면 비슷한 컬럼명을 찾아내거나, 없으면 전체 사용
-    change_col = next((c for c in df.columns if 'Change' in c), None)
+    # 2. 잡주 제거: 시가총액 5,000억 이상인 종목만 (이래야 거래량이 붙습니다)
+    df = df[df['Marcap'] > 500000000000]
     
-    # 오늘 하락했거나 횡보 중인 종목만 필터링 (컬럼이 있을 때만)
+    # 3. 거래량 필터: 단순히 거래량이 아니라, 
+    # 최소한 시장에서 눈에 띄는 종목들만 뽑아오기 위해 상위 100개로 압축
+    top_stocks = df.sort_values(by='Marcap', ascending=False).head(100)
+    
+    # 4. 눌림목 필터: 오늘 주가가 0% ~ -3% 사이인 놈들 (이미 폭락한 잡주가 아니라, 건강하게 조정받는 놈들)
+    # 컬럼명 자동 탐지 (Change 또는 ChangeRate)
+    change_col = next((c for c in top_stocks.columns if 'Change' in c), None)
     if change_col:
-        # 데이터가 문자열('%')일 수 있으므로 강제 변환
-        df[change_col] = pd.to_numeric(df[change_col].astype(str).str.replace('%',''), errors='coerce')
-        targets = df[df[change_col] <= 0]
+        top_stocks[change_col] = pd.to_numeric(top_stocks[change_col].astype(str).str.replace('%',''), errors='coerce')
+        # -3%보다 크고(폭락 제외), 0보다 작거나 같은(상승 중이 아닌) 종목
+        candidates = top_stocks[(top_stocks[change_col] <= 0) & (top_stocks[change_col] >= -3)]
     else:
-        targets = df
-        
-    # 시총 상위 50개 중, 오늘 오르지 않은 놈들 5개 추출
-    top_targets = targets.sort_values(by='Marcap', ascending=False).head(50)
-    sampled = top_targets.sample(n=min(5, len(top_targets)))
-    
+        candidates = top_stocks
+
+    # 5. 최종 선택
+    sampled = candidates.sample(n=min(5, len(candidates)))
     return dict(zip(sampled['Code'], sampled['Name']))
+
 
 
 
