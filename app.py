@@ -162,12 +162,14 @@ def get_realtime_kr_hot_stocks():
                 continue
 
         return result
-
-    except:
-        return {
-            "005930": "삼성전자",
-            "000660": "SK하이닉스",
-            "035420": "NAVER" }
+except Exception as e:
+    st.error(f"국내주식 로딩 오류: {e}")
+    return {
+        "005930": "삼성전자",
+        "000660": "SK하이닉스",
+        "035420": "NAVER"
+    }
+    
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
