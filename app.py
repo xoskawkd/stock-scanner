@@ -314,69 +314,100 @@ def fetch_kr(item):
 def get_portfolio_market_data(name):
     name = name.strip().upper()
 
-    # 1. 국내주식 (종목명 매칭 로직 추가)
+    # =========================
+    # 1. 국내주식
+    # =========================
     if name.isdigit() and len(name) == 6:
         try:
-            # KRX 리스트에서 종목명 찾기
+            score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(name)
+
             krx = load_krx()
-            target_row = krx[krx['Code'] == name]
-            display_name = target_row['Name'].values[0] if not target_row.empty else "국내주식"
-            
-            df = fdr.DataReader(name)
-            if df is not None and not df.empty:
-                df = df.tail(120)
-                curr = float(df["Close"].iloc[-1])
-                s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-                
+            target_row = krx[krx["Code"] == name]
+
+            display_name = (
+                target_row["Name"].values[0]
+                if not target_row.empty
+                else "국내주식"
+            )
+
+            if real_price > 0:
                 return (
-                    f"{name} ({display_name})", # 종목명 적용됨
-                    curr,
-                    s,
-                    r,
+                    f"{name} ({display_name})",
+                    real_price,
+                    score,
+                    rsi,
                     "KRW",
                     "Stock",
-                    min(b_min * 0.98, curr * 0.94),
-                    curr * 1.07
+                    stop_price,
+                    target_price
                 )
+
         except Exception as e:
-            st.error(f"국내주식 오류: {e}")
+            st.error(f"{name} 국내주식 오류: {e}")
 
-    # 2. 해외주식 (데이터 강제 추출 모드)
+    # =========================
+    # 2. 해외주식
+    # =========================
     try:
-    ticker = yf.Ticker(name)
+        ticker = yf.Ticker(name)
 
-    df = ticker.history(period="3mo", interval="1d")
-
-    if not df.empty:
-
-        try:
-            curr = float(ticker.fast_info.get("last_price", 0))
-        except:
-            curr = 0
-
-        if curr <= 0:
-            curr = float(df["Close"].dropna().iloc[-1])
-
-        s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-
-        return (
-            f"{name} (해외주식)",
-            curr,
-            s,
-            r,
-            "USD",
-            "Stock",
-            min(b_min * 0.98, curr * 0.94),
-            curr * 1.07
+        df = ticker.history(
+            period="3mo",
+            interval="1d"
         )
 
-except Exception as e:
-    st.error(f"{name} 오류: {e}")
+        if not df.empty:
+
+            try:
+                curr = float(
+                    ticker.fast_info.get(
+                        "last_price",
+                        0
+                    )
+                )
+            except:
+                curr = 0
+
+            if curr <= 0:
+                curr = float(
+                    df["Close"]
+                    .dropna()
+                    .iloc[-1]
+                )
+
+            s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+
+            return (
+                f"{name} (해외주식)",
+                curr,
+                s,
+                r,
+                "USD",
+                "Stock",
+                min(
+                    b_min * 0.98,
+                    curr * 0.94
+                ),
+                curr * 1.07
+            )
+
+    except Exception:
+        pass
+
+    # =========================
     # 3. 코인
+    # =========================
     try:
-        df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=60)
+        df = pyupbit.get_ohlcv(
+            f"KRW-{name}",
+            interval="day",
+            count=60
+        )
+
         if df is not None and not df.empty:
+
             s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+
             if c > 0:
                 return (
                     f"{name} (업비트 코인)",
@@ -385,13 +416,26 @@ except Exception as e:
                     r,
                     "KRW",
                     "Crypto",
-                    min(b_min * 0.98, c * 0.92),
+                    min(
+                        b_min * 0.98,
+                        c * 0.92
+                    ),
                     c * 1.10
                 )
+
     except Exception:
         pass
 
-    return None, 0, 0, 0, "USD", "Stock", 0, 0
+    return (
+        None,
+        0,
+        0,
+        0,
+        "USD",
+        "Stock",
+        0,
+        0
+    )
 
 # ==========================================
 # 5. UI 메인 대시보드 렌더링
