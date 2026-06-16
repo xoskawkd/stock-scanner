@@ -8,6 +8,8 @@ import os
 import re
 from ta.momentum import RSIIndicator
 from concurrent.futures import ThreadPoolExecutor
+from bs4 import BeautifulSoup
+
 
 # ==========================================
 # 0. 데이터 영구 저장 로직
@@ -129,7 +131,23 @@ def get_market_status():
 
 @st.cache_data(ttl=30)
 def get_realtime_kr_hot_stocks():
-    return {"028300": "에이치엘비", "086520": "에코프로", "196170": "알테오젠"}
+    url = "https://finance.naver.com/sise/sise_tr_amount.naver"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get(url, headers=headers)
+        soup = BeautifulSoup(res.text, "html.parser")
+        stocks = {}
+        items = soup.select("a.tltle")
+        for item in items[:3]: # 거래대금 상위 3개 자동 추출
+            name = item.text
+            code = item['href'].split('code=')[1]
+            stocks[code] = name
+        return stocks
+    except:
+        return {"005930": "삼성전자", "086520": "에코프로"}
+
+
+    
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
