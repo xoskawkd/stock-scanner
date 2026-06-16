@@ -436,13 +436,13 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
 st.divider()
 
 # ==========================================
-# 6. 내 포트폴리오 관리 시스템 (완벽 복구 + 오류 방어)
+# 6. 내 포트폴리오 관리 시스템 (종목명 표시 최적화)
 # ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
 
 with st.form(key='portfolio_form', clear_on_submit=True):
     c1, c2, c3 = st.columns([2, 1, 1])
-    n_in = c1.text_input("종목코드(예: 005930) / 티커(예: PLTR, BTC)", placeholder="국내주식은 6자리 숫자")
+    n_in = c1.text_input("종목코드(예: 005930) / 티커(예: PLTR, BTC)", placeholder="국내: 6자리 숫자, 해외/코인: 영문")
     b_in = c2.number_input("내 매수가", min_value=0.0, step=0.01, format="%.2f")
     if c3.form_submit_button("➕ 포트폴리오 추가"):
         if n_in:
@@ -454,9 +454,9 @@ if st.session_state.my_portfolio:
     to_remove = None
     for i, p in enumerate(st.session_state.my_portfolio):
         name, buy = p['name'], p['buy']
+        # get_portfolio_market_data의 첫 번째 반환값이 이미 f"{name} ({이름})" 형태입니다.
         stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = get_portfolio_market_data(name)
         
-        # 데이터가 없을 때의 방어 로직 (이게 없어서 오류가 났던 겁니다)
         if curr == 0:
             st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다.")
             if st.button(f"❌ {name} 삭제", key=f"err_del_{i}"):
@@ -466,7 +466,9 @@ if st.session_state.my_portfolio:
         profit = ((curr - buy) / buy * 100) if buy > 0 else 0
         sym = "₩" if currency == "KRW" else "$"
         
+        # 여기서 stock_label을 쓰면 이미 (종목명)이 포함되어 있습니다.
         st.markdown(f"### 📈 자산 대응 리포트: **{stock_label}**")
+        
         col_m1, col_m2, col_m3 = st.columns(3)
         col_m1.metric("내 평단가", f"{sym}{buy:,.0f}" if currency == "KRW" else f"{sym}{buy:,.2f}")
         col_m2.metric("실시간 현재가", f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}")
@@ -474,19 +476,19 @@ if st.session_state.my_portfolio:
         
         st.caption(f"📊 스윙 스코어: **{score}점** | 현재 RSI 상태: **{rsi}**")
         
-        # 테이블은 curr이 0일 땐 안 그리게 해서 오류 원천 차단
         df_guide = pd.DataFrame({
             "포지션 전략": ["현재가 스탠스", "목표 익절가 (정밀)", "리스크 손절가 (지지선 이탈)"],
             "대응 가격 단가": [
                 f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}", 
-                f"{sym}{calc_target:,.0f}" if currency == "KRW" else f"{sym}{calc_target:,.2f}", 
-                f"{sym}{calc_stop:,.0f}" if currency == "KRW" else f"{sym}{calc_stop:,.2f}"
+                f"{sym}{calc_target:,.0f}" if currency == "KRW" else f"{calc_target:,.2f}", 
+                f"{sym}{calc_stop:,.0f}" if currency == "KRW" else f"{calc_stop:,.2f}"
             ]
         })
         st.table(df_guide)
         
-        if st.button(f"🗑️ {name} 삭제", key=f"del_final_{i}"):
+        if st.button(f"🗑️ 삭제", key=f"del_final_{i}"):
             to_remove = i
+        st.markdown("<br>", unsafe_allow_html=True)
             
     if to_remove is not None:
         st.session_state.my_portfolio.pop(to_remove)
