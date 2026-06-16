@@ -132,7 +132,10 @@ def get_market_status():
 @st.cache_data(ttl=30)
 def get_realtime_kr_hot_stocks():
     url = "https://finance.naver.com/sise/sise_tr_amount.naver"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
     try:
         res = requests.get(url, headers=headers)
         soup = BeautifulSoup(res.text, "html.parser")
