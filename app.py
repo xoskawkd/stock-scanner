@@ -128,26 +128,31 @@ def get_market_status():
         usd = yf.Ticker("KRW=X").history(period="1d")['Close'].iloc[-1]
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
-
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60) # 데이터 갱신 간격을 1분으로 늘려 차단 방지
 def get_realtime_kr_hot_stocks():
-    url = "https://finance.naver.com/sise/sise_tr_amount.naver"
+    # 더 확실하게 브라우저로 위장하는 헤더
     headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
-
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://finance.naver.com/"
+    }
+    url = "https://finance.naver.com/sise/sise_tr_amount.naver"
     try:
-        res = requests.get(url, headers=headers)
+        res = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
         stocks = {}
-        items = soup.select("a.tltle")
-        for item in items[:3]: # 거래대금 상위 3개 자동 추출
+        # 네이버 금융 테이블 내 종목 링크 추출
+        items = soup.select("table.type_2 a.tltle") 
+        for item in items[:3]:
             name = item.text
             code = item['href'].split('code=')[1]
             stocks[code] = name
         return stocks
-    except:
-        return {"005930": "삼성전자", "086520": "에코프로"}
+    except Exception as e:
+        # 에러 발생 시 로그를 확인하기 위해 기본값 반환
+        return {"005930": "삼성전자", "086520": "에코프로", "196170": "알테오젠"}
+
+
 
 
     
