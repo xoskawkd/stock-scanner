@@ -445,6 +445,12 @@ st.divider()
 # 6. 내 포트폴리오 관리 시스템 (데이터 무결성 최적화)
 # ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
+if st.button("⚠️ 포트폴리오 데이터 완전 초기화 (파일 삭제)"):
+    if os.path.exists("portfolio.json"):
+        os.remove("portfolio.json")
+        st.session_state.my_portfolio = []
+        st.success("데이터 파일이 삭제되었습니다. 새로고침 후 다시 시작하세요.")
+        st.rerun()
 
 with st.form(key='portfolio_form', clear_on_submit=True):
     c1, c2, c3 = st.columns([2, 1, 1])
