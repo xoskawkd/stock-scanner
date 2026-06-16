@@ -312,7 +312,8 @@ def fetch_kr(item):
 # ==========================================
 def get_portfolio_market_data(name):
     name = name.strip().upper()
-
+    st.write("조회중:", repr(name))
+    
     # 1. 국내 주식
     if name.isdigit() and len(name) == 6:
         score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(name)
@@ -333,7 +334,8 @@ def get_portfolio_market_data(name):
     try:
         ticker = yf.Ticker(name)
         df = ticker.history(period="3mo")
-
+        st.write(name, "행 개수:", len(df))
+        st.write(df.tail())
         if df is not None and not df.empty:
 
             curr = float(df["Close"].iloc[-1])
