@@ -130,7 +130,6 @@ def get_realtime_kr_hot_stocks():
 
     df = fdr.StockListing('KRX')
 
-    # 1. 우량주 100개
     targets = df.sort_values(by='Marcap', ascending=False).head(100)
 
     valid = []
@@ -145,46 +144,41 @@ def get_realtime_kr_hot_stocks():
             close = price['Close']
             last = close.iloc[-1]
 
-            # -------------------------
-            # 1. 추세 필터 (핵심 추가)
-            # -------------------------
             ma20 = close.rolling(20).mean().iloc[-1]
             if last < ma20:
                 continue
 
-            # -------------------------
-            # 2. 과열 제거 (핵심 추가)
-            # -------------------------
             high60 = close.rolling(60).max().iloc[-1]
             position = last / high60
-
-            if position > 0.95:
+            if position > 0.95 or position < 0.75:
                 continue
 
-            # -------------------------
-            # 3. 눌림/초입 필터
-            # -------------------------
             recent_change = (close.iloc[-1] / close.iloc[-2] - 1) * 100
             if recent_change > 5:
                 continue
 
-            valid.append(code)
+            # 🔥 추가 (핵심 보정: "눌림 필터")
+            ma5 = close.rolling(5).mean().iloc[-1]
+            if last > ma5 * 1.03:
+                continue
+
+            valid.append((code, name))
 
         except:
             continue
 
-    # 4. 결과 랜덤 5개
-    sampled = list(set(valid))[:100]
+    # 🔥 안정적 샘플링 (랜덤 + 중복 제거)
+    valid = valid[:50]
 
-    if len(sampled) == 0:
+    if len(valid) == 0:
         return {}
 
-    final = pd.DataFrame({
-        "Code": sampled[:5],
-        "Name": [targets[targets['Code'] == c]['Name'].values[0] for c in sampled[:5]]
-    })
+    sampled = pd.DataFrame(valid, columns=["Code", "Name"]).sample(
+        n=min(5, len(valid)),
+        random_state=42
+    )
 
-    return dict(zip(final['Code'], final['Name']))
+    return dict(zip(sampled['Code'], sampled['Name']))
 
 
 
