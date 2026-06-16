@@ -142,7 +142,7 @@ def get_realtime_kr_hot_stocks():
 
         df = tables[1].dropna()
 
-        st.write(df.head())
+        st.write(df.columns)
 
         return {
             "005930": "삼성전자",
