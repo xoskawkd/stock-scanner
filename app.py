@@ -315,37 +315,38 @@ def get_portfolio_market_data(name):
     name = name.strip().upper()
 
     # 1. 국내주식 (기존 로직 유지)
-    # 국내주식 (네이버 크롤링 대신 fdr 사용으로 변경)
-   # 국내주식 (가장 안정적인 yfinance 우회 방식)
+
     if name.isdigit() and len(name) == 6:
         try:
-            # 코스피/코스닥 구분하여 티커 생성
-            ticker_name = f"{name}.KS" # 일단 코스피로 시도
-            ticker = yf.Ticker(ticker_name)
-            # 데이터를 가져와보고 없으면 코스닥(.KQ)으로 시도
-            df = ticker.history(period="3mo", interval="1d")
-            
-            if df.empty:
-                ticker_name = f"{name}.KQ"
-                ticker = yf.Ticker(ticker_name)
-                df = ticker.history(period="3mo", interval="1d")
-            
-            if not df.empty:
-                curr = float(ticker.fast_info['last_price'])
-                s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-                return (
-                    f"{name} (국내주식)",
-                    curr,
-                    s,
-                    r,
-                    "KRW",
-                    "Stock",
-                    min(b_min * 0.98, curr * 0.94),
-                    curr * 1.07
-                )
+            # 코스피(KS), 코스닥(KQ) 순차 시도
+            for market in ["KS", "KQ"]:
+                ticker_symbol = f"{name}.{market}"
+                df = yf.download(ticker_symbol, period="3mo", progress=False, auto_adjust=False)
+                
+                if not df.empty:
+                    # MultiIndex 정리
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    
+                    df = df.dropna(subset=["Close"])
+                    curr = float(df["Close"].iloc[-1])
+                    
+                    s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+                    
+                    return (
+                        f"{name} (국내주식)",
+                        curr,
+                        s,
+                        r,
+                        "KRW",
+                        "Stock",
+                        min(b_min * 0.98, curr * 0.94),
+                        curr * 1.07
+                    )
         except Exception as e:
-            st.error(f"국내주식 조회 불가: {name}")
-
+            # 오류가 발생해도 다음 종목으로 넘어가도록 조용히 처리
+            pass
+            
     # 2. 해외주식 (실시간성에 최적화된 수정본)
     try:
         ticker = yf.Ticker(name)
