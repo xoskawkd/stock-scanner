@@ -310,96 +310,52 @@ def fetch_kr(item):
 # ==========================================
 # 4. 포트폴리오 자산 실시간 매싱 연동
 # ==========================================
-def get_portfolio_market_data(name):
 
+def get_portfolio_market_data(name):
     name = name.strip().upper()
 
-    # 국내주식
+    # 1. 국내주식 (기존 로직 유지)
     if name.isdigit() and len(name) == 6:
-
         score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(name)
-
         if real_price > 0:
+            return (f"{name} (국내주식)", real_price, score, rsi, "KRW", "Stock", stop_price, target_price)
+
+    # 2. 해외주식 (실시간성에 최적화된 수정본)
+    try:
+        ticker = yf.Ticker(name)
+        # fast_info를 통해 지연 없는 최신 가격(last_price)을 가져옴
+        curr = float(ticker.fast_info['last_price'])
+        
+        # 분석(스코어/RSI)용 데이터는 3개월치 일봉 유지
+        df = ticker.history(period="3mo", interval="1d")
+        
+        if not df.empty and curr > 0:
+            s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
             return (
-                f"{name} (국내주식)",
-                real_price,
-                score,
-                rsi,
-                "KRW",
+                f"{name} (해외주식)",
+                curr, 
+                s,
+                r,
+                "USD",
                 "Stock",
-                stop_price,
-                target_price
+                min(b_min * 0.98, curr * 0.94), # 손절가
+                curr * 1.07                     # 익절가
             )
-
-    # 해외주식
-    try:
-
-        df = yf.download(
-            name,
-            period="3mo",
-            interval="1d",
-            progress=False,
-            auto_adjust=False
-        )
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        if not df.empty and "Close" in df.columns:
-
-            df = df.dropna(subset=["Close"])
-
-            if len(df) >= 20:
-
-                curr = float(df["Close"].iloc[-1])
-
-                s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-
-                if curr > 0:
-                    return (
-                        f"{name} (해외주식)",
-                        curr,
-                        s,
-                        r,
-                        "USD",
-                        "Stock",
-                        min(b_min * 0.98, curr * 0.94),
-                        curr * 1.07
-                    )
-
     except Exception as e:
-        st.error(f"{name} 해외주식 오류: {e}")
+        # 해외주식 오류 시 에러 로그 생략 (반복 출력 방지)
+        pass
 
-    # 코인
+    # 3. 코인 (기존 로직 유지)
     try:
-
-        df = pyupbit.get_ohlcv(
-            f"KRW-{name}",
-            interval="day",
-            count=60
-        )
-
+        df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=60)
         if df is not None and not df.empty:
-
             s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-
             if c > 0:
-                return (
-                    f"{name} (업비트 코인)",
-                    c,
-                    s,
-                    r,
-                    "KRW",
-                    "Crypto",
-                    min(b_min * 0.98, c * 0.92),
-                    c * 1.10
-                )
-
-    except Exception as e:
-        st.error(f"{name} 코인 오류: {e}")
+                return (f"{name} (업비트 코인)", c, s, r, "KRW", "Crypto", min(b_min * 0.98, c * 0.92), c * 1.10)
+    except:
+        pass
 
     return None, 0, 0, 0, "USD", "Stock", 0, 0
-
 
 # ==========================================
 # 5. UI 메인 대시보드 렌더링
