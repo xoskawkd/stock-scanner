@@ -128,22 +128,73 @@ import FinanceDataReader as fdr
 def get_realtime_kr_hot_stocks():
     df = fdr.StockListing('KRX')
 
-    # 1. 시총 + 거래대금 필터
+    # 1. 시총 + 유동성 필터
     df = df[df['Marcap'] > 500_000_000_000]
 
     if 'Amount' in df.columns:
         df = df[df['Amount'] >= 10_000_000_000]
 
-    # 2. 눌림 조건 (과한 급락 제거까지 추가)
-    if 'ChangeRate' in df.columns:
-        df = df[(df['ChangeRate'] <= 0) & (df['ChangeRate'] >= -5)]
-    elif 'Change' in df.columns:
-        df = df[(df['Change'] <= 0)]
+    # -----------------------------
+    # 2. 가격 데이터 (초입 필터 핵심)
+    # -----------------------------
+    try:
+        tickers = df['Code'].tolist()
+        result = []
 
-    # 3. 거래대금 기준 정렬 (상위 유동성 유지)
+        for code in tickers[:80]:  # 과부하 방지
+            try:
+                price = fdr.DataReader(code)
+
+                if len(price) < 30:
+                    continue
+
+                close = price['Close']
+
+                ma20 = close.rolling(20).mean().iloc[-1]
+                ma5 = close.rolling(5).mean().iloc[-1]
+
+                last = close.iloc[-1]
+
+                # 1) 상승 추세 (20일선 위)
+                trend_ok = last > ma20
+
+                # 2) 이미 급등한 종목 제거 (과열 방지)
+                recent_return = (close.iloc[-1] / close.iloc[-5] - 1) * 100
+                not_overheated = recent_return < 10   # 5일 +10% 이상 제거
+
+                # 3) 눌림 or 초입 상태 (5일선 근처)
+                near_ma5 = abs(last - ma5) / ma5 < 0.03
+
+                # 4) 거래량 폭발 초입
+                vol = price['Volume']
+                vol_ratio = vol.iloc[-1] / vol.rolling(20).mean().iloc[-1]
+                vol_ok = vol_ratio > 1.2
+
+                if trend_ok and not_overheated and vol_ok:
+                    result.append(code)
+
+            except:
+                continue
+
+        df = df[df['Code'].isin(result)]
+
+    except:
+        pass
+
+    # -----------------------------
+    # 3. 약한 눌림만 허용 (과도한 폭락 제거)
+    # -----------------------------
+    if 'ChangeRate' in df.columns:
+        df = df[(df['ChangeRate'] <= 0) & (df['ChangeRate'] >= -4)]
+
+    # -----------------------------
+    # 4. 거래대금 상위 정리
+    # -----------------------------
     df = df.sort_values(by='Amount', ascending=False).head(20)
 
-    # 4. 랜덤 샘플 (과도한 노이즈 방지용 안정 샘플)
+    # -----------------------------
+    # 5. 안정 샘플 (랜덤 최소화)
+    # -----------------------------
     sampled = df.sample(n=min(5, len(df)), random_state=42)
 
     return dict(zip(sampled['Code'], sampled['Name']))
