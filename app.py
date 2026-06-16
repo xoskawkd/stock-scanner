@@ -8,8 +8,6 @@ import os
 import re
 from ta.momentum import RSIIndicator
 from concurrent.futures import ThreadPoolExecutor
-from bs4 import BeautifulSoup
-
 
 # ==========================================
 # 0. 데이터 영구 저장 로직
@@ -64,13 +62,7 @@ def calculate_swing_score_and_bands(df):
         # 거래량 로직: 2배 이상 과열 시 점수 차감, 0.8~1.3배(안정적 눌림) 가점
         if 0.8 <= vol_ratio <= 1.3: score += 40
         elif vol_ratio > 2.0: score -= 20
-
-        if 0.8 <= vol_ratio <= 1.3: score += 40
-        elif vol_ratio > 2.0: score -= 20
-
-    # [여기에 추가하세요]
-        score = min(score, 100)
-
+        
         # [동적 타점] 시장 상황에 따른 밴드 변경
         # RSI가 낮아 급락장일 경우 60일선까지 밴드 확장 (보수적 대응)
         if rsi < 40: buy_min, buy_max = ma60, ma20
@@ -128,37 +120,10 @@ def get_market_status():
         usd = yf.Ticker("KRW=X").history(period="1d")['Close'].iloc[-1]
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
-        
-@st.cache_data(ttl=60)
+
+@st.cache_data(ttl=30)
 def get_realtime_kr_hot_stocks():
-    url = "https://finance.naver.com/sise/sise_tr_amount.naver"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        # pd.read_html이 크롤링 에러가 가장 적습니다.
-        df_list = pd.read_html(url, header=0)
-        df = df_list[0]
-        # 종목명과 링크에서 코드를 추출
-        stocks = {}
-        # 네이버 금융 테이블에서 '종목명' 컬럼 사용
-        # 링크 정보를 가져오기 위해 직접 요청
-        res = requests.get(url, headers=headers)
-        soup = BeautifulSoup(res.text, "html.parser")
-        items = soup.select("a.tltle")
-        for item in items[:3]:
-            name = item.text
-            code = item['href'].split('code=')[1]
-            stocks[code] = name
-        return stocks
-    except:
-        # 여기를 비워두거나 에러를 출력하면 왜 안 나오는지 알 수 있습니다.
-        return {"005930": "삼성전자", "086520": "에코프로", "196170": "알테오젠"}
-
-
-
-
-
-
-    
+    return {"028300": "에이치엘비", "086520": "에코프로", "196170": "알테오젠"}
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
