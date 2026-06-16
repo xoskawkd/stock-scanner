@@ -120,46 +120,10 @@ def get_market_status():
         usd = yf.Ticker("KRW=X").history(period="1d")['Close'].iloc[-1]
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
-@st.cache_data(ttl=300)
+
+@st.cache_data(ttl=30)
 def get_realtime_kr_hot_stocks():
-
-    url = "https://finance.naver.com/sise/sise_quant.naver"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    try:
-        html = requests.get(
-            url,
-            headers=headers,
-            timeout=5
-        ).text
-
-        tables = pd.read_html(html)
-
-        df = tables[1].dropna()
-
-        result = {}
-
-        for _, row in df.head(30).iterrows():
-
-            name = str(row["종목명"]).strip()
-
-            result[f"DUMMY_{len(result)}"] = name
-
-        return result
-
-    except Exception as e:
-        st.error(f"오류: {e}")
-
-        return {
-            "005930": "삼성전자",
-            "000660": "SK하이닉스",
-            "035420": "NAVER"
-        }
-
-    
+    return {"028300": "에이치엘비", "086520": "에코프로", "196170": "알테오젠"}
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
