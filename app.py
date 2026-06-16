@@ -125,70 +125,134 @@ def get_market_status():
 import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
+import numpy as np
 
 # =========================
 # 캐시 (필수)
 # =========================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_krx():
     return fdr.StockListing('KRX')
 
-
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_price(code):
-    return fdr.DataReader(code, start="2025-01-01")
+    try:
+        return fdr.DataReader(code, start="2025-01-01")
+    except:
+        return None
 
 
 # =========================
-# 🔥 절대 여기서 실행하면 안됨
+# 🔥 급등 직전 확률 모델
 # =========================
-def scanner():
+def breakout_probability(df):
+
+    df = df.tail(80).dropna()
+
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+    volume = df['Volume']
+
+    last = close.iloc[-1]
+
+    # 1️⃣ 변동성 압축
+    range20 = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
+    compression = max(0, (0.15 - range20) / 0.15)
+
+    # 2️⃣ 거래량
+    vol_ma = volume.rolling(20).mean().iloc[-1]
+    vol_ratio = volume.iloc[-1] / vol_ma if vol_ma != 0 else 0
+    volume_score = min(1, max(0, vol_ratio - 0.7))
+
+    # 3️⃣ 이평선
+    ma5 = close.rolling(5).mean().iloc[-1]
+    ma20 = close.rolling(20).mean().iloc[-1]
+    ma_score = max(0, 1 - abs(ma5 - ma20) / ma20)
+
+    # 4️⃣ RSI
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_last = rsi.iloc[-1]
+
+    rsi_score = 1 if 45 <= rsi_last <= 60 else 0.4
+
+    # 5️⃣ 과열 방지
+    high60 = close.rolling(60).max().iloc[-1]
+    safety = 1 if last / high60 < 0.95 else 0.3
+
+    # 최종 점수
+    prob = (
+        compression * 0.35 +
+        volume_score * 0.25 +
+        ma_score * 0.2 +
+        rsi_score * 0.15 +
+        safety * 0.05
+    )
+
+    return round(max(0, min(1, prob)), 3)
+
+
+# =========================
+# 🔥 메인 스캐너
+# =========================
+def get_realtime_kr_hot_stocks():
 
     df = load_krx()
 
-    targets = df[df['Marcap'] > 1e11].nlargest(20, 'Marcap')
+    # 🔥 중대형만 + 속도 최적화
+    targets = df[df['Marcap'] > 1e11].nlargest(15, 'Marcap')
 
     results = []
 
     for code, name in zip(targets['Code'].head(5), targets['Name'].head(5)):
 
-        try:
-            dfp = load_price(code)
+        dfp = load_price(code)
 
-            if len(dfp) < 80:
+        if dfp is None or len(dfp) < 80:
+            continue
+
+        try:
+            prob = breakout_probability(dfp)
+
+            if prob < 0.55:
                 continue
 
-            close = dfp['Close']
-            vol = dfp['Volume']
-
-            score = vol.iloc[-1] / vol.rolling(20).mean().iloc[-1]
-
-            if score > 1:
-                results.append((code, name, score))
+            results.append({
+                "Code": code,
+                "Name": name,
+                "Probability": prob
+            })
 
         except:
             continue
 
-    return results
+    results = sorted(results, key=lambda x: x["Probability"], reverse=True)[:3]
+
+    return {r["Code"]: r["Name"] for r in results}
 
 
 # =========================
-# UI
+# UI (🔥 핵심: 여기서만 실행)
 # =========================
-st.title("🔥 국내 TOP3 스캐너")
+st.title("🚀 TOP 3 급등 직전 스캐너")
 
-# 🔥 핵심: 무조건 버튼으로 실행
+# ❌ 절대 금지 (이거 있으면 100% 멈춤)
+# kr_live_dict = get_realtime_kr_hot_stocks()
+
 if st.button("시장 분석 시작"):
 
-    with st.spinner("데이터 불러오는 중..."):
-        data = scanner()
+    with st.spinner("데이터 분석 중..."):
+        kr_live_dict = get_realtime_kr_hot_stocks()
 
-    if data:
-        st.success("완료")
-        st.write(data)
+    if kr_live_dict:
+        st.success("TOP 3 후보")
+        st.write(kr_live_dict)
     else:
         st.warning("조건 없음")
-
 
 
 
