@@ -315,10 +315,26 @@ def get_portfolio_market_data(name):
     name = name.strip().upper()
 
     # 1. 국내주식 (기존 로직 유지)
+    # 국내주식 (네이버 크롤링 대신 fdr 사용으로 변경)
     if name.isdigit() and len(name) == 6:
-        score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(name)
-        if real_price > 0:
-            return (f"{name} (국내주식)", real_price, score, rsi, "KRW", "Stock", stop_price, target_price)
+        try:
+            # fdr을 사용하여 가장 최근 종가를 가져옴
+            df = fdr.DataReader(name, count=60)
+            if not df.empty:
+                curr = float(df['Close'].iloc[-1])
+                s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+                return (
+                    f"{name} (국내주식)",
+                    curr,
+                    s,
+                    r,
+                    "KRW",
+                    "Stock",
+                    min(b_min * 0.98, curr * 0.94),
+                    curr * 1.07
+                )
+        except Exception as e:
+            st.error(f"국내주식 데이터 조회 오류: {e}"))
 
     # 2. 해외주식 (실시간성에 최적화된 수정본)
     try:
