@@ -126,85 +126,107 @@ import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
 
-# 1. 데이터 로드 함수 (캐시 적용)
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_krx():
     return fdr.StockListing('KRX')
 
+# 🔥 핵심: 종목별 캐시
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_price(code):
     try:
-        return fdr.DataReader(code, start="2024-01-01")
+        df = fdr.DataReader(code, start="2024-01-01")
+        return df if df is not None and len(df) > 0 else None
     except:
         return None
 
-# 2. 메인 분석 함수 (안정성 강화)
+
 def get_realtime_kr_hot_stocks():
+
     df = load_krx()
-    # 데이터 유효성 검사
     if df is None or df.empty:
         return {}
 
-    # 필터링 및 타겟 선정
+    # 🔥 강제 제한 (멈춤 방지 핵심)
     targets = df[(df['Marcap'] > 1e11) & (df['Marcap'] < 3e13)]
-    targets = targets.sort_values('Marcap', ascending=False).head(8)
+    targets = targets.sort_values('Marcap', ascending=False).head(5)
 
     results = []
 
-    # st.status를 사용하여 UI 동기화 문제 해결
-    with st.status("종목 분석 중...", expanded=True) as status:
-        for i, (code, name) in enumerate(zip(targets['Code'], targets['Name'])):
-            status.write(f"분석 중: {name} ({i+1}/{len(targets)})")
-            
-            price = load_price(code)
-            if price is None or len(price) < 80:
+    for code, name in zip(targets['Code'], targets['Name']):
+
+        price = load_price(code)
+
+        # 🔥 핵심 방어
+        if price is None or len(price) < 80:
+            continue
+
+        try:
+            dfp = price.tail(80)
+
+            close = dfp['Close']
+            high = dfp['High']
+            low = dfp['Low']
+            volume = dfp['Volume']
+
+            last = close.iloc[-1]
+
+            # ----------------
+            # 급등 제거
+            # ----------------
+            if last / close.iloc[-6] - 1 > 0.04:
                 continue
 
-            try:
-                dfp = price.tail(80)
-                close, high, low, volume = dfp['Close'], dfp['High'], dfp['Low'], dfp['Volume']
-                last = close.iloc[-1]
+            # ----------------
+            # 추세
+            # ----------------
+            ma20 = close.rolling(20).mean().iloc[-1]
+            ma60 = close.rolling(60).mean().iloc[-1]
 
-                # 필터 로직
-                if last / close.iloc[-6] - 1 > 0.04: continue
-                
-                ma20 = close.rolling(20).mean().iloc[-1]
-                ma60 = close.rolling(60).mean().iloc[-1]
-                if last < ma20 or last < ma60: continue
-
-                vol = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
-                if vol > 0.18: continue
-
-                vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
-                if vol_ratio < 1.0: continue
-
-                high60 = close.rolling(60).max().iloc[-1]
-                if last / high60 > 0.93: continue
-
-                # 점수 계산
-                score = (0.18 - vol) * 300 + (vol_ratio - 1.0) * 100
-                results.append({"Code": code, "Name": name, "Probability": round(score, 2)})
-
-            except Exception as e:
+            if last < ma20 or last < ma60:
                 continue
-        
-        status.update(label="분석 완료!", state="complete", expanded=False)
 
-    # 결과 데이터 처리
-    if not results: return {}
-    df_res = pd.DataFrame(results).sort_values("Probability", ascending=False).head(3)
+            # ----------------
+            # 변동성
+            # ----------------
+            vol = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
+            if vol > 0.18:
+                continue
+
+            # ----------------
+            # 거래량
+            # ----------------
+            vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+            if vol_ratio < 1.0:
+                continue
+
+            # ----------------
+            # 과열
+            # ----------------
+            high60 = close.rolling(60).max().iloc[-1]
+            if last / high60 > 0.93:
+                continue
+
+            # ----------------
+            # 점수
+            # ----------------
+            score = (0.18 - vol) * 300 + (vol_ratio - 1.0) * 100
+
+            results.append({
+                "Code": code,
+                "Name": name,
+                "Probability": round(score, 2)
+            })
+
+        except:
+            continue
+
+    if not results:
+        return {}
+
+    df_res = pd.DataFrame(results)
+    df_res = df_res.sort_values("Probability", ascending=False).head(3)
+
     return dict(zip(df_res["Code"], df_res["Name"]))
-
-# 3. UI 부분
-st.title("🚀 Tae's Balanced Smart TOP 3 Scanner")
-
-if st.button("스캔 시작"):
-    data = get_realtime_kr_hot_stocks()
-    if data:
-        st.success("찾은 종목들")
-        st.write(data)
-    else:
-        st.warning("조건에 맞는 종목 없음")
 
 
 
