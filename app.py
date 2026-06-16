@@ -126,13 +126,17 @@ import FinanceDataReader as fdr
 
 @st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
-    # 1. KRX 전체 종목 리스트 불러오기
     df = fdr.StockListing('KRX')
     
-    # 2. 거래대금 상위가 아니라, 시가총액 상위 100개(우량주) 중에서 무작위로 추출
-    # 이미 오른 급등주를 피하고 우량주 위주로 스캔합니다.
-    targets = df.sort_values(by='Marcap', ascending=False).head(100)
-    sampled = targets.sample(n=5) 
+    # 1. 시가총액 상위 200개 종목을 대상으로 스캔 (우량주만 대상)
+    targets = df.sort_values(by='Marcap', ascending=False).head(200)
+    
+    # 2. 핵심 필터링: 오늘 주가 상승률이 5% 미만인 종목만 추출
+    # (이미 5% 이상 오른 급등주는 여기서 걸러집니다)
+    cooled_down = targets[targets['Change'] < 0.05]
+    
+    # 3. 그중에서 5개를 무작위로 뽑아 스캔
+    sampled = cooled_down.sample(n=5) 
     
     return dict(zip(sampled['Code'], sampled['Name']))
 
@@ -142,7 +146,8 @@ def get_realtime_kr_hot_stocks():
 
 
 
-def get_safe_us_movers():
+
+hdef get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
 
 def fetch_us(stock):
