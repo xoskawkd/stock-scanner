@@ -126,28 +126,28 @@ import FinanceDataReader as fdr
 
 @st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
-    # 여기서부터 다시 정확하게 정의합니다
     df = fdr.StockListing('KRX')
     
-    # 1. 시총 5천억 + 거래대금 300억 필터
-    df = df[(df['Marcap'] > 500000000000) & (df['Amount'] >= 30000000000)]
+    # 1. 시총 5천억 이상 우량주만 선정
+    df = df[df['Marcap'] > 500000000000]
     
-    # 2. 상승률 필터 (음봉 또는 0% 부근)
-    if 'ChangeRate' in df.columns:
-        df = df[(df['ChangeRate'] < 0) & (df['ChangeRate'] > -3.0)]
-    
-    # 3. 데이터 추출 (오류 방지 위해 결과가 없을 경우 대비)
-    if df.empty:
-        return {}
+    # 2. [중요] 거래대금 필터: 100억 이상 (너무 높으면 이미 튄 놈만 나옴)
+    # 100억 정도로 낮추어 '이제 수급이 들어오기 시작하는' 단계의 종목을 잡습니다.
+    if 'Amount' in df.columns:
+        df = df[df['Amount'] >= 10000000000] 
         
-    # 거래대금 많은 순으로 상위 5개 뽑기
-    sampled = df.sort_values(by='Amount', ascending=False).head(5)
+    # 3. [핵심] 스윙 초입 필터 (가격이 튄 놈 제외)
+    # 현재가가 시가 대비 1% 미만으로 오른 놈들만 남김
+    # (이미 2%~3% 이상 오른 놈들은 여기서 다 탈락)
+    if 'ChangeRate' in df.columns:
+        df = df[(df['ChangeRate'] > -2.0) & (df['ChangeRate'] < 1.0)]
+    
+    # 4. 결과 추출
+    # 거래대금 상위 20개 중에서 랜덤으로 5개 추출 (골고루 보기 위함)
+    sampled = df.sort_values(by='Amount', ascending=False).head(20).sample(n=min(5, 20))
     
     return dict(zip(sampled['Code'], sampled['Name']))
 
-# --- 호출 부분 확인 ---
-# 아래처럼 정확한 함수 이름으로 호출하고 있는지 확인하세요!
-kr_live_dict = get_realtime_kr_hot_stocks()
 
 
 
