@@ -126,75 +126,66 @@ import FinanceDataReader as fdr
 
 @st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
+    import FinanceDataReader as fdr
+
     df = fdr.StockListing('KRX')
 
-    # 1. 시총 + 유동성 필터
+    # 1. 기본 필터 (유동성)
     df = df[df['Marcap'] > 500_000_000_000]
 
     if 'Amount' in df.columns:
         df = df[df['Amount'] >= 10_000_000_000]
 
-    # -----------------------------
-    # 2. 가격 데이터 (초입 필터 핵심)
-    # -----------------------------
-    try:
-        tickers = df['Code'].tolist()
-        result = []
+    # 2. 거래대금 상위만 먼저 컷 (속도 핵심)
+    df = df.sort_values(by='Amount', ascending=False).head(30)
 
-        for code in tickers[:80]:  # 과부하 방지
-            try:
-                price = fdr.DataReader(code)
+    codes = df['Code'].tolist()
 
-                if len(price) < 30:
-                    continue
+    result = []
 
-                close = price['Close']
+    # 3. 가격 데이터 (30개만 → 속도 핵심 개선)
+    for code in codes:
+        try:
+            price = fdr.DataReader(code)
 
-                ma20 = close.rolling(20).mean().iloc[-1]
-                ma5 = close.rolling(5).mean().iloc[-1]
-
-                last = close.iloc[-1]
-
-                # 1) 상승 추세 (20일선 위)
-                trend_ok = last > ma20
-
-                # 2) 이미 급등한 종목 제거 (과열 방지)
-                recent_return = (close.iloc[-1] / close.iloc[-5] - 1) * 100
-                not_overheated = recent_return < 10   # 5일 +10% 이상 제거
-
-                # 3) 눌림 or 초입 상태 (5일선 근처)
-                near_ma5 = abs(last - ma5) / ma5 < 0.03
-
-                # 4) 거래량 폭발 초입
-                vol = price['Volume']
-                vol_ratio = vol.iloc[-1] / vol.rolling(20).mean().iloc[-1]
-                vol_ok = vol_ratio > 1.2
-
-                if trend_ok and not_overheated and vol_ok:
-                    result.append(code)
-
-            except:
+            if len(price) < 30:
                 continue
 
-        df = df[df['Code'].isin(result)]
+            close = price['Close']
+            volume = price['Volume']
 
-    except:
-        pass
+            last = close.iloc[-1]
 
-    # -----------------------------
-    # 3. 약한 눌림만 허용 (과도한 폭락 제거)
-    # -----------------------------
-    if 'ChangeRate' in df.columns:
-        df = df[(df['ChangeRate'] <= 0) & (df['ChangeRate'] >= -4)]
+            ma20 = close.rolling(20).mean().iloc[-1]
+            ma5 = close.rolling(5).mean().iloc[-1]
 
-    # -----------------------------
-    # 4. 거래대금 상위 정리
-    # -----------------------------
-    df = df.sort_values(by='Amount', ascending=False).head(20)
+            # 1) 상승 추세
+            trend_ok = last > ma20
 
-    # -----------------------------
-    # 5. 안정 샘플 (랜덤 최소화)
-    # -----------------------------
+            # 2) 과열 제거 (핵심 개선)
+            recent_return = (close.iloc[-1] / close.iloc[-5] - 1) * 100
+            not_overheated = recent_return < 8   # 기존 10 → 더 타이트
+
+            # 3) 거래량 증가
+            vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+            vol_ok = vol_ratio > 1.3
+
+            # 4) 눌림 상태 (너무 급락 제거)
+            change_rate = (close.iloc[-1] / close.iloc[-2] - 1) * 100
+            pullback_ok = change_rate <= 1 and change_rate >= -4
+
+            if trend_ok and not_overheated and vol_ok and pullback_ok:
+                result.append(code)
+
+        except:
+            continue
+
+    df = df[df['Code'].isin(result)]
+
+    # 4. 최종 안정 샘플
+    if len(df) == 0:
+        return {}
+
     sampled = df.sample(n=min(5, len(df)), random_state=42)
 
     return dict(zip(sampled['Code'], sampled['Name']))
