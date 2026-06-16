@@ -123,18 +123,68 @@ def get_market_status():
     except: return "50", "중립", "1,350.00"
 
 import FinanceDataReader as fdr
+import pandas as pd
 
 @st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
-    # 1. KRX 전체 종목 리스트 불러오기
+
     df = fdr.StockListing('KRX')
-    
-    # 2. 거래대금 상위가 아니라, 시가총액 상위 100개(우량주) 중에서 무작위로 추출
-    # 이미 오른 급등주를 피하고 우량주 위주로 스캔합니다.
+
+    # 1. 우량주 100개
     targets = df.sort_values(by='Marcap', ascending=False).head(100)
-    sampled = targets.sample(n=5) 
-    
-    return dict(zip(sampled['Code'], sampled['Name']))
+
+    valid = []
+
+    for code, name in zip(targets['Code'], targets['Name']):
+        try:
+            price = fdr.DataReader(code)
+
+            if len(price) < 60:
+                continue
+
+            close = price['Close']
+            last = close.iloc[-1]
+
+            # -------------------------
+            # 1. 추세 필터 (핵심 추가)
+            # -------------------------
+            ma20 = close.rolling(20).mean().iloc[-1]
+            if last < ma20:
+                continue
+
+            # -------------------------
+            # 2. 과열 제거 (핵심 추가)
+            # -------------------------
+            high60 = close.rolling(60).max().iloc[-1]
+            position = last / high60
+
+            if position > 0.95:
+                continue
+
+            # -------------------------
+            # 3. 눌림/초입 필터
+            # -------------------------
+            recent_change = (close.iloc[-1] / close.iloc[-2] - 1) * 100
+            if recent_change > 5:
+                continue
+
+            valid.append(code)
+
+        except:
+            continue
+
+    # 4. 결과 랜덤 5개
+    sampled = list(set(valid))[:100]
+
+    if len(sampled) == 0:
+        return {}
+
+    final = pd.DataFrame({
+        "Code": sampled[:5],
+        "Name": [targets[targets['Code'] == c]['Name'].values[0] for c in sampled[:5]]
+    })
+
+    return dict(zip(final['Code'], final['Name']))
 
 
 
