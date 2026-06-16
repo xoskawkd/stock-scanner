@@ -124,18 +124,18 @@ def get_market_status():
 
 import FinanceDataReader as fdr
 
-@st.cache_data(ttl=600) # 10분마다 새로 고침
+@st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
-    # 1. KOSPI, KOSDAQ 전체 리스트를 가져옵니다.
+    # 1. KRX 전체 종목 리스트 불러오기
     df = fdr.StockListing('KRX')
     
-    # 2. 거래대금 데이터가 없으므로, 우리 스윙 엔진에 넘길 수 있게 
-    # '변동성'이나 '시가총액' 기준으로 상위 종목을 뽑아 리스트를 만듭니다.
-    # 이렇게 하면 고정값이 아니라 매일 시장 대장주가 바뀝니다.
-    top_stocks = df.sort_values(by='Marcap', ascending=False).head(20)
+    # 2. 거래대금 상위가 아니라, 시가총액 상위 100개(우량주) 중에서 무작위로 추출
+    # 이미 오른 급등주를 피하고 우량주 위주로 스캔합니다.
+    targets = df.sort_values(by='Marcap', ascending=False).head(100)
+    sampled = targets.sample(n=5) 
     
-    # 3. 딕셔너리로 반환 (코드: 이름)
-    return dict(zip(top_stocks['Code'], top_stocks['Name']))
+    return dict(zip(sampled['Code'], sampled['Name']))
+
 
 
 
