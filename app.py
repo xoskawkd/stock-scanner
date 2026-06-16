@@ -124,31 +124,28 @@ def get_market_status():
 
 import FinanceDataReader as fdr
 
-@st.cache_data(ttl=300) # 업데이트 주기 5분으로 단축
+@st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
     df = fdr.StockListing('KRX')
     
-    # [핵심 로직] 거래대금(Amount) 필수!
-    # 시총 5천억 이상 + 오늘 거래대금 500억 이상인 놈들만 남김
-    # 거래대금 500억이면 잡주가 낄 자리가 없습니다.
-    if 'Amount' in df.columns:
-        df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
-        df = df[df['Amount'] >= 50000000000] 
+    # 1. 시가총액 5천억 이상
+    df = df[df['Marcap'] > 500000000000]
     
-    # 시가총액 5천억 이상 필터
-    if 'Marcap' in df.columns:
-        df = df[df['Marcap'] >= 500000000000]
-
-    # 오늘 상승률이 0% ~ 3% 내외인 '눌림목' 종목만 필터
-    change_col = next((c for c in df.columns if 'Change' in c), None)
-    if change_col:
-        df[change_col] = pd.to_numeric(df[change_col].astype(str).str.replace('%',''), errors='coerce')
-        df = df[(df[change_col] > 0) & (df[change_col] <= 3.0)]
-
-    # 여기서 시총 순으로 5개를 뽑으면, 진짜 대장주들이 나옵니다.
-    sampled = df.sort_values(by='Marcap', ascending=False).head(5)
+    # [추가] 거래대금 필터: 100억 이상 (거래량이 없으면 아예 리스트에서 삭제)
+    if 'Amount' in df.columns:
+        df = df[df['Amount'] >= 10000000000] # 100억 원 이상
+    
+    # 2. 상승률 필터 (0% ~ 2% 사이)
+    if 'ChangeRate' in df.columns:
+        df = df[(df['ChangeRate'] > 0) & (df['ChangeRate'] < 2.0)]
+    elif 'Change' in df.columns:
+        df = df[(df['Change'] > 0) & (df['Change'] < 2.0)]
+        
+    # 3. 결과 추출
+    sampled = df.sample(n=min(5, len(df)))
     
     return dict(zip(sampled['Code'], sampled['Name']))
+
 
 
 
