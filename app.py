@@ -124,85 +124,107 @@ def get_market_status():
 
 import FinanceDataReader as fdr
 import pandas as pd
-from datetime import datetime, timedelta
+import numpy as np
 
 @st.cache_data(ttl=600)
-def get_realtime_kr_hot_stocks():
+def get_breakout_probability_stocks():
 
     df = fdr.StockListing('KRX')
-
     targets = df.sort_values(by='Marcap', ascending=False).head(100)
 
-    valid = []
+    results = []
 
     for code, name in zip(targets['Code'], targets['Name']):
         try:
             price = fdr.DataReader(code)
 
-            if len(price) < 60:
+            if len(price) < 80:
                 continue
 
-            close = price['Close']
+            df_tail = price.tail(80)
+
+            close = df_tail['Close']
+            high = df_tail['High']
+            low = df_tail['Low']
+            volume = df_tail['Volume']
+
             last = close.iloc[-1]
 
-            # -------------------------
-            # 1. 추세 필터
-            # -------------------------
+            # ----------------------------
+            # 1. 이동평균
+            # ----------------------------
+            ma5 = close.rolling(5).mean().iloc[-1]
             ma20 = close.rolling(20).mean().iloc[-1]
-            if last < ma20:
-                continue
+            ma60 = close.rolling(60).mean().iloc[-1]
 
-            # -------------------------
-            # 2. 고점 위치 필터 (강화)
-            # -------------------------
+            # ----------------------------
+            # 2. 변동성 압축 (핵심)
+            # ----------------------------
+            volatility = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
+            vol_score = max(0, (0.20 - volatility) * 1000)
+
+            # ----------------------------
+            # 3. 거래량 증가 (초기 수급)
+            # ----------------------------
+            vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+            vol_score2 = (vol_ratio - 1.0) * 200
+
+            # ----------------------------
+            # 4. 이평선 수렴 (초입)
+            # ----------------------------
+            ma_diff = abs(ma5 - ma20) / ma20
+            ma_score = max(0, (0.03 - ma_diff) * 1000)
+
+            # ----------------------------
+            # 5. 추세 점수
+            # ----------------------------
+            trend_score = 0
+            if last > ma20: trend_score += 50
+            if last > ma60: trend_score += 50
+            if ma20 > ma60: trend_score += 50
+
+            # ----------------------------
+            # 6. 과열 패널티
+            # ----------------------------
             high60 = close.rolling(60).max().iloc[-1]
             position = last / high60
+            overheat_penalty = max(0, (position - 0.92) * 500)
 
-            # 👉 기존 0.95 너무 널널 → 0.92로 강화
-            if position > 0.92 or position < 0.75:
-                continue
+            # ----------------------------
+            # 7. 상승 속도 패널티
+            # ----------------------------
+            five_day = close.iloc[-1] / close.iloc[-6] - 1
+            momentum_penalty = max(0, (five_day - 0.05) * 1000)
 
-            # -------------------------
-            # 3. 상승 속도 필터 (핵심 추가)
-            # -------------------------
-            five_day_return = close.iloc[-1] / close.iloc[-6] - 1
-            if five_day_return > 0.05:
-                continue
+            # ----------------------------
+            # FINAL SCORE (확률 모델)
+            # ----------------------------
+            score = (
+                vol_score +
+                vol_score2 +
+                ma_score +
+                trend_score -
+                overheat_penalty -
+                momentum_penalty
+            )
 
-            # -------------------------
-            # 4. 하루 급등 제거
-            # -------------------------
-            recent_change = (close.iloc[-1] / close.iloc[-2] - 1) * 100
-            if recent_change > 3:   # 기존 5 → 3으로 강화
-                continue
-
-            # -------------------------
-            # 5. 눌림 필터 (5일선)
-            # -------------------------
-            ma5 = close.rolling(5).mean().iloc[-1]
-            if last > ma5 * 1.02:
-                continue
-
-            valid.append((code, name))
+            results.append({
+                "Code": code,
+                "Name": name,
+                "Score": round(score, 2)
+            })
 
         except:
             continue
 
-    # -------------------------
-    # 6. 안정 샘플링
-    # -------------------------
-    valid = valid[:50]
+    df_res = pd.DataFrame(results)
 
-    if len(valid) == 0:
+    if df_res.empty:
         return {}
 
-    sampled = pd.DataFrame(valid, columns=["Code", "Name"]).sample(
-        n=min(5, len(valid)),
-        random_state=42
-    )
+    df_res = df_res.sort_values(by="Score", ascending=False).head(5)
 
-    return dict(zip(sampled['Code'], sampled['Name']))
-
+    return dict(zip(df_res["Code"], df_res["Name"]))
 
 
 
