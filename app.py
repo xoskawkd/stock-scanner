@@ -312,46 +312,75 @@ def fetch_kr(item):
 # ==========================================
 def get_portfolio_market_data(name):
     name = name.strip().upper()
-    
+
     # 1. 국내 주식
     if name.isdigit() and len(name) == 6:
         score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(name)
+
         if real_price > 0:
-            return f"{name} (국내주식)", real_price, score, rsi, "KRW", "Stock", stop_price, target_price
-
-    # 2. 해외 주식 (info 대신 history로 즉시 접근)
- # 2. 해외 주식
-try:
-    ticker = yf.Ticker(name)
-    df = ticker.history(period="3mo")
-
-    if df is not None and not df.empty:
-        curr = float(df["Close"].iloc[-1])
-
-        s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-
-        if curr > 0:
             return (
-                f"{name} (해외주식)",
-                curr,
-                s,
-                r,
-                "USD",
+                f"{name} (국내주식)",
+                real_price,
+                score,
+                rsi,
+                "KRW",
                 "Stock",
-                min(b_min * 0.98, curr * 0.94),
-                curr * 1.07
+                stop_price,
+                target_price
             )
 
-except Exception as e:
-    st.write(f"{name} 해외주식 에러:", e)
-            
-        # 3. 코인 (해외주식에서 실패하면 코인 시도)
-        try:
-            df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=60)
-            if df is not None and not df.empty:
-                s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-                if c > 0: return f"{name} (업비트 코인)", c, s, r, "KRW", "Crypto", min(b_min*0.98, c*0.92), c*1.10
-        except: pass
+    # 2. 해외 주식
+    try:
+        ticker = yf.Ticker(name)
+        df = ticker.history(period="3mo")
+
+        if df is not None and not df.empty:
+
+            curr = float(df["Close"].iloc[-1])
+
+            s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+
+            if curr > 0:
+                return (
+                    f"{name} (해외주식)",
+                    curr,
+                    s,
+                    r,
+                    "USD",
+                    "Stock",
+                    min(b_min * 0.98, curr * 0.94),
+                    curr * 1.07
+                )
+
+    except Exception as e:
+        st.error(f"{name} 해외주식 에러: {e}")
+
+    # 3. 코인
+    try:
+        df = pyupbit.get_ohlcv(
+            f"KRW-{name}",
+            interval="day",
+            count=60
+        )
+
+        if df is not None and not df.empty:
+
+            s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+
+            if c > 0:
+                return (
+                    f"{name} (업비트 코인)",
+                    c,
+                    s,
+                    r,
+                    "KRW",
+                    "Crypto",
+                    min(b_min * 0.98, c * 0.92),
+                    c * 1.10
+                )
+
+    except Exception as e:
+        st.error(f"{name} 코인 에러: {e}")
 
     return None, 0, 0, 0, "USD", "Stock", 0, 0
 
