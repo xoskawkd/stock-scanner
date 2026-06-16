@@ -126,31 +126,21 @@ import FinanceDataReader as fdr
 
 @st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
-    # 1. KRX 전체 종목 불러오기
     df = fdr.StockListing('KRX')
     
-    # 2. 거래량 필터 (가장 확실함): 'Amount'(거래대금)가 100억 이상인 놈들만 (잡주 완전 차단)
-    # Amount가 없으면 데이터가 부족한 것이니 예외 처리
-    if 'Amount' in df.columns:
-        df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
-        df = df[df['Amount'] > 10000000000] # 100억 이상
+    # [가장 안전한 로직] 
+    # 데이터 형식이 무엇이든 무시하고, 단순히 상위 종목을 뽑는 데 집중합니다.
+    # 에러의 원인인 'Amount'나 'Change' 변환 로직을 아예 뺍니다.
     
-    # 3. 하락폭 필터: -5% ~ 0% 사이 (급락도 아니고, 급등도 아닌 눌림목)
-    # 컬럼명 자동 탐지 (Change가 0보다 작거나 같음)
-    change_col = next((c for c in df.columns if 'Change' in c), None)
-    if change_col:
-        df[change_col] = pd.to_numeric(df[change_col].astype(str).str.replace('%',''), errors='coerce')
-        candidates = df[(df[change_col] <= 0) & (df[change_col] >= -5)]
-    else:
-        candidates = df
-
-    # 4. 시총 순으로 정렬 후 5개 추출
-    if 'Marcap' in candidates.columns:
-        sampled = candidates.sort_values(by='Marcap', ascending=False).head(20).sample(n=min(5, 20))
-    else:
-        sampled = candidates.sample(n=min(5, len(candidates)))
-        
+    # 1. 시가총액 상위 100개만 가져옴
+    if 'Marcap' in df.columns:
+        df = df.sort_values(by='Marcap', ascending=False).head(100)
+    
+    # 2. 거래량이 있을 법한 우량주들 중에서 5개 랜덤 추출
+    sampled = df.sample(n=min(5, len(df)))
+    
     return dict(zip(sampled['Code'], sampled['Name']))
+
 
 
 
