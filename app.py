@@ -130,11 +130,11 @@ import numpy as np
 # =========================
 # 데이터 캐시
 # =========================
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def load_krx():
     return fdr.StockListing('KRX')
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def load_price(code):
     try:
         return fdr.DataReader(code, start="2025-01-01")
