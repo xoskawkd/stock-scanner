@@ -244,6 +244,9 @@ st.sidebar.metric("환율 (USD/KRW)", f"{exchange} 원")
 st.title("🚀 Tae's Balanced Smart TOP 3 Scanner")
 
 kr_live_dict = get_realtime_kr_hot_stocks()
+st.write("종목수:", len(kr_live_dict))
+st.write(kr_live_dict)
+
 us_live_list = get_safe_us_movers()
 try: coins_list = pyupbit.get_tickers(fiat="KRW")[:30]
 except: coins_list = ["KRW-BTC", "KRW-ETH", "KRW-XRP"]
