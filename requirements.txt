@@ -36,6 +36,7 @@ narwhals
 numpy
 packaging
 pandas
+pandas-datareader
 peewee
 pillow
 platformdirs
