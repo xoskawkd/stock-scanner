@@ -121,30 +121,55 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-from pykrx import stock
-
 @st.cache_data(ttl=300)
 def get_realtime_kr_hot_stocks():
 
-    today = pd.Timestamp.today().strftime("%Y%m%d")
+    url = "https://finance.naver.com/sise/sise_quant.naver"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
 
     try:
-        kospi = stock.get_market_trading_value_by_ticker(
-            today, market="KOSPI"
+        tables = pd.read_html(
+            requests.get(url, headers=headers, timeout=5).text
         )
 
-        kosdaq = stock.get_market_trading_value_by_ticker(
-            today, market="KOSDAQ"
-        )
+        df = tables[1]
 
-        merged = pd.concat([kospi, kosdaq])
-
-        merged = merged.sort_values(
-            by="전체",
-            ascending=False
-        ).head(50)
+        df = df.dropna()
 
         result = {}
+
+        for _, row in df.head(50).iterrows():
+
+            name = str(row["종목명"]).strip()
+
+            try:
+                search_url = f"https://finance.naver.com/api/search/searchList.naver?query={name}"
+
+                res = requests.get(
+                    search_url,
+                    headers=headers,
+                    timeout=3
+                ).json()
+
+                if res["items"]:
+                    code = res["items"][0]["itemCode"]
+                    result[code] = name
+
+            except:
+                continue
+
+        return result
+
+    except:
+        return {
+            "005930": "삼성전자",
+            "000660": "SK하이닉스",
+            "035420": "NAVER"
+        }
+
 
         for code in merged.index:
             try:
@@ -156,7 +181,7 @@ def get_realtime_kr_hot_stocks():
         return result
 
     except:
-        return {}
+        return {
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
