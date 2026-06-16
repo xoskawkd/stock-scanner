@@ -341,26 +341,30 @@ def get_portfolio_market_data(name):
         except Exception as e:
             st.error(f"국내주식 오류: {e}")
 
-    # 2. 해외주식 (티커에 대응하는 간단한 이름 표시)
+    # 2. 해외주식 (안정성 강화 버전)
     try:
         ticker = yf.Ticker(name)
-        # fast_info 사용 시 에러 방지
-        curr = float(ticker.fast_info.get('last_price', 0))
-        df = ticker.history(period="3mo", interval="1d")
+        # fast_info 대신 history 데이터를 직접 조회
+        hist = ticker.history(period="5d") 
         
-        if not df.empty and curr > 0:
-            s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-            return (
-                f"{name} (해외주식)",
-                curr,
-                s,
-                r,
-                "USD",
-                "Stock",
-                min(b_min * 0.98, curr * 0.94),
-                curr * 1.07
-            )
-    except Exception:
+        if not hist.empty:
+            curr = float(hist['Close'].iloc[-1])
+            s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(hist)
+            
+            if curr > 0:
+                return (
+                    f"{name} (해외주식)",
+                    curr,
+                    s,
+                    r,
+                    "USD",
+                    "Stock",
+                    min(b_min * 0.98, curr * 0.94),
+                    curr * 1.07
+                )
+    except Exception as e:
+        # 에러 확인용 (필요시 주석 해제)
+        # st.error(f"해외주식 오류: {e}")
         pass
 
     # 3. 코인
