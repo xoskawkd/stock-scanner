@@ -128,17 +128,23 @@ import FinanceDataReader as fdr
 def get_realtime_kr_hot_stocks():
     df = fdr.StockListing('KRX')
     
-    # 1. 시총 상위 200개 중, 오늘 주가가 마이너스(-)이거나 횡보 중인 놈들만 필터링
-    # 즉, 오늘 오르지 않은 종목만 골라냅니다.
-    targets = df[df['Change'] <= 0] 
+    # [방어 로직] 'Change'가 없으면 비슷한 컬럼명을 찾아내거나, 없으면 전체 사용
+    change_col = next((c for c in df.columns if 'Change' in c), None)
     
-    # 2. 그중에서 시총이 큰 순서대로 50개를 뽑음
+    # 오늘 하락했거나 횡보 중인 종목만 필터링 (컬럼이 있을 때만)
+    if change_col:
+        # 데이터가 문자열('%')일 수 있으므로 강제 변환
+        df[change_col] = pd.to_numeric(df[change_col].astype(str).str.replace('%',''), errors='coerce')
+        targets = df[df[change_col] <= 0]
+    else:
+        targets = df
+        
+    # 시총 상위 50개 중, 오늘 오르지 않은 놈들 5개 추출
     top_targets = targets.sort_values(by='Marcap', ascending=False).head(50)
-    
-    # 3. 여기서 5개를 랜덤 추출하여 엔진에 넘김
-    sampled = top_targets.sample(n=5)
+    sampled = top_targets.sample(n=min(5, len(top_targets)))
     
     return dict(zip(sampled['Code'], sampled['Name']))
+
 
 
 
