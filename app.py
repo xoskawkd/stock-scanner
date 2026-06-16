@@ -343,35 +343,35 @@ def get_portfolio_market_data(name):
 
     # 2. 해외주식 (데이터 강제 추출 모드)
     try:
-        # 티커 대문자 변환 확실히
-        ticker_name = name.upper()
-        ticker = yf.Ticker(ticker_name)
-        
-        # 1. 5일치 데이터를 시도
-        hist = ticker.history(period="5d", timeout=10) 
-        
-        # 2. 혹시 빈 데이터면 1개월치로 확장 시도
-        if hist.empty:
-            hist = ticker.history(period="1mo", timeout=10)
-            
-        if not hist.empty:
-            curr = float(hist['Close'].iloc[-1])
-            s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(hist)
-            
-            if curr > 0:
-                return (
-                    f"{ticker_name} (해외주식)",
-                    curr,
-                    s,
-                    r,
-                    "USD",
-                    "Stock",
-                    min(b_min * 0.98, curr * 0.94),
-                    curr * 1.07
-                )
-    except Exception as e:
-        # 에러가 발생해도 프로그램 죽지 않게 함
-        pass
+    ticker = yf.Ticker(name)
+
+    df = ticker.history(period="3mo", interval="1d")
+
+    if not df.empty:
+
+        try:
+            curr = float(ticker.fast_info.get("last_price", 0))
+        except:
+            curr = 0
+
+        if curr <= 0:
+            curr = float(df["Close"].dropna().iloc[-1])
+
+        s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+
+        return (
+            f"{name} (해외주식)",
+            curr,
+            s,
+            r,
+            "USD",
+            "Stock",
+            min(b_min * 0.98, curr * 0.94),
+            curr * 1.07
+        )
+
+except Exception as e:
+    st.error(f"{name} 오류: {e}")
     # 3. 코인
     try:
         df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=60)
