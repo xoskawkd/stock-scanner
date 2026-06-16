@@ -127,23 +127,29 @@ import FinanceDataReader as fdr
 @st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
     import FinanceDataReader as fdr
+    import pandas as pd
 
+    # -------------------------
+    # 1. KRX 기본 데이터
+    # -------------------------
     df = fdr.StockListing('KRX')
 
-    # 1. 기본 필터 (유동성)
+    # 2. 유동성 필터
     df = df[df['Marcap'] > 500_000_000_000]
 
     if 'Amount' in df.columns:
         df = df[df['Amount'] >= 10_000_000_000]
 
-    # 2. 거래대금 상위만 먼저 컷 (속도 핵심)
-    df = df.sort_values(by='Amount', ascending=False).head(30)
+    # 3. 거래대금 상위만 (속도 핵심)
+    df = df.sort_values(by='Amount', ascending=False).head(10)
 
     codes = df['Code'].tolist()
 
     result = []
 
-    # 3. 가격 데이터 (30개만 → 속도 핵심 개선)
+    # -------------------------
+    # 4. 가격 분석 (10개만 → 핵심 속도 개선)
+    # -------------------------
     for code in codes:
         try:
             price = fdr.DataReader(code)
@@ -159,20 +165,27 @@ def get_realtime_kr_hot_stocks():
             ma20 = close.rolling(20).mean().iloc[-1]
             ma5 = close.rolling(5).mean().iloc[-1]
 
-            # 1) 상승 추세
+            # -------------------------
+            # 5. 핵심 필터 (스윙 초입 구조)
+            # -------------------------
+
+            # ① 상승 추세
             trend_ok = last > ma20
 
-            # 2) 과열 제거 (핵심 개선)
-            recent_return = (close.iloc[-1] / close.iloc[-5] - 1) * 100
-            not_overheated = recent_return < 8   # 기존 10 → 더 타이트
+            # ② 과열 제거 (이미 많이 오른 종목 컷)
+            recent_5d_return = (close.iloc[-1] / close.iloc[-5] - 1) * 100
+            not_overheated = recent_5d_return < 8
 
-            # 3) 거래량 증가
+            # ③ 거래량 폭발 초기
             vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
             vol_ok = vol_ratio > 1.3
 
-            # 4) 눌림 상태 (너무 급락 제거)
+            # ④ 눌림/초입 구간
             change_rate = (close.iloc[-1] / close.iloc[-2] - 1) * 100
-            pullback_ok = change_rate <= 1 and change_rate >= -4
+            pullback_ok = -4 <= change_rate <= 1
+
+            # ⑤ 5일선 근처 (초입 핵심)
+            near_ma5 = abs(last - ma5) / ma5 < 0.04
 
             if trend_ok and not_overheated and vol_ok and pullback_ok:
                 result.append(code)
@@ -180,10 +193,12 @@ def get_realtime_kr_hot_stocks():
         except:
             continue
 
+    # -------------------------
+    # 6. 결과 안정화
+    # -------------------------
     df = df[df['Code'].isin(result)]
 
-    # 4. 최종 안정 샘플
-    if len(df) == 0:
+    if df.empty:
         return {}
 
     sampled = df.sample(n=min(5, len(df)), random_state=42)
