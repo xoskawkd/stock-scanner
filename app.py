@@ -441,7 +441,7 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
 
 st.divider()
 # ==========================================
-# 6. 내 포트폴리오 관리 시스템
+# 6. 내 포트폴리오 관리 시스템 (병렬 최적화)
 # ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
 
@@ -457,9 +457,15 @@ with st.form(key='portfolio_form', clear_on_submit=True):
 
 if st.session_state.my_portfolio:
     to_remove = None
+    
+    # [병렬 처리 핵심] 포트폴리오 종목들을 한꺼번에 조회
+    with st.spinner("데이터 동기화 중..."):
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            port_results = list(executor.map(get_portfolio_market_data, [p['name'] for p in st.session_state.my_portfolio]))
+
     for i, p in enumerate(st.session_state.my_portfolio):
         name, buy = p['name'], p['buy']
-        stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = get_portfolio_market_data(name)
+        stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = port_results[i]
         
         if curr == 0:
             st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다. (티커 오타 또는 거래소 일시 통신 지연)")
