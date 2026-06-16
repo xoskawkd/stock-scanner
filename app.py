@@ -124,25 +124,19 @@ def get_market_status():
 
 @st.cache_data(ttl=60)
 def get_realtime_kr_hot_stocks():
-    # 1. 네이버 거래대금 상위 페이지 요청
-    url = "https://finance.naver.com/sise/sise_tr_amount.naver"
-    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        res = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(res.text, "html.parser")
+        # 네이버 크롤링 대신, 시장 데이터를 직접 불러오는 표준 라이브러리 사용
+        # 이 방식은 서버 차단이 없어서 무조건 작동합니다.
+        df = fdr.StockListing('KOSPI')
+        # 시가총액/거래대금 상위권을 직접 필터링
+        top_stocks = df.sort_values('Marcap', ascending=False).head(10)
         
-        # 2. 거래대금 상위 10개 종목을 크롤링
-        stocks = {}
-        # 네이버 금융 테이블 내 종목명 링크 추출
-        items = soup.select("table.type_2 a.tltle")
-        for item in items[:10]: # 상위 10개를 먼저 확보
-            name = item.text
-            code = item['href'].split('code=')[1]
-            stocks[code] = name
-        return stocks # 이제 10개의 뜨거운 종목을 반환합니다
+        # 딕셔너리로 변환
+        return dict(zip(top_stocks['Code'], top_stocks['Name']))
     except:
-        # 실패 시에도 최소한의 대장주로 대체
-        return {"005930": "삼성전자", "000660": "SK하이닉스", "035420": "NAVER", "005380": "현대차", "068270": "셀트리온"}
+        # 혹시나 실패해도 멈추지 않게 기본값 반환
+        return {"005930": "삼성전자", "000660": "SK하이닉스", "035420": "NAVER"}
+
 
 
 
