@@ -2,4 +2,4 @@ yfinance
 ta
 pyupbit
 pandas
-beautifulsoup4
+lxml
