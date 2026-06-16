@@ -6,7 +6,6 @@ import requests
 import json
 import os
 import re
-from io import StringIO
 from ta.momentum import RSIIndicator
 from concurrent.futures import ThreadPoolExecutor
 
@@ -122,64 +121,9 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-
+@st.cache_data(ttl=30)
 def get_realtime_kr_hot_stocks():
-
-    st.write("함수 실행됨")
-
-    url = "https://finance.naver.com/sise/sise_quant.naver"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    try:
-        html = requests.get(
-            url,
-            headers=headers,
-            timeout=5
-        ).text
-
-        df = pd.read_html(StringIO(html))[1]
-        df = df.dropna()
-
-        result = {}
-
-        for _, row in df.head(30).iterrows():
-
-            name = str(row["종목명"]).strip()
-
-            try:
-                search_url = (
-                    f"https://m.stock.naver.com/api/search?keyword={name}"
-                )
-
-                res = requests.get(
-                    search_url,
-                    headers=headers,
-                    timeout=3
-                ).json()
-
-                stocks = res.get("stocks", [])
-
-                if stocks:
-                    code = stocks[0]["itemCode"]
-                    result[code] = name
-
-            except:
-                continue
-
-        return result
-
-    except:
-        return
-
-        return {
-            "005930": "삼성전자",
-            "000660": "SK하이닉스",
-            "035420": "NAVER"
-        }
-
+    return {"028300": "에이치엘비", "086520": "에코프로", "196170": "알테오젠"}
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
@@ -244,9 +188,6 @@ st.sidebar.metric("환율 (USD/KRW)", f"{exchange} 원")
 st.title("🚀 Tae's Balanced Smart TOP 3 Scanner")
 
 kr_live_dict = get_realtime_kr_hot_stocks()
-st.write("종목수:", len(kr_live_dict))
-st.write(kr_live_dict)
-
 us_live_list = get_safe_us_movers()
 try: coins_list = pyupbit.get_tickers(fiat="KRW")[:30]
 except: coins_list = ["KRW-BTC", "KRW-ETH", "KRW-XRP"]
