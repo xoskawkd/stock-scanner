@@ -334,7 +334,7 @@ def get_portfolio_market_data(name):
                     curr * 1.07
                 )
         except Exception as e:
-            st.error(f"국내주식 데이터 조회 오류: {e}"))
+            st.error(f"국내주식 데이터 조회 오류: {e}")
 
     # 2. 해외주식 (실시간성에 최적화된 수정본)
     try:
