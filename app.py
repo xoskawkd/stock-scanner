@@ -320,21 +320,30 @@ def get_portfolio_market_data(name):
             return f"{name} (국내주식)", real_price, score, rsi, "KRW", "Stock", stop_price, target_price
 
     # 2. 해외 주식 (info 대신 history로 즉시 접근)
-    if name.isalpha():
-        try:
-            df = yf.download(name, period="3mo", progress=False)
-            if not df.empty:
-                # yf.download는 멀티 인덱스일 수 있어 처리
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                
-                curr = float(df['Close'].iloc[-1])
-                s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-                
-                if curr > 0:
-                    return f"{name} (해외주식)", curr, s, r, "USD", "Stock", min(b_min*0.98, curr*0.94), curr*1.07
-        except Exception:
-            pass
+ # 2. 해외 주식
+try:
+    ticker = yf.Ticker(name)
+    df = ticker.history(period="3mo")
+
+    if df is not None and not df.empty:
+        curr = float(df["Close"].iloc[-1])
+
+        s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+
+        if curr > 0:
+            return (
+                f"{name} (해외주식)",
+                curr,
+                s,
+                r,
+                "USD",
+                "Stock",
+                min(b_min * 0.98, curr * 0.94),
+                curr * 1.07
+            )
+
+except Exception as e:
+    st.write(f"{name} 해외주식 에러:", e)
             
         # 3. 코인 (해외주식에서 실패하면 코인 시도)
         try:
