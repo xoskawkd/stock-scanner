@@ -444,6 +444,11 @@ st.divider()
 # 6. 내 포트폴리오 관리 시스템 (종목명 표시 최적화)
 # ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
+# [임시 코드] 포트폴리오 초기화 (한 번 실행 후 삭제하세요)
+if st.button("🚨 데이터 강제 초기화 (평단가 오류 해결)"):
+    st.session_state.my_portfolio = []
+    save_portfolio([])
+    st.rerun()
 
 with st.form(key='portfolio_form', clear_on_submit=True):
     c1, c2, c3 = st.columns([2, 1, 1])
