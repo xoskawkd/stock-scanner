@@ -181,7 +181,7 @@ def get_realtime_kr_hot_stocks():
         return result
 
     except:
-        return {
+        return {}
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
