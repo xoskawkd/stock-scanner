@@ -121,9 +121,42 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-@st.cache_data(ttl=30)
+from pykrx import stock
+
+@st.cache_data(ttl=300)
 def get_realtime_kr_hot_stocks():
-    return {"028300": "에이치엘비", "086520": "에코프로", "196170": "알테오젠"}
+
+    today = pd.Timestamp.today().strftime("%Y%m%d")
+
+    try:
+        kospi = stock.get_market_trading_value_by_ticker(
+            today, market="KOSPI"
+        )
+
+        kosdaq = stock.get_market_trading_value_by_ticker(
+            today, market="KOSDAQ"
+        )
+
+        merged = pd.concat([kospi, kosdaq])
+
+        merged = merged.sort_values(
+            by="전체",
+            ascending=False
+        ).head(50)
+
+        result = {}
+
+        for code in merged.index:
+            try:
+                name = stock.get_market_ticker_name(code)
+                result[code] = name
+            except:
+                pass
+
+        return result
+
+    except:
+        return {}
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
