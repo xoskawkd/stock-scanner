@@ -120,7 +120,6 @@ def get_market_status():
         usd = yf.Ticker("KRW=X").history(period="1d")['Close'].iloc[-1]
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
-
 @st.cache_data(ttl=300)
 def get_realtime_kr_hot_stocks():
 
@@ -131,44 +130,35 @@ def get_realtime_kr_hot_stocks():
     }
 
     try:
-        tables = pd.read_html(
-            requests.get(url, headers=headers, timeout=5).text
-        )
+        html = requests.get(
+            url,
+            headers=headers,
+            timeout=5
+        ).text
 
-        df = tables[1]
+        tables = pd.read_html(html)
 
-        df = df.dropna()
+        df = tables[1].dropna()
 
         result = {}
 
-        for _, row in df.head(50).iterrows():
+        for _, row in df.head(30).iterrows():
 
             name = str(row["종목명"]).strip()
 
-            try:
-                search_url = f"https://finance.naver.com/api/search/searchList.naver?query={name}"
-
-                res = requests.get(
-                    search_url,
-                    headers=headers,
-                    timeout=3
-                ).json()
-
-                if res["items"]:
-                    code = res["items"][0]["itemCode"]
-                    result[code] = name
-
-            except:
-                continue
+            result[f"DUMMY_{len(result)}"] = name
 
         return result
-except Exception as e:
-    st.error(f"국내주식 로딩 오류: {e}")
-    return {
-        "005930": "삼성전자",
-        "000660": "SK하이닉스",
-        "035420": "NAVER"
-    }
+
+    except Exception as e:
+        st.error(f"오류: {e}")
+
+        return {
+            "005930": "삼성전자",
+            "000660": "SK하이닉스",
+            "035420": "NAVER"
+        }
+
     
 
 def get_safe_us_movers():
