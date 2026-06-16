@@ -167,21 +167,7 @@ def get_realtime_kr_hot_stocks():
         return {
             "005930": "삼성전자",
             "000660": "SK하이닉스",
-            "035420": "NAVER"}
-        
-
-
-        for code in merged.index:
-            try:
-                name = stock.get_market_ticker_name(code)
-                result[code] = name
-            except:
-                pass
-
-        return result
-
-    except:
-        return {}
+            "035420": "NAVER" }
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
