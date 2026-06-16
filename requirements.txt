@@ -4,3 +4,4 @@ pyupbit
 pandas
 beautifulsoup4
 lxml
+finance-datareader
