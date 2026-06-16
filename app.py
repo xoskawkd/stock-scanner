@@ -126,7 +126,7 @@ import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
 
-# 1. 함수 정의부 (상단에 배치)
+# 1. 데이터 로드 함수 (캐시 적용)
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_krx():
     return fdr.StockListing('KRX')
@@ -138,44 +138,74 @@ def load_price(code):
     except:
         return None
 
+# 2. 메인 분석 함수 (안정성 강화)
 def get_realtime_kr_hot_stocks():
     df = load_krx()
+    # 데이터 유효성 검사
+    if df is None or df.empty:
+        return {}
+
+    # 필터링 및 타겟 선정
     targets = df[(df['Marcap'] > 1e11) & (df['Marcap'] < 3e13)]
     targets = targets.sort_values('Marcap', ascending=False).head(8)
-    
-    results = []
-    
-    # 🔥 status 컨테이너로 UI가 멈추지 않게 방어
-    with st.status("종목 스캔 진행 중...", expanded=True) as status:
-        for i, (code, name) in enumerate(zip(targets['Code'], targets['Name'])):
-            status.write(f"분석 중: {name} ({i+1}/8)")
-            price = load_price(code)
-            
-            if price is None or len(price) < 80: continue
-            
-            try:
-                # ... (기존 로직 동일) ...
-                dfp = price.tail(80)
-                # ... (필터 연산 생략 - 기존 코드 그대로 사용) ...
-                
-                results.append({"Code": code, "Name": name, "Probability": 10.0}) # 점수 로직
-            except:
-                continue
-        status.update(label="분석 완료!", state="complete", expanded=False)
-        
-    return results
 
-# 2. UI 및 호출부 (하단에 배치)
+    results = []
+
+    # st.status를 사용하여 UI 동기화 문제 해결
+    with st.status("종목 분석 중...", expanded=True) as status:
+        for i, (code, name) in enumerate(zip(targets['Code'], targets['Name'])):
+            status.write(f"분석 중: {name} ({i+1}/{len(targets)})")
+            
+            price = load_price(code)
+            if price is None or len(price) < 80:
+                continue
+
+            try:
+                dfp = price.tail(80)
+                close, high, low, volume = dfp['Close'], dfp['High'], dfp['Low'], dfp['Volume']
+                last = close.iloc[-1]
+
+                # 필터 로직
+                if last / close.iloc[-6] - 1 > 0.04: continue
+                
+                ma20 = close.rolling(20).mean().iloc[-1]
+                ma60 = close.rolling(60).mean().iloc[-1]
+                if last < ma20 or last < ma60: continue
+
+                vol = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
+                if vol > 0.18: continue
+
+                vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+                if vol_ratio < 1.0: continue
+
+                high60 = close.rolling(60).max().iloc[-1]
+                if last / high60 > 0.93: continue
+
+                # 점수 계산
+                score = (0.18 - vol) * 300 + (vol_ratio - 1.0) * 100
+                results.append({"Code": code, "Name": name, "Probability": round(score, 2)})
+
+            except Exception as e:
+                continue
+        
+        status.update(label="분석 완료!", state="complete", expanded=False)
+
+    # 결과 데이터 처리
+    if not results: return {}
+    df_res = pd.DataFrame(results).sort_values("Probability", ascending=False).head(3)
+    return dict(zip(df_res["Code"], df_res["Name"]))
+
+# 3. UI 부분
 st.title("🚀 Tae's Balanced Smart TOP 3 Scanner")
 
-# 🔥 핵심: 버튼을 눌러야만 함수가 호출되도록 변경
-if st.button("스캐너 실행"):
+if st.button("스캔 시작"):
     data = get_realtime_kr_hot_stocks()
     if data:
-        st.success("분석 완료")
+        st.success("찾은 종목들")
         st.write(data)
     else:
         st.warning("조건에 맞는 종목 없음")
+
 
 
 
