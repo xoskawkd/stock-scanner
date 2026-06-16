@@ -127,7 +127,7 @@ import pandas as pd
 import numpy as np
 
 @st.cache_data(ttl=600)
-def get_breakout_probability_stocks():
+def get_breakout_probability_model():
 
     df = fdr.StockListing('KRX')
     targets = df.sort_values(by='Marcap', ascending=False).head(100)
@@ -158,60 +158,67 @@ def get_breakout_probability_stocks():
             ma60 = close.rolling(60).mean().iloc[-1]
 
             # ----------------------------
-            # 2. 변동성 압축 (핵심)
+            # 2. 변동성 압축 점수
             # ----------------------------
             volatility = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
-            vol_score = max(0, (0.20 - volatility) * 1000)
+            vol_score = max(0, (0.20 - volatility) / 0.20)
 
             # ----------------------------
-            # 3. 거래량 증가 (초기 수급)
+            # 3. 거래량 점수
             # ----------------------------
             vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
-            vol_score2 = (vol_ratio - 1.0) * 200
+            if vol_ratio < 0.8:
+                vol_score2 = 0
+            elif vol_ratio > 2:
+                vol_score2 = 0.5
+            else:
+                vol_score2 = (vol_ratio - 0.8) / 1.2  # 0~1 스케일
 
             # ----------------------------
-            # 4. 이평선 수렴 (초입)
+            # 4. 이평선 수렴 점수
             # ----------------------------
             ma_diff = abs(ma5 - ma20) / ma20
-            ma_score = max(0, (0.03 - ma_diff) * 1000)
+            ma_score = max(0, (0.03 - ma_diff) / 0.03)
 
             # ----------------------------
             # 5. 추세 점수
             # ----------------------------
             trend_score = 0
-            if last > ma20: trend_score += 50
-            if last > ma60: trend_score += 50
-            if ma20 > ma60: trend_score += 50
+            if last > ma20: trend_score += 0.3
+            if last > ma60: trend_score += 0.3
+            if ma20 > ma60: trend_score += 0.4
 
             # ----------------------------
             # 6. 과열 패널티
             # ----------------------------
             high60 = close.rolling(60).max().iloc[-1]
             position = last / high60
-            overheat_penalty = max(0, (position - 0.92) * 500)
+            overheat_penalty = max(0, (position - 0.92) / 0.1)
 
             # ----------------------------
             # 7. 상승 속도 패널티
             # ----------------------------
             five_day = close.iloc[-1] / close.iloc[-6] - 1
-            momentum_penalty = max(0, (five_day - 0.05) * 1000)
+            momentum_penalty = max(0, (five_day - 0.05) / 0.1)
 
             # ----------------------------
-            # FINAL SCORE (확률 모델)
+            # FINAL PROBABILITY SCORE (0~100)
             # ----------------------------
-            score = (
-                vol_score +
-                vol_score2 +
-                ma_score +
-                trend_score -
-                overheat_penalty -
-                momentum_penalty
+            probability = (
+                vol_score * 25 +
+                vol_score2 * 25 +
+                ma_score * 20 +
+                trend_score * 20 -
+                overheat_penalty * 20 -
+                momentum_penalty * 20
             )
+
+            probability = max(0, min(100, probability * 100))
 
             results.append({
                 "Code": code,
                 "Name": name,
-                "Score": round(score, 2)
+                "Probability": round(probability, 2)
             })
 
         except:
@@ -222,7 +229,7 @@ def get_breakout_probability_stocks():
     if df_res.empty:
         return {}
 
-    df_res = df_res.sort_values(by="Score", ascending=False).head(5)
+    df_res = df_res.sort_values(by="Probability", ascending=False).head(5)
 
     return dict(zip(df_res["Code"], df_res["Name"]))
 
