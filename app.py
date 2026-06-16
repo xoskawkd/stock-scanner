@@ -436,55 +436,59 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
 st.divider()
 
 # ==========================================
-# 6. 수정된 포트폴리오 관리 (완전 강제 초기화 + 메모리 직접 제어)
+# 6. 내 포트폴리오 관리 시스템 (완벽 복구 + 오류 방어)
 # ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
 
-# 1. 완전 초기화: 세션과 파일을 동시에 삭제
-if st.button("⚠️ 포트폴리오 데이터 완전 초기화"):
-    if os.path.exists("portfolio.json"):
-        os.remove("portfolio.json")
-    st.session_state.my_portfolio = [] # 메모리 초기화
-    st.rerun()
-
-# 2. 추가 로직: 입력 직후 즉시 세션 업데이트
 with st.form(key='portfolio_form', clear_on_submit=True):
     c1, c2, c3 = st.columns([2, 1, 1])
-    n_in = c1.text_input("종목코드", placeholder="예: 005930")
-    b_in = c2.number_input("내 평단가", min_value=0.0, step=0.01, format="%.2f")
-    
-    if c3.form_submit_button("➕ 추가"):
-        if n_in and b_in > 0:
-            # 여기! 세션에 직접 추가
+    n_in = c1.text_input("종목코드(예: 005930) / 티커(예: PLTR, BTC)", placeholder="국내주식은 6자리 숫자")
+    b_in = c2.number_input("내 매수가", min_value=0.0, step=0.01, format="%.2f")
+    if c3.form_submit_button("➕ 포트폴리오 추가"):
+        if n_in:
             st.session_state.my_portfolio.append({"name": n_in.strip().upper(), "buy": float(b_in)})
-            save_portfolio(st.session_state.my_portfolio) # 파일에 저장
-            st.rerun()
-        else:
-            st.error("평단가를 0보다 크게 입력하세요.")
-
-# 3. 출력 로직: 세션값 강제 참조
-if st.session_state.my_portfolio:
-    for i, p in enumerate(st.session_state.my_portfolio):
-        name = p.get('name')
-        buy = float(p.get('buy', 0.0))
-        
-        # 여기서 p가 딕셔너리가 아니면 강제로 건너뜀
-        if not isinstance(p, dict) or buy <= 0:
-            continue
-            
-        # 데이터 조회
-        stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = get_portfolio_market_data(name)
-        
-        sym = "₩" if currency == "KRW" else "$"
-        profit = ((curr - buy) / buy * 100)
-        
-        st.markdown(f"### 📈 {stock_label}")
-        cols = st.columns(3)
-        cols[0].metric("내 평단가", f"{sym}{buy:,.2f}") # 이제 여기서 buy가 0으로 나올 수 없음
-        cols[1].metric("현재가", f"{sym}{curr:,.2f}")
-        cols[2].metric("수익률", f"{profit:+.2f}%")
-        
-        if st.button(f"🗑️ 삭제", key=f"del_{i}"):
-            st.session_state.my_portfolio.pop(i)
             save_portfolio(st.session_state.my_portfolio)
             st.rerun()
+
+if st.session_state.my_portfolio:
+    to_remove = None
+    for i, p in enumerate(st.session_state.my_portfolio):
+        name, buy = p['name'], p['buy']
+        stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = get_portfolio_market_data(name)
+        
+        # 데이터가 없을 때의 방어 로직 (이게 없어서 오류가 났던 겁니다)
+        if curr == 0:
+            st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다.")
+            if st.button(f"❌ {name} 삭제", key=f"err_del_{i}"):
+                to_remove = i
+            continue
+        
+        profit = ((curr - buy) / buy * 100) if buy > 0 else 0
+        sym = "₩" if currency == "KRW" else "$"
+        
+        st.markdown(f"### 📈 자산 대응 리포트: **{stock_label}**")
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("내 평단가", f"{sym}{buy:,.0f}" if currency == "KRW" else f"{sym}{buy:,.2f}")
+        col_m2.metric("실시간 현재가", f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}")
+        col_m3.metric("실시간 수익률", f"{'+' if profit >= 0 else ''}{profit:.2f}%")
+        
+        st.caption(f"📊 스윙 스코어: **{score}점** | 현재 RSI 상태: **{rsi}**")
+        
+        # 테이블은 curr이 0일 땐 안 그리게 해서 오류 원천 차단
+        df_guide = pd.DataFrame({
+            "포지션 전략": ["현재가 스탠스", "목표 익절가 (정밀)", "리스크 손절가 (지지선 이탈)"],
+            "대응 가격 단가": [
+                f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}", 
+                f"{sym}{calc_target:,.0f}" if currency == "KRW" else f"{sym}{calc_target:,.2f}", 
+                f"{sym}{calc_stop:,.0f}" if currency == "KRW" else f"{sym}{calc_stop:,.2f}"
+            ]
+        })
+        st.table(df_guide)
+        
+        if st.button(f"🗑️ {name} 삭제", key=f"del_final_{i}"):
+            to_remove = i
+            
+    if to_remove is not None:
+        st.session_state.my_portfolio.pop(to_remove)
+        save_portfolio(st.session_state.my_portfolio)
+        st.rerun()
