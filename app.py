@@ -125,110 +125,118 @@ def get_market_status():
 import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
+import numpy as np
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600)
 def load_krx():
     return fdr.StockListing('KRX')
 
-# 🔥 핵심: 종목별 캐시
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600)
 def load_price(code):
-    try:
-        df = fdr.DataReader(code, start="2024-01-01")
-        return df if df is not None and len(df) > 0 else None
-    except:
-        return None
+    return fdr.DataReader(code, start="2024-01-01")
 
+
+# =========================
+# 🔥 확률 모델
+# =========================
+def calc_breakout_probability(df):
+
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+    volume = df['Volume']
+
+    last = close.iloc[-1]
+
+    # 1️⃣ RSI
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_last = rsi.iloc[-1]
+
+    # 2️⃣ 변동성 압축
+    range20 = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
+    vol_score = max(0, (0.25 - range20) / 0.25)
+
+    # 3️⃣ 거래량 초기 폭발
+    vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+    vol_score = min(1, vol_ratio / 2)
+
+    # 4️⃣ 이평선 위치
+    ma20 = close.rolling(20).mean().iloc[-1]
+    ma_score = max(0, 1 - abs(last - ma20) / ma20)
+
+    # 5️⃣ 추세 점수
+    ma5 = close.rolling(5).mean().iloc[-1]
+    trend_score = 1 if last > ma20 else 0.5
+    trend_score += 0.5 if ma20 > close.rolling(60).mean().iloc[-1] else 0
+
+    # 6️⃣ 과열 패널티
+    high60 = close.rolling(60).max().iloc[-1]
+    overheat = last / high60
+
+    if overheat > 0.95:
+        penalty = 1
+    elif overheat > 0.90:
+        penalty = 0.5
+    else:
+        penalty = 0
+
+    # =========================
+    # 🔥 최종 확률 계산
+    # =========================
+    prob = (
+        vol_score * 0.25 +
+        vol_score * 0.25 +
+        ma_score * 0.2 +
+        trend_score * 0.2 +
+        (1 - penalty) * 0.1
+    )
+
+    # RSI 보정
+    if 40 <= rsi_last <= 60:
+        prob += 0.1
+    else:
+        prob -= 0.1
+
+    return round(max(0, min(1, prob)), 3)
 
 def get_realtime_kr_hot_stocks():
 
     df = load_krx()
-    if df is None or df.empty:
-        return {}
 
-    # 🔥 강제 제한 (멈춤 방지 핵심)
-    targets = df[(df['Marcap'] > 1e11) & (df['Marcap'] < 3e13)]
-    targets = targets.sort_values('Marcap', ascending=False).head(5)
+    targets = df[df['Marcap'] > 1e11].sort_values('Marcap', ascending=False).head(30)
 
     results = []
 
     for code, name in zip(targets['Code'], targets['Name']):
 
-        price = load_price(code)
-
-        # 🔥 핵심 방어
-        if price is None or len(price) < 80:
-            continue
-
         try:
-            dfp = price.tail(80)
+            dfp = load_price(code)
 
-            close = dfp['Close']
-            high = dfp['High']
-            low = dfp['Low']
-            volume = dfp['Volume']
-
-            last = close.iloc[-1]
-
-            # ----------------
-            # 급등 제거
-            # ----------------
-            if last / close.iloc[-6] - 1 > 0.04:
+            if dfp is None or len(dfp) < 80:
                 continue
 
-            # ----------------
-            # 추세
-            # ----------------
-            ma20 = close.rolling(20).mean().iloc[-1]
-            ma60 = close.rolling(60).mean().iloc[-1]
+            prob = calc_breakout_probability(dfp)
 
-            if last < ma20 or last < ma60:
+            # 🔥 핵심 필터 (노이즈 제거)
+            if prob < 0.55:
                 continue
-
-            # ----------------
-            # 변동성
-            # ----------------
-            vol = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
-            if vol > 0.18:
-                continue
-
-            # ----------------
-            # 거래량
-            # ----------------
-            vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
-            if vol_ratio < 1.0:
-                continue
-
-            # ----------------
-            # 과열
-            # ----------------
-            high60 = close.rolling(60).max().iloc[-1]
-            if last / high60 > 0.93:
-                continue
-
-            # ----------------
-            # 점수
-            # ----------------
-            score = (0.18 - vol) * 300 + (vol_ratio - 1.0) * 100
 
             results.append({
                 "Code": code,
                 "Name": name,
-                "Probability": round(score, 2)
+                "Probability": prob
             })
 
         except:
             continue
 
-    if not results:
-        return {}
+    results = sorted(results, key=lambda x: x["Probability"], reverse=True)[:3]
 
-    df_res = pd.DataFrame(results)
-    df_res = df_res.sort_values("Probability", ascending=False).head(3)
-
-    return dict(zip(df_res["Code"], df_res["Name"]))
-
-
+    return {r["Code"]: r["Name"] for r in results}
 
 
 
