@@ -124,6 +124,7 @@ def get_market_status():
 
 import FinanceDataReader as fdr
 import pandas as pd
+from datetime import datetime, timedelta
 
 @st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
@@ -144,22 +145,42 @@ def get_realtime_kr_hot_stocks():
             close = price['Close']
             last = close.iloc[-1]
 
+            # -------------------------
+            # 1. 추세 필터
+            # -------------------------
             ma20 = close.rolling(20).mean().iloc[-1]
             if last < ma20:
                 continue
 
+            # -------------------------
+            # 2. 고점 위치 필터 (강화)
+            # -------------------------
             high60 = close.rolling(60).max().iloc[-1]
             position = last / high60
-            if position > 0.95 or position < 0.75:
+
+            # 👉 기존 0.95 너무 널널 → 0.92로 강화
+            if position > 0.92 or position < 0.75:
                 continue
 
+            # -------------------------
+            # 3. 상승 속도 필터 (핵심 추가)
+            # -------------------------
+            five_day_return = close.iloc[-1] / close.iloc[-6] - 1
+            if five_day_return > 0.05:
+                continue
+
+            # -------------------------
+            # 4. 하루 급등 제거
+            # -------------------------
             recent_change = (close.iloc[-1] / close.iloc[-2] - 1) * 100
-            if recent_change > 5:
+            if recent_change > 3:   # 기존 5 → 3으로 강화
                 continue
 
-            # 🔥 추가 (핵심 보정: "눌림 필터")
+            # -------------------------
+            # 5. 눌림 필터 (5일선)
+            # -------------------------
             ma5 = close.rolling(5).mean().iloc[-1]
-            if last > ma5 * 1.03:
+            if last > ma5 * 1.02:
                 continue
 
             valid.append((code, name))
@@ -167,7 +188,9 @@ def get_realtime_kr_hot_stocks():
         except:
             continue
 
-    # 🔥 안정적 샘플링 (랜덤 + 중복 제거)
+    # -------------------------
+    # 6. 안정 샘플링
+    # -------------------------
     valid = valid[:50]
 
     if len(valid) == 0:
