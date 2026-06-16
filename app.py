@@ -171,8 +171,8 @@ def get_realtime_kr_hot_stocks():
 
         return result
 
-    except Exception as e:
-        st.error(f"국내주식 로딩 실패: {e}")
+    except:
+        return
 
         return {
             "005930": "삼성전자",
