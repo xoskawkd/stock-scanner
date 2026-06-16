@@ -6,7 +6,7 @@ import requests
 import json
 import os
 import re
-from bs4 import BeautifulSoup
+import FinanceDataReader as fdr
 from ta.momentum import RSIIndicator
 from concurrent.futures import ThreadPoolExecutor
 
@@ -122,20 +122,21 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-@st.cache_data(ttl=60)
+import FinanceDataReader as fdr
+
+@st.cache_data(ttl=600) # 10분마다 새로 고침
 def get_realtime_kr_hot_stocks():
-    try:
-        # 네이버 크롤링 대신, 시장 데이터를 직접 불러오는 표준 라이브러리 사용
-        # 이 방식은 서버 차단이 없어서 무조건 작동합니다.
-        df = fdr.StockListing('KOSPI')
-        # 시가총액/거래대금 상위권을 직접 필터링
-        top_stocks = df.sort_values('Marcap', ascending=False).head(10)
-        
-        # 딕셔너리로 변환
-        return dict(zip(top_stocks['Code'], top_stocks['Name']))
-    except:
-        # 혹시나 실패해도 멈추지 않게 기본값 반환
-        return {"005930": "삼성전자", "000660": "SK하이닉스", "035420": "NAVER"}
+    # 1. KOSPI, KOSDAQ 전체 리스트를 가져옵니다.
+    df = fdr.StockListing('KRX')
+    
+    # 2. 거래대금 데이터가 없으므로, 우리 스윙 엔진에 넘길 수 있게 
+    # '변동성'이나 '시가총액' 기준으로 상위 종목을 뽑아 리스트를 만듭니다.
+    # 이렇게 하면 고정값이 아니라 매일 시장 대장주가 바뀝니다.
+    top_stocks = df.sort_values(by='Marcap', ascending=False).head(20)
+    
+    # 3. 딕셔너리로 반환 (코드: 이름)
+    return dict(zip(top_stocks['Code'], top_stocks['Name']))
+
 
 
 
