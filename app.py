@@ -131,28 +131,28 @@ def get_market_status():
         
 @st.cache_data(ttl=60)
 def get_realtime_kr_hot_stocks():
-    # 1. 네이버 금융의 '거래대금 상위' 페이지를 호출
     url = "https://finance.naver.com/sise/sise_tr_amount.naver"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        # 2. pd.read_html은 BeautifulSoup보다 훨씬 안정적입니다.
-        dfs = pd.read_html(url, header=0)
-        # 테이블 내에서 종목 리스트를 가져옴
-        df = dfs[0]
-        # 거래대금 상위 데이터 추출 (종목명, 링크)
-        # 종목코드 추출을 위해 링크 열을 활용
+        # pd.read_html이 크롤링 에러가 가장 적습니다.
+        df_list = pd.read_html(url, header=0)
+        df = df_list[0]
+        # 종목명과 링크에서 코드를 추출
         stocks = {}
-        # 실제 네이버 페이지 구조상 종목명은 '종목명' 컬럼에 있음
-        for i in range(1, 4): # 상위 3개
-            name = df.loc[i, '종목명']
-            # 코드 추출을 위해 임의로 하드코딩이 아닌, 데이터 기반 매칭이 필요하지만 
-            # 일단 가장 확실한 방법은 아래와 같습니다.
-            stocks[f"CODE_{i}"] = str(name) 
-        
-        # 주의: 여기서는 종목명만 일단 출력하게 수정했으니, 
-        # 아래 fetch_kr 함수도 같이 수정해야 합니다!
+        # 네이버 금융 테이블에서 '종목명' 컬럼 사용
+        # 링크 정보를 가져오기 위해 직접 요청
+        res = requests.get(url, headers=headers)
+        soup = BeautifulSoup(res.text, "html.parser")
+        items = soup.select("a.tltle")
+        for item in items[:3]:
+            name = item.text
+            code = item['href'].split('code=')[1]
+            stocks[code] = name
         return stocks
     except:
+        # 여기를 비워두거나 에러를 출력하면 왜 안 나오는지 알 수 있습니다.
         return {"005930": "삼성전자", "086520": "에코프로", "196170": "알테오젠"}
+
 
 
 
