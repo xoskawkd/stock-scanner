@@ -127,24 +127,25 @@ import FinanceDataReader as fdr
 @st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
     df = fdr.StockListing('KRX')
-    
-    # 1. 시총 5천억 이상 + 거래대금 100억 이상 (우량주 & 활발한 종목)
-    df = df[df['Marcap'] > 500000000000]
+
+    # 1. 시총 + 거래대금 필터
+    df = df[df['Marcap'] > 500_000_000_000]
+
     if 'Amount' in df.columns:
-        df = df[df['Amount'] >= 10000000000]
-    
-    # [핵심 변경] 오늘 시가(Open) 대비 현재가(Close)가 낮은 종목만 추출
-    # 즉, 오늘 마이너스(-)거나, 아침보다 가격이 빠진 '눌림목' 상태인 종목
-    # (ChangeRate가 0보다 작거나, 마이너스 구간인 종목만 잡힘)
+        df = df[df['Amount'] >= 10_000_000_000]
+
+    # 2. 눌림 조건 (과한 급락 제거까지 추가)
     if 'ChangeRate' in df.columns:
-        df = df[df['ChangeRate'] <= 0]
+        df = df[(df['ChangeRate'] <= 0) & (df['ChangeRate'] >= -5)]
     elif 'Change' in df.columns:
-        df = df[df['Change'] <= 0]
-        
-    # 2. 거래량 많은 순으로 정렬 후 상위 10개 중 무작위 5개 추출
-    # 이제 이미 오른 놈들은 로직상 절대 나올 수 없습니다.
-    sampled = df.sort_values(by='Amount', ascending=False).head(10).sample(n=min(5, 10))
-    
+        df = df[(df['Change'] <= 0)]
+
+    # 3. 거래대금 기준 정렬 (상위 유동성 유지)
+    df = df.sort_values(by='Amount', ascending=False).head(20)
+
+    # 4. 랜덤 샘플 (과도한 노이즈 방지용 안정 샘플)
+    sampled = df.sample(n=min(5, len(df)), random_state=42)
+
     return dict(zip(sampled['Code'], sampled['Name']))
 
 
