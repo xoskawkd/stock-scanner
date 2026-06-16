@@ -441,16 +441,17 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
 
 st.divider()
 # ==========================================
-# 6. 내 포트폴리오 관리 시스템 (병렬 최적화)
+# 6. 내 포트폴리오 관리 시스템 (속도 최적화 및 안정성 보완)
 # ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
 
 with st.form(key='portfolio_form', clear_on_submit=True):
     c1, c2, c3 = st.columns([2, 1, 1])
-    n_in = c1.text_input("종목코드(예: 005930) / 티커(예: PLTR, VUZI, BTC)", placeholder="국내주식은 6자리 숫자, 해외주식/코인은 영문 티커 입력")
+    n_in = c1.text_input("종목코드(예: 005930) / 티커(예: PLTR, VUZI, BTC)", placeholder="국내 6자리/해외/코인 입력")
     b_in = c2.number_input("내 매수가", min_value=0.0, step=0.01, format="%.2f")
     if c3.form_submit_button("➕ 포트폴리오 추가"):
         if n_in:
+            # 입력값을 깔끔하게 정리하여 저장
             st.session_state.my_portfolio.append({"name": n_in.strip().upper(), "buy": float(b_in)})
             save_portfolio(st.session_state.my_portfolio)
             st.rerun()
@@ -458,47 +459,51 @@ with st.form(key='portfolio_form', clear_on_submit=True):
 if st.session_state.my_portfolio:
     to_remove = None
     
-    # [병렬 처리 핵심] 포트폴리오 종목들을 한꺼번에 조회
-    with st.spinner("데이터 동기화 중..."):
+    # [병렬 처리] 네트워크 통신을 한 번에 묶어서 처리하여 속도 대폭 향상
+    with st.spinner("자산 데이터 동기화 중..."):
         with ThreadPoolExecutor(max_workers=10) as executor:
             port_results = list(executor.map(get_portfolio_market_data, [p['name'] for p in st.session_state.my_portfolio]))
 
     for i, p in enumerate(st.session_state.my_portfolio):
-        st.write(p)
-        name, buy = p['name'], p['buy']
+        # p는 {"name": "...", "buy": ...} 형태의 딕셔너리입니다.
+        name = p.get('name', 'N/A')
+        buy = float(p.get('buy', 0.0))
+        
+        # 병렬 처리된 결과에서 가져오기
         stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = port_results[i]
         
         if curr == 0:
-            st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다. (티커 오타 또는 거래소 일시 통신 지연)")
+            st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다. (티커 오류 또는 통신 지연)")
             if st.button(f"❌ {name} 강제 누적 에러 삭제", key=f"err_del_{i}"):
                 to_remove = i
             continue
         
+        # 수익률 계산 (buy가 0이면 수익률은 0)
         profit = ((curr - buy) / buy * 100) if buy > 0 else 0
         sym = "₩" if currency == "KRW" else "$"
         
         st.markdown(f"### 📈 자산 대응 리포트: **{stock_label}**")
         col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("내 평단가", f"{sym}{buy:,.0f}" if currency == "KRW" else f"{sym}{buy:,.2f}")
-        col_m2.metric("실시간 현재가", f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}")
+        col_m1.metric("내 평단가", f"{sym}{buy:,.2f}")
+        col_m2.metric("실시간 현재가", f"{sym}{curr:,.2f}")
         
         color_trend = "+" if profit >= 0 else ""
         col_m3.metric("실시간 수익률", f"{color_trend}{profit:.2f}%")
-        st.caption(f"📊 스윙 스코어: **{score}점** | 현재 RSI 상태: **{rsi}**")
+        st.caption(f"📊 스윙 스코어: **{score}점** | 현재 RSI 상태: **{rsi:.1f}**")
         
         df_guide = pd.DataFrame({
             "포지션 전략": ["현재가 스탠스", "목표 익절가 (정밀)", "리스크 손절가 (지지선 이탈)"],
             "대응 가격 단가": [
-                f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}", 
-                f"{sym}{calc_target:,.0f}" if currency == "KRW" else f"{sym}{calc_target:,.2f}", 
-                f"{sym}{calc_stop:,.0f}" if currency == "KRW" else f"{sym}{calc_stop:,.2f}"
+                f"{sym}{curr:,.2f}", 
+                f"{sym}{calc_target:,.2f}", 
+                f"{sym}{calc_stop:,.2f}"
             ]
         })
         st.table(df_guide)
         
         if st.button(f"🗑️ {name} 삭제", key=f"del_final_{i}"):
             to_remove = i
-        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("---") # 깔끔하게 구분선 추가
         
     if to_remove is not None:
         st.session_state.my_portfolio.pop(to_remove)
