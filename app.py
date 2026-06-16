@@ -77,34 +77,67 @@ def calculate_swing_score_and_bands(df):
 # 100% 국산 실시간 매싱 + 지지선 타점 연산 결합 (안정성 강화)
 # ==========================================
 def calculate_kr_realtime_score(code):
+
+    headers = {
+
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+
+        "Referer": f"https://finance.naver.com/item/main.naver?code={code}"
+
+    }
+
     try:
-        # 1. KOSPI/KOSDAQ 구분하여 yfinance 티커 설정
-        # 00, 01, 02, 03, 04, 05, 06 코드는 주로 코스피
-        market_suffix = ".KS" if code.startswith(('00','01','02','03','04','05','06')) else ".KQ"
+
+        # 네이버 API 요청 시 타임아웃 및 예외 처리 강화
+
+        api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
+
+        api_res = requests.get(api_url, headers=headers, timeout=5).json()
+
+        item_data = api_res['result']['areas'][0]['datas'][0]
+
+        current = float(item_data['nv']) 
+
+        volume_now = float(item_data['aq']) 
+
         
-        # 2. yfinance로 데이터 조회 (가장 안정적)
-        ticker = yf.Ticker(f"{code}{market_suffix}")
-        df = ticker.history(period="3mo")
-        
-        if df.empty:
-            return 40, 0, 50.0, "데이터 없음", 0, 0
+
+        df = yf.Ticker(f"{code}.KS" if code.startswith(('00','01','02','03','04','05','06')) else f"{code}.KQ").history(period="3mo")
+
+        if df.empty: df = yf.Ticker(f"{code}.KQ").history(period="3mo")
+
             
-        # 3. 최신 데이터(현재가) 추출
-        current = float(df['Close'].iloc[-1])
+
+        if df.empty:
+
+            return 40, current, 50.0, f"{int(current*0.96):,} ~ {int(current):,}", int(current*1.07), int(current*0.94)
+
         
-        # 4. 스윙 스코어 및 밴드 계산
+
+        df.iloc[-1, df.columns.get_loc('Close')] = current
+
+        df.iloc[-1, df.columns.get_loc('Volume')] = volume_now
+
+        
+
         score, _, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
+
         
-        # 5. 결과값 계산
+
         buy_range = f"{int(buy_min):,} ~ {int(buy_max):,}"
+
         target_price = int(current * 1.07)
+
+        # 보수적 손절선 (지지선 이탈 혹은 -6%)
+
         stop_price = int(min(buy_min * 0.98, current * 0.94))
+
         
+
         return score, current, rsi, buy_range, target_price, stop_price
-        
-    except Exception as e:
-        # 에러 발생 시 로그 출력 (디버깅용)
-        # print(f"Error calculating score for {code}: {e}")
+
+    except:
+
         return 40, 0, 50.0, "데이터 동기화 실패", 0, 0
 
 
