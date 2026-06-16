@@ -464,6 +464,7 @@ if st.session_state.my_portfolio:
             port_results = list(executor.map(get_portfolio_market_data, [p['name'] for p in st.session_state.my_portfolio]))
 
     for i, p in enumerate(st.session_state.my_portfolio):
+        st.write(p)
         name, buy = p['name'], p['buy']
         stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = port_results[i]
         
