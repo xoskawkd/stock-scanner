@@ -312,15 +312,33 @@ def fetch_kr(item):
 # ==========================================
 def get_portfolio_market_data(name):
     name = name.strip().upper()
+    
+    # 1. 국내 주식 (6자리 숫자)
     if name.isdigit() and len(name) == 6:
         score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(name)
-        return f"{name} (국내주식)", real_price, score, rsi, "KRW", "Stock", stop_price, target_price
+        if real_price > 0:
+            return f"{name} (국내주식)", real_price, score, rsi, "KRW", "Stock", stop_price, target_price
+
+    # 2. 해외 주식 (영문 티커) - 핵심 수정
     try:
-        df = yf.Ticker(name).history(period="3mo")
+        ticker = yf.Ticker(name)
+        df = ticker.history(period="3mo")
+        # 데이터가 충분하면 분석
         if not df.empty and len(df) >= 20:
-            s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-            if c > 0: return name, c, s, r, "USD", "Stock", min(b_min*0.98, c*0.94), c*1.07
-    except: pass
+            # 현재가 가져오기
+            curr = float(df['Close'].iloc[-1])
+            s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+            
+            # 계산 결과가 유효하면 반환
+            if curr > 0:
+                # 해외주식용 타점 산출
+                calc_target = curr * 1.07
+                calc_stop = min(b_min * 0.98, curr * 0.94)
+                return f"{name} (해외주식)", curr, s, r, "USD", "Stock", calc_stop, calc_target
+    except Exception as e:
+        pass
+
+    # 3. 코인 (영문)
     if name.isalpha():
         try:
             df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=60)
@@ -328,6 +346,7 @@ def get_portfolio_market_data(name):
                 s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
                 if c > 0: return f"{name} (업비트 코인)", c, s, r, "KRW", "Crypto", min(b_min*0.98, c*0.92), c*1.10
         except: pass
+
     return None, 0, 0, 0, "USD", "Stock", 0, 0
 
 # ==========================================
