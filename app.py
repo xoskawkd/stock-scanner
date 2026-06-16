@@ -440,134 +440,66 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
                 <li>📉 손절선: <span style="color:#ef4444;">{sym}{item['손절가']:,}</span></li></ul></div>""", unsafe_allow_html=True)
 
 st.divider()
-# ==========================================
-
-# 6. 내 포트폴리오 관리 시스템 (병렬 최적화)
 
 # ==========================================
-
+# 6. 내 포트폴리오 관리 시스템 (데이터 무결성 최적화)
+# ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
 
-
-
 with st.form(key='portfolio_form', clear_on_submit=True):
-
     c1, c2, c3 = st.columns([2, 1, 1])
-
-    n_in = c1.text_input("종목코드(예: 005930) / 티커(예: PLTR, VUZI, BTC)", placeholder="국내주식은 6자리 숫자, 해외주식/코인은 영문 티커 입력")
-
+    n_in = c1.text_input("종목코드/티커", placeholder="예: 005930, PLTR, BTC")
     b_in = c2.number_input("내 매수가", min_value=0.0, step=0.01, format="%.2f")
-
     if c3.form_submit_button("➕ 포트폴리오 추가"):
-
         if n_in:
-
-            st.session_state.my_portfolio.append({"name": n_in.strip().upper(), "buy": float(b_in)})
-
+            # 딕셔너리 구조를 강제로 고정
+            new_item = {"name": n_in.strip().upper(), "buy": float(b_in)}
+            st.session_state.my_portfolio.append(new_item)
             save_portfolio(st.session_state.my_portfolio)
-
             st.rerun()
 
-
-
 if st.session_state.my_portfolio:
-
     to_remove = None
-
     
-
-    # [병렬 처리 핵심] 포트폴리오 종목들을 한꺼번에 조회
-
     with st.spinner("데이터 동기화 중..."):
-
         with ThreadPoolExecutor(max_workers=10) as executor:
-
             port_results = list(executor.map(get_portfolio_market_data, [p['name'] for p in st.session_state.my_portfolio]))
 
-
-
     for i, p in enumerate(st.session_state.my_portfolio):
-
+        # p가 딕셔너리인지 확인하고, 없으면 기본값 생성
+        if not isinstance(p, dict): p = {"name": str(p), "buy": 0.0}
         
-
-        name, buy = p['name'], p['buy']
-
+        name = p.get('name', 'N/A')
+        buy = float(p.get('buy', 0.0))
+        
         stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = port_results[i]
-
         
-
+        # curr이 0이면 데이터 로드 실패
         if curr == 0:
-
-            st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다. (티커 오타 또는 거래소 일시 통신 지연)")
-
-            if st.button(f"❌ {name} 강제 누적 에러 삭제", key=f"err_del_{i}"):
-
-                to_remove = i
-
+            st.error(f"⚠️ {name} 데이터를 가져오지 못했습니다.")
+            if st.button(f"❌ {name} 삭제", key=f"err_del_{i}"): to_remove = i
             continue
-
         
-
+        # 수익률 계산
         profit = ((curr - buy) / buy * 100) if buy > 0 else 0
-
         sym = "₩" if currency == "KRW" else "$"
-
         
-
         st.markdown(f"### 📈 자산 대응 리포트: **{stock_label}**")
-
         col_m1, col_m2, col_m3 = st.columns(3)
-
-        col_m1.metric("내 평단가", f"{sym}{buy:,.0f}" if currency == "KRW" else f"{sym}{buy:,.2f}")
-
-        col_m2.metric("실시간 현재가", f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}")
-
+        col_m1.metric("내 평단가", f"{sym}{buy:,.2f}")
+        col_m2.metric("실시간 현재가", f"{sym}{curr:,.2f}")
+        col_m3.metric("실시간 수익률", f"{'+' if profit >= 0 else ''}{profit:.2f}%")
         
-
-        color_trend = "+" if profit >= 0 else ""
-
-        col_m3.metric("실시간 수익률", f"{color_trend}{profit:.2f}%")
-
-        st.caption(f"📊 스윙 스코어: **{score}점** | 현재 RSI 상태: **{rsi}**")
-
+        st.caption(f"📊 스윙 스코어: **{score}점** | 현재 RSI: **{rsi:.1f}**")
+        st.table(pd.DataFrame({
+            "포지션 전략": ["현재가", "목표가", "손절가"],
+            "가격": [f"{sym}{curr:,.2f}", f"{sym}{calc_target:,.2f}", f"{sym}{calc_stop:,.2f}"]
+        }))
         
-
-        df_guide = pd.DataFrame({
-
-            "포지션 전략": ["현재가 스탠스", "목표 익절가 (정밀)", "리스크 손절가 (지지선 이탈)"],
-
-            "대응 가격 단가": [
-
-                f"{sym}{curr:,.0f}" if currency == "KRW" else f"{sym}{curr:,.2f}", 
-
-                f"{sym}{calc_target:,.0f}" if currency == "KRW" else f"{sym}{calc_target:,.2f}", 
-
-                f"{sym}{calc_stop:,.0f}" if currency == "KRW" else f"{sym}{calc_stop:,.2f}"
-
-            ]
-
-        })
-
-        st.table(df_guide)
-
+        if st.button(f"🗑️ {name} 삭제", key=f"del_{i}"): to_remove = i
+        st.markdown("---")
         
-
-        if st.button(f"🗑️ {name} 삭제", key=f"del_final_{i}"):
-
-            to_remove = i
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        
-
     if to_remove is not None:
-
         st.session_state.my_portfolio.pop(to_remove)
-
         save_portfolio(st.session_state.my_portfolio)
-
         st.rerun()
-
-else:
-
-    st.info("현재 등록된 관심 자산이 없습니다. 위 입력창에 등록해 보세요!")
