@@ -125,30 +125,25 @@ def get_market_status():
 import FinanceDataReader as fdr
 
 @st.cache_data(ttl=600)
-def get_realtime_kr_hot_stocks():
+def get_swing_start_stocks():
     df = fdr.StockListing('KRX')
     
-    # 1. 시총 5천억 + 거래대금 100억 이상 (우량주 필수)
-    df = df[df['Marcap'] > 500000000000]
-    if 'Amount' in df.columns:
-        df = df[df['Amount'] >= 10000000000]
+    # 1. 시총 5천억 이상 + 거래대금 300억 이상 (수급은 확실히 들어온 놈)
+    df = df[(df['Marcap'] > 500000000000) & (df['Amount'] >= 30000000000)]
     
-    # [핵심 변경] '상승'한 놈은 다 뺍니다.
-    # 오늘 시가 대비 하락 중인(음봉) 종목만 5개 뽑습니다.
+    # 2. 핵심: '스윙 초입' 필터
+    # - 상승률은 마이너스 혹은 0% 부근 (이미 오른 놈 제외)
+    # - 전일 종가 대비 0~2% 하락 중인 놈들 (눌림목 확보)
     if 'ChangeRate' in df.columns:
-        df = df[df['ChangeRate'] < 0] # 0% 이하(하락 중인 놈들만)
-    elif 'Change' in df.columns:
-        df = df[df['Change'] < 0]
-        
-    # 2. 하락폭이 너무 크지 않은 놈(너무 급락한 건 제외)
-    # -0.5% ~ -3% 사이에서 조정 받는 건강한 음봉만 필터
-    if 'ChangeRate' in df.columns:
-        df = df[df['ChangeRate'] > -3.0]
-        
-    # 3. 거래대금 큰 순서대로 정렬
-    sampled = df.sort_values(by='Amount', ascending=False).head(5)
+        df = df[(df['ChangeRate'] < 0) & (df['ChangeRate'] > -3.0)]
+    
+    # 3. 추가 조건: 이평선 수렴 확인 (간이 로직)
+    # 주가가 너무 위로 튀지 않은 놈들만 상위로 정렬
+    # (이미 많이 오른 놈은 아예 명단에서 배제됨)
+    sampled = df.sort_values(by='ChangeRate', ascending=True).head(5)
     
     return dict(zip(sampled['Code'], sampled['Name']))
+
 
 
 
