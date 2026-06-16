@@ -130,44 +130,48 @@ def get_realtime_kr_hot_stocks():
     import pandas as pd
     from datetime import datetime, timedelta
 
-    # 1. 거래대금 상위 30개를 가져옴
+    # 1. 대상 종목 10개만 선정
     df_list = fdr.StockListing('KRX')
     df_list = df_list[(df_list['Marcap'] > 500_000_000_000) & (df_list['Amount'] >= 10_000_000_000)]
-    df_list = df_list.sort_values(by='Amount', ascending=False).head(30)
+    target_df = df_list.sort_values(by='Amount', ascending=False).head(10)
     
     valid_stocks = []
-    
-    # 2. 핵심 변경: 30개를 다 분석하지 말고, 딱 5개만 뽑아서 루프를 빨리 끝내기
-    for code, name in zip(df_list['Code'].head(10), df_list['Name'].head(10)):
+    start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+
+    # 2. 루프를 돌리지 않고 종목별로 안전하게 데이터 처리
+    for code, name in zip(target_df['Code'], target_df['Name']):
         try:
-            # 기간을 확실히 정해서 호출 (속도 향상)
-            price = fdr.DataReader(code, start=(datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d'))
+            # 0.5초 대기 (서버 요청 부하 분산)
+            import time
+            time.sleep(0.1)
             
+            price = fdr.DataReader(code, start=start_date)
             if len(price) < 60: continue
             
             close = price['Close']
             last = close.iloc[-1]
             
-            # 지표 계산
+            # 기술적 지표
             delta = close.diff()
-            rsi = 100 - (100 / (1 + (delta.clip(lower=0).rolling(14).mean() / (-delta.clip(upper=0).rolling(14).mean()))))
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rsi = 100 - (100 / (1 + (gain / loss)))
             ma20 = close.rolling(20).mean().iloc[-1]
             high60 = close.rolling(60).max().iloc[-1]
             position = last / high60
             ma_diff = (last - ma20) / ma20 * 100
             
-            # [필터] 확실한 스윙 초입만 통과
+            # 필터링
             if (40 <= rsi.iloc[-1] <= 60) and (0.70 <= position <= 0.85) and (ma_diff <= 3):
                 score = (0.85 - position) * 1000 + (60 - rsi.iloc[-1]) * 2
                 valid_stocks.append({'Code': code, 'Name': name, 'Score': int(score)})
-                
-            # 결과가 3개 이상 모이면 더 이상 분석 안 하고 즉시 종료 (오류 방지)
-            if len(valid_stocks) >= 3: break
-            
         except:
             continue
 
-    return {s['Code']: s['Name'] for s in sorted(valid_stocks, key=lambda x: x['Score'], reverse=True)}
+    # 상위 3개만 결과 반환
+    top_stocks = sorted(valid_stocks, key=lambda x: x['Score'], reverse=True)[:3]
+    return {s['Code']: s['Name'] for s in top_stocks}
+
 
 
 
