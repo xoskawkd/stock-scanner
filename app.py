@@ -6,6 +6,7 @@ import requests
 import json
 import os
 import re
+from bs4 import BeautifulSoup
 from ta.momentum import RSIIndicator
 from concurrent.futures import ThreadPoolExecutor
 
@@ -121,9 +122,30 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-@st.cache_data(ttl=30)
+
+@st.cache_data(ttl=60)
 def get_realtime_kr_hot_stocks():
-    return {"028300": "에이치엘비", "086520": "에코프로", "196170": "알테오젠"}
+    url = "https://finance.naver.com/sise/sise_tr_amount.naver"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        # 네이버 금융에서 거래대금 상위 표를 읽어옵니다.
+        df_list = pd.read_html(url, header=0)[0]
+        # 종목명과 링크 정보를 긁어오기 위해 BeautifulSoup 사용
+        res = requests.get(url, headers=headers)
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        stocks = {}
+        # 표에서 종목명과 코드를 추출
+        items = soup.select("a.tltle")
+        for item in items[:3]:  # 딱 3개만 가져옴
+            name = item.text
+            code = item['href'].split('code=')[1]
+            stocks[code] = name
+        return stocks
+    except:
+        # 실패 시에도 최소한의 대장주 3개는 보장
+        return {"005930": "삼성전자", "000660": "SK하이닉스", "035420": "NAVER"}
+
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
