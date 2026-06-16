@@ -107,6 +107,25 @@ def calculate_kr_realtime_score(code):
         # print(f"Error calculating score for {code}: {e}")
         return 40, 0, 50.0, "데이터 동기화 실패", 0, 0
 
+# 기존 주식 로직은 그대로 두고, 코인용 함수만 따로 만드세요
+def calculate_crypto_realtime_score(coin_ticker):
+    try:
+        # 코인은 pyupbit로만 처리
+        df = pyupbit.get_ohlcv(coin_ticker, interval="day", count=60)
+        if df is None or df.empty:
+            return 40, 0, 50.0, "데이터 없음", 0, 0
+            
+        current = float(df['close'].iloc[-1]) # pyupbit는 소문자 'close'인 경우가 많음
+        score, _, rsi, buy_min, buy_max, ma20 = calculate_swing_score_and_bands(df)
+        
+        buy_range = f"{int(buy_min):,} ~ {int(buy_max):,}"
+        target_price = int(current * 1.10) # 코인은 변동성이 크니 10%
+        stop_price = int(min(buy_min * 0.98, current * 0.92)) # 8% 손절
+        
+        return score, current, rsi, buy_range, target_price, stop_price
+    except:
+        return 40, 0, 50.0, "코인 데이터 실패", 0, 0
+
 # ==========================================
 # 3. 실시간 마켓 현황 및 추출 로직
 # ==========================================
