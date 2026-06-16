@@ -311,92 +311,36 @@ def fetch_kr(item):
 # 4. 포트폴리오 자산 실시간 매싱 연동
 # ==========================================
 def get_portfolio_market_data(name):
-
     name = name.strip().upper()
-
-    # 국내주식
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
     if name.isdigit() and len(name) == 6:
-
         score, real_price, rsi, buy_range, target_price, stop_price = calculate_kr_realtime_score(name)
-
+        kr_name = None
+        try:
+            url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{name}"
+            res = requests.get(url, headers=headers, timeout=2).json()
+            kr_name = res['result']['areas'][0]['datas'][0]['nm']
+        except: pass
+        
         if real_price > 0:
-            return (
-                f"{name} (국내주식)",
-                real_price,
-                score,
-                rsi,
-                "KRW",
-                "Stock",
-                stop_price,
-                target_price
-            )
+            final_name = kr_name if kr_name else f"국내주식 {name}"
+            return f"{name} ({final_name})", real_price, score, rsi, "KRW", "Stock", stop_price, target_price
 
-    # 해외주식
     try:
-
-        df = yf.download(
-            name,
-            period="3mo",
-            interval="1d",
-            progress=False,
-            auto_adjust=False
-        )
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        if not df.empty and "Close" in df.columns:
-
-            df = df.dropna(subset=["Close"])
-
-            if len(df) >= 20:
-
-                curr = float(df["Close"].iloc[-1])
-
-                s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-
-                if curr > 0:
-                    return (
-                        f"{name} (해외주식)",
-                        curr,
-                        s,
-                        r,
-                        "USD",
-                        "Stock",
-                        min(b_min * 0.98, curr * 0.94),
-                        curr * 1.07
-                    )
-
-    except Exception as e:
-        st.error(f"{name} 해외주식 오류: {e}")
-
-    # 코인
-    try:
-
-        df = pyupbit.get_ohlcv(
-            f"KRW-{name}",
-            interval="day",
-            count=60
-        )
-
-        if df is not None and not df.empty:
-
+        df = yf.Ticker(name).history(period="3mo")
+        if not df.empty and len(df) >= 5:
             s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+            if c > 0: return name, c, s, r, "USD", "Stock", min(b_min*0.98, c*0.94), c*1.07
+    except: pass
 
-            if c > 0:
-                return (
-                    f"{name} (업비트 코인)",
-                    c,
-                    s,
-                    r,
-                    "KRW",
-                    "Crypto",
-                    min(b_min * 0.98, c * 0.92),
-                    c * 1.10
-                )
-
-    except Exception as e:
-        st.error(f"{name} 코인 오류: {e}")
+    if name.isalpha():
+        try:
+            df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=40)
+            if df is not None and not df.empty:
+                s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
+                if c > 0: return f"{name} (업비트 코인)", c, s, r, "KRW", "Crypto", min(b_min*0.98, c*0.92), c*1.10
+        except: pass
 
     return None, 0, 0, 0, "USD", "Stock", 0, 0
 
