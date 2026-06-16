@@ -6,6 +6,7 @@ import requests
 import json
 import os
 import re
+from io import StringIO
 from ta.momentum import RSIIndicator
 from concurrent.futures import ThreadPoolExecutor
 
@@ -121,9 +122,38 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=300)
 def get_realtime_kr_hot_stocks():
-    return {"028300": "에이치엘비", "086520": "에코프로", "196170": "알테오젠"}
+
+    url = "https://finance.naver.com/sise/sise_quant.naver"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    try:
+        html = requests.get(
+            url,
+            headers=headers,
+            timeout=5
+        ).text
+
+        tables = pd.read_html(StringIO(html))
+
+        df = tables[1].dropna()
+
+        st.write(df.head())
+
+        return {
+            "005930": "삼성전자",
+            "000660": "SK하이닉스",
+            "035420": "NAVER"
+        }
+
+    except Exception as e:
+        st.error(e)
+        return {}
+
 
 def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
