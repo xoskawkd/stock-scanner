@@ -167,8 +167,8 @@ def get_realtime_kr_hot_stocks():
         return {
             "005930": "삼성전자",
             "000660": "SK하이닉스",
-            "035420": "NAVER"
-        }
+            "035420": "NAVER"}
+        
 
 
         for code in merged.index:
