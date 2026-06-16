@@ -127,25 +127,43 @@ import FinanceDataReader as fdr
 import pandas as pd
 import numpy as np
 
+# =========================
+# 1️⃣ KRX 종목 리스트 (캐시)
+# =========================
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_krx():
+    df = fdr.StockListing('KRX')
+    return df
+
+# =========================
+# 2️⃣ 가격 데이터 캐시 (핵심)
+# =========================
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_price(code):
+    return fdr.DataReader(code, start="2024-01-01")
+
+# =========================
+# 3️⃣ 메인 스캐너 (완전체)
+# =========================
 @st.cache_data(ttl=600, show_spinner=False)
 def get_realtime_kr_hot_stocks():
 
-    df_krx = fdr.StockListing('KRX')
+    df_krx = load_krx()
 
-    # 1️⃣ 시총 필터 (대형주 + 잡주 제거)
-    df_krx = df_krx[df_krx['Marcap'] > 1e11]
-    df_krx = df_krx[df_krx['Marcap'] < 3e13]
+    # 1️⃣ 대형주 + 잡주 필터
+    df_krx = df_krx[(df_krx['Marcap'] > 1e11) & (df_krx['Marcap'] < 3e13)]
 
-    targets = df_krx.sort_values(by='Marcap', ascending=False).head(80)
+    targets = df_krx.sort_values(by='Marcap', ascending=False).head(30)
 
     results = []
 
-    for code, name in zip(targets['Code'], targets['Name']):
+    # 2️⃣ 속도 보호 (무조건 20개 제한)
+    for code, name in zip(targets['Code'][:20], targets['Name'][:20]):
+
         try:
+            price = load_price(code)  # 🔥 캐시된 데이터 (핵심)
 
-            price = fdr.DataReader(code, start="2024-01-01")
-
-            if len(price) < 80:
+            if price is None or len(price) < 80:
                 continue
 
             df = price.tail(80).dropna()
@@ -157,25 +175,25 @@ def get_realtime_kr_hot_stocks():
 
             last = close.iloc[-1]
 
-            # ----------------------------
-            # 🔥 2️⃣ 이미 급등 제거
-            # ----------------------------
+            # =========================
+            # 1️⃣ 이미 급등 제거
+            # =========================
             five_day = last / close.iloc[-6] - 1
             if five_day > 0.04:
                 continue
 
-            # ----------------------------
-            # 🔥 3️⃣ 추세 필터
-            # ----------------------------
+            # =========================
+            # 2️⃣ 추세 필터
+            # =========================
             ma20 = close.rolling(20).mean().iloc[-1]
             ma60 = close.rolling(60).mean().iloc[-1]
 
             if last < ma20 or last < ma60:
                 continue
 
-            # ----------------------------
-            # 🔥 4️⃣ 변동성 압축
-            # ----------------------------
+            # =========================
+            # 3️⃣ 변동성 압축
+            # =========================
             high20 = high.rolling(20).max().iloc[-1]
             low20 = low.rolling(20).min().iloc[-1]
 
@@ -183,34 +201,35 @@ def get_realtime_kr_hot_stocks():
             if volatility > 0.18:
                 continue
 
-            # ----------------------------
-            # 🔥 5️⃣ 이평선 수렴
-            # ----------------------------
+            # =========================
+            # 4️⃣ 이평선 수렴
+            # =========================
             ma5 = close.rolling(5).mean().iloc[-1]
 
             if abs(ma5 - ma20) / ma20 > 0.025:
                 continue
 
-            # ----------------------------
-            # 🔥 6️⃣ 거래량 초기 유입
-            # ----------------------------
-            vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+            # =========================
+            # 5️⃣ 거래량 초기 유입
+            # =========================
+            vol_mean = volume.rolling(20).mean().iloc[-1]
+            vol_ratio = volume.iloc[-1] / vol_mean if vol_mean != 0 else 0
 
             if not (1.0 <= vol_ratio <= 2.2):
                 continue
 
-            # ----------------------------
-            # 🔥 7️⃣ 과열 제거
-            # ----------------------------
+            # =========================
+            # 6️⃣ 과열 제거
+            # =========================
             high60 = close.rolling(60).max().iloc[-1]
             position = last / high60
 
             if position > 0.93:
                 continue
 
-            # ----------------------------
-            # 🔥 8️⃣ 확률 점수
-            # ----------------------------
+            # =========================
+            # 🔥 확률 점수
+            # =========================
             score = 0
 
             score += (0.18 - volatility) * 400
