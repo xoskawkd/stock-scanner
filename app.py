@@ -1,4 +1,4 @@
-import streamlit as st
+mport streamlit as st
 import pyupbit
 import yfinance as yf
 import pandas as pd
@@ -124,74 +124,17 @@ def get_market_status():
 
 import FinanceDataReader as fdr
 
-import streamlit as st
-import FinanceDataReader as fdr
-import pandas as pd
-from datetime import datetime, timedelta
-import time
-
-# 1. 모든 로직을 하나의 함수에 통합 (이름 오류 방지)
+@st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
-    try:
-        df_list = fdr.StockListing('KRX')
-        target_df = df_list[(df_list['Marcap'] > 500_000_000_000) & (df_list['Amount'] >= 10_000_000_000)].sort_values(by='Amount', ascending=False).head(5)
-        
-        valid_stocks = []
-        start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
-        
-        for code, name in zip(target_df['Code'], target_df['Name']):
-            try:
-                time.sleep(0.1) # 서버 부하 방지
-                price = fdr.DataReader(code, start=start_date)
-                if len(price) < 60: continue
-                
-                close = price['Close']
-                rsi = 100 - (100 / (1 + (close.diff().clip(lower=0).rolling(14).mean() / (-close.diff().clip(upper=0).rolling(14).mean()))))
-                ma20 = close.rolling(20).mean().iloc[-1]
-                high60 = close.rolling(60).max().iloc[-1]
-                position = close.iloc[-1] / high60
-                ma_diff = (close.iloc[-1] - ma20) / ma20 * 100
-                
-                if (40 <= rsi.iloc[-1] <= 60) and (0.70 <= position <= 0.85) and (ma_diff <= 3):
-                    score = int((0.85 - position) * 1000 + (60 - rsi.iloc[-1]) * 2)
-                    valid_stocks.append({'Name': name, 'Code': code, 'Score': score})
-            except:
-                continue
-        return sorted(valid_stocks, key=lambda x: x['Score'], reverse=True)
-    except:
-        return []
-
-# 2. 메인 화면 구성
-st.title("🚀 스윙 초입 포착 스캐너")
-
-if st.button("종목 분석 실행"):
-    with st.spinner('서버 데이터를 안전하게 불러오는 중...'):
-        results = get_realtime_kr_hot_stocks()
-        if results:
-            for stock in results:
-                st.success(f"{stock['Name']} ({stock['Code']}) - 스윙 점수: {stock['Score']}")
-        else:
-            st.warning("분석 결과가 없습니다.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    # 1. KRX 전체 종목 리스트 불러오기
+    df = fdr.StockListing('KRX')
+    
+    # 2. 거래대금 상위가 아니라, 시가총액 상위 100개(우량주) 중에서 무작위로 추출
+    # 이미 오른 급등주를 피하고 우량주 위주로 스캔합니다.
+    targets = df.sort_values(by='Marcap', ascending=False).head(100)
+    sampled = targets.sample(n=5) 
+    
+    return dict(zip(sampled['Code'], sampled['Name']))
 
 
 
