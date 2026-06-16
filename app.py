@@ -127,130 +127,103 @@ import FinanceDataReader as fdr
 import pandas as pd
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_price(code):
-    return fdr.DataReader(code, start="2024-01-01")
-
-@st.cache_data(ttl=3600, show_spinner=False)
 def load_krx():
     return fdr.StockListing('KRX')
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_price(code):
+    try:
+        return fdr.DataReader(code, start="2024-01-01")
+    except:
+        return None
 
 
 def get_realtime_kr_hot_stocks():
 
     df = load_krx()
-    df = df[(df['Marcap'] > 1e11) & (df['Marcap'] < 3e13)]
-    targets = df.sort_values(by='Marcap', ascending=False).head(10)
+
+    # 🔥 종목 수 강제 제한 (중요)
+    targets = df[(df['Marcap'] > 1e11) & (df['Marcap'] < 3e13)]
+    targets = targets.sort_values('Marcap', ascending=False).head(8)
 
     results = []
 
-    with st.status("스캔 진행 중...", expanded=False) as status:
+    for code, name in zip(targets['Code'], targets['Name']):
 
-        for i, (code, name) in enumerate(zip(targets['Code'], targets['Name'])):
+        price = load_price(code)
 
-            # 🔥 UI 업데이트 최소화 (핵심)
-            status.update(label=f"분석 중... ({i+1}/10)")
+        # 🔥 핵심 방어 (멈춤 방지)
+        if price is None or len(price) < 80:
+            continue
 
-            try:
-                price = load_price(code)
+        try:
+            dfp = price.tail(80)
 
-                if price is None or len(price) < 80:
-                    continue
+            close = dfp['Close']
+            high = dfp['High']
+            low = dfp['Low']
+            volume = dfp['Volume']
 
-                dfp = price.tail(80).dropna()
+            last = close.iloc[-1]
 
-                close = dfp['Close']
-                high = dfp['High']
-                low = dfp['Low']
-                volume = dfp['Volume']
-
-                last = close.iloc[-1]
-
-                # ------------------------
-                # 1️⃣ 급등 제거
-                # ------------------------
-                if last / close.iloc[-6] - 1 > 0.04:
-                    continue
-
-                # ------------------------
-                # 2️⃣ 추세
-                # ------------------------
-                ma20 = close.rolling(20).mean().iloc[-1]
-                ma60 = close.rolling(60).mean().iloc[-1]
-
-                if last < ma20 or last < ma60:
-                    continue
-
-                # ------------------------
-                # 3️⃣ 변동성
-                # ------------------------
-                vol = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
-                if vol > 0.18:
-                    continue
-
-                # ------------------------
-                # 4️⃣ 이평선
-                # ------------------------
-                ma5 = close.rolling(5).mean().iloc[-1]
-                if abs(ma5 - ma20) / ma20 > 0.025:
-                    continue
-
-                # ------------------------
-                # 5️⃣ 거래량
-                # ------------------------
-                vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
-                if not (1.0 <= vol_ratio <= 2.2):
-                    continue
-
-                # ------------------------
-                # 6️⃣ 과열
-                # ------------------------
-                high60 = close.rolling(60).max().iloc[-1]
-                position = last / high60
-                if position > 0.93:
-                    continue
-
-                # ------------------------
-                # 점수
-                # ------------------------
-                score = 0
-                score += (0.18 - vol) * 400
-                score += (0.025 - abs(ma5 - ma20) / ma20) * 500
-                score += (vol_ratio - 1.0) * 120
-
-                if ma20 > ma60:
-                    score += 30
-                if last > ma20:
-                    score += 30
-
-                results.append({
-                    "Code": code,
-                    "Name": name,
-                    "Probability": round(score, 2)
-                })
-
-            except:
+            # ------------------
+            # 급등 제거
+            # ------------------
+            if last / close.iloc[-6] - 1 > 0.04:
                 continue
+
+            # ------------------
+            # 추세
+            # ------------------
+            ma20 = close.rolling(20).mean().iloc[-1]
+            ma60 = close.rolling(60).mean().iloc[-1]
+
+            if last < ma20 or last < ma60:
+                continue
+
+            # ------------------
+            # 변동성
+            # ------------------
+            vol = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
+            if vol > 0.18:
+                continue
+
+            # ------------------
+            # 거래량
+            # ------------------
+            vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+            if vol_ratio < 1.0:
+                continue
+
+            # ------------------
+            # 과열
+            # ------------------
+            high60 = close.rolling(60).max().iloc[-1]
+            if last / high60 > 0.93:
+                continue
+
+            # ------------------
+            # 점수
+            # ------------------
+            score = (0.18 - vol) * 300 + (vol_ratio - 1.0) * 100
+
+            results.append({
+                "Code": code,
+                "Name": name,
+                "Probability": round(score, 2)
+            })
+
+        except:
+            continue
 
     if not results:
         return {}
 
     df_res = pd.DataFrame(results)
-    df_res = df_res.sort_values(by="Probability", ascending=False).head(5)
+    df_res = df_res.sort_values("Probability", ascending=False).head(3)
 
     return dict(zip(df_res["Code"], df_res["Name"]))
-
-
-# =========================
-# UI
-# =========================
-if st.button("스캐너 시작"):
-    data = get_realtime_kr_hot_stocks()
-
-    if data:
-        st.success("결과")
-        st.json(data)
-    else:
-        st.warning("조건 종목 없음")
 
 
 
