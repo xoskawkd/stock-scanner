@@ -314,21 +314,22 @@ def fetch_kr(item):
 def get_portfolio_market_data(name):
     name = name.strip().upper()
 
-    # 1. 국내주식
+    # 1. 국내주식 (종목명 매칭 로직 추가)
     if name.isdigit() and len(name) == 6:
         try:
+            # KRX 리스트에서 종목명 찾기
+            krx = load_krx()
+            target_row = krx[krx['Code'] == name]
+            display_name = target_row['Name'].values[0] if not target_row.empty else "국내주식"
+            
             df = fdr.DataReader(name)
-
             if df is not None and not df.empty:
-
                 df = df.tail(120)
-
                 curr = float(df["Close"].iloc[-1])
-
                 s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-
+                
                 return (
-                    f"{name} (국내주식)",
+                    f"{name} ({display_name})", # 종목명 적용됨
                     curr,
                     s,
                     r,
@@ -337,21 +338,18 @@ def get_portfolio_market_data(name):
                     min(b_min * 0.98, curr * 0.94),
                     curr * 1.07
                 )
-
         except Exception as e:
             st.error(f"국내주식 오류: {e}")
 
-    # 2. 해외주식
+    # 2. 해외주식 (티커에 대응하는 간단한 이름 표시)
     try:
         ticker = yf.Ticker(name)
-
-        curr = float(ticker.fast_info['last_price'])
-
+        # fast_info 사용 시 에러 방지
+        curr = float(ticker.fast_info.get('last_price', 0))
         df = ticker.history(period="3mo", interval="1d")
-
+        
         if not df.empty and curr > 0:
             s, _, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-
             return (
                 f"{name} (해외주식)",
                 curr,
@@ -362,22 +360,14 @@ def get_portfolio_market_data(name):
                 min(b_min * 0.98, curr * 0.94),
                 curr * 1.07
             )
-
     except Exception:
         pass
 
     # 3. 코인
     try:
-        df = pyupbit.get_ohlcv(
-            f"KRW-{name}",
-            interval="day",
-            count=60
-        )
-
+        df = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=60)
         if df is not None and not df.empty:
-
             s, c, r, b_min, b_max, ma20 = calculate_swing_score_and_bands(df)
-
             if c > 0:
                 return (
                     f"{name} (업비트 코인)",
@@ -389,7 +379,6 @@ def get_portfolio_market_data(name):
                     min(b_min * 0.98, c * 0.92),
                     c * 1.10
                 )
-
     except Exception:
         pass
 
