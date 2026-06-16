@@ -147,7 +147,7 @@ def get_realtime_kr_hot_stocks():
 
 
 
-hdef get_safe_us_movers():
+def get_safe_us_movers():
     return ["PLTR", "MSTR", "HOOD", "ASTS", "MARA", "RIOT", "UPST", "AFRM", "SOFI", "RIVN"]
 
 def fetch_us(stock):
