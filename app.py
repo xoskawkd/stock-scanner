@@ -122,116 +122,85 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
+import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
 import numpy as np
 
-@st.cache_data(ttl=600)
-def get_breakout_probability_model():
-
-    df = fdr.StockListing('KRX')
-    targets = df.sort_values(by='Marcap', ascending=False).head(100)
+# 함수 이름을 에러가 났던 get_realtime_kr_hot_stocks로 통일했습니다.
+@st.cache_data(ttl=600, show_spinner=False)
+def get_realtime_kr_hot_stocks():
+    # 1. 시가총액 상위 100개 종목 호출
+    df_krx = fdr.StockListing('KRX')
+    targets = df_krx.sort_values(by='Marcap', ascending=False).head(100)
 
     results = []
 
     for code, name in zip(targets['Code'], targets['Name']):
         try:
-            price = fdr.DataReader(code)
-
+            # 2. 최근 80일 데이터만 가져와서 속도 최적화
+            # start 날짜를 최근으로 지정하면 훨씬 빠르게 작동합니다.
+            price = fdr.DataReader(code, start='2025-01-01')
+            
             if len(price) < 80:
                 continue
 
-            df_tail = price.tail(80)
-
-            close = df_tail['Close']
-            high = df_tail['High']
-            low = df_tail['Low']
-            volume = df_tail['Volume']
-
+            # NaN 제거 및 최근 80일 데이터 확보
+            df = price.tail(80).dropna()
+            
+            close = df['Close']
+            high = df['High']
+            low = df['Low']
+            volume = df['Volume']
             last = close.iloc[-1]
 
-            # ----------------------------
-            # 1. 이동평균
-            # ----------------------------
+            # 3. 주요 지표 계산
             ma5 = close.rolling(5).mean().iloc[-1]
             ma20 = close.rolling(20).mean().iloc[-1]
             ma60 = close.rolling(60).mean().iloc[-1]
 
-            # ----------------------------
-            # 2. 변동성 압축 점수
-            # ----------------------------
-            volatility = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
+            # 4. 각 점수 계산 (분모 0 방지)
+            # 변동성 압축
+            low_20 = low.rolling(20).min().iloc[-1]
+            high_20 = high.rolling(20).max().iloc[-1]
+            volatility = (high_20 - low_20) / low_20 if low_20 != 0 else 0
             vol_score = max(0, (0.20 - volatility) / 0.20)
 
-            # ----------------------------
-            # 3. 거래량 점수
-            # ----------------------------
-            vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
-            if vol_ratio < 0.8:
-                vol_score2 = 0
-            elif vol_ratio > 2:
-                vol_score2 = 0.5
-            else:
-                vol_score2 = (vol_ratio - 0.8) / 1.2  # 0~1 스케일
+            # 거래량
+            vol_mean = volume.rolling(20).mean().iloc[-1]
+            vol_ratio = volume.iloc[-1] / vol_mean if vol_mean != 0 else 0
+            vol_score2 = 0.5 if vol_ratio > 2 else (max(0, vol_ratio - 0.8) / 1.2) if vol_ratio >= 0.8 else 0
 
-            # ----------------------------
-            # 4. 이평선 수렴 점수
-            # ----------------------------
-            ma_diff = abs(ma5 - ma20) / ma20
+            # 이평선 수렴
+            ma_diff = abs(ma5 - ma20) / ma20 if ma20 != 0 else 1
             ma_score = max(0, (0.03 - ma_diff) / 0.03)
 
-            # ----------------------------
-            # 5. 추세 점수
-            # ----------------------------
-            trend_score = 0
-            if last > ma20: trend_score += 0.3
-            if last > ma60: trend_score += 0.3
-            if ma20 > ma60: trend_score += 0.4
+            # 추세
+            trend_score = (0.3 if last > ma20 else 0) + (0.3 if last > ma60 else 0) + (0.4 if ma20 > ma60 else 0)
 
-            # ----------------------------
-            # 6. 과열 패널티
-            # ----------------------------
+            # 패널티
             high60 = close.rolling(60).max().iloc[-1]
-            position = last / high60
-            overheat_penalty = max(0, (position - 0.92) / 0.1)
-
-            # ----------------------------
-            # 7. 상승 속도 패널티
-            # ----------------------------
-            five_day = close.iloc[-1] / close.iloc[-6] - 1
+            overheat_penalty = max(0, ((last / high60 if high60 != 0 else 1) - 0.92) / 0.1)
+            five_day = (last / close.iloc[-6]) - 1
             momentum_penalty = max(0, (five_day - 0.05) / 0.1)
 
-            # ----------------------------
-            # FINAL PROBABILITY SCORE (0~100)
-            # ----------------------------
-            probability = (
-                vol_score * 25 +
-                vol_score2 * 25 +
-                ma_score * 20 +
-                trend_score * 20 -
-                overheat_penalty * 20 -
-                momentum_penalty * 20
-            )
+            # 최종 점수
+            probability = (vol_score * 25 + vol_score2 * 25 + ma_score * 20 + trend_score * 20 - overheat_penalty * 20 - momentum_penalty * 20)
+            score = round(max(0, min(100, probability * 100)), 2)
 
-            probability = max(0, min(100, probability * 100))
+            results.append({"Code": code, "Name": name, "Probability": score})
 
-            results.append({
-                "Code": code,
-                "Name": name,
-                "Probability": round(probability, 2)
-            })
-
-        except:
+        except Exception:
             continue
 
+    # 5. 결과 반환 (상위 5개)
     df_res = pd.DataFrame(results)
-
     if df_res.empty:
         return {}
-
+    
     df_res = df_res.sort_values(by="Probability", ascending=False).head(5)
-
     return dict(zip(df_res["Code"], df_res["Name"]))
+
 
 
 
