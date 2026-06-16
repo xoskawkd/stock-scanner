@@ -436,65 +436,55 @@ for title, data, sym in [("🇺🇸 해외 알짜 성장주 TOP 3", us_top, "$")
 st.divider()
 
 # ==========================================
-# 6. 내 포트폴리오 관리 시스템 (데이터 무결성 최적화)
+# 6. 수정된 포트폴리오 관리 (완전 강제 초기화 + 메모리 직접 제어)
 # ==========================================
 st.header("💼 실시간 내 자산 관리 피드")
 
-# 초기화 버튼
+# 1. 완전 초기화: 세션과 파일을 동시에 삭제
 if st.button("⚠️ 포트폴리오 데이터 완전 초기화"):
-    if os.path.exists("portfolio.json"): os.remove("portfolio.json")
-    st.session_state.my_portfolio = []
+    if os.path.exists("portfolio.json"):
+        os.remove("portfolio.json")
+    st.session_state.my_portfolio = [] # 메모리 초기화
     st.rerun()
 
-# 포트폴리오 추가 폼
+# 2. 추가 로직: 입력 직후 즉시 세션 업데이트
 with st.form(key='portfolio_form', clear_on_submit=True):
     c1, c2, c3 = st.columns([2, 1, 1])
-    n_in = c1.text_input("종목코드", placeholder="예: 005930, PLTR, BTC")
+    n_in = c1.text_input("종목코드", placeholder="예: 005930")
     b_in = c2.number_input("내 평단가", min_value=0.0, step=0.01, format="%.2f")
+    
     if c3.form_submit_button("➕ 추가"):
-        if n_in:
-            # 강제로 딕셔너리 구조 명시
-            new_item = {"name": n_in.strip().upper(), "buy": float(b_in)}
-            st.session_state.my_portfolio.append(new_item)
-            save_portfolio(st.session_state.my_portfolio)
+        if n_in and b_in > 0:
+            # 여기! 세션에 직접 추가
+            st.session_state.my_portfolio.append({"name": n_in.strip().upper(), "buy": float(b_in)})
+            save_portfolio(st.session_state.my_portfolio) # 파일에 저장
             st.rerun()
+        else:
+            st.error("평단가를 0보다 크게 입력하세요.")
 
-# 포트폴리오 리스트 출력
+# 3. 출력 로직: 세션값 강제 참조
 if st.session_state.my_portfolio:
-    to_remove = None
-    # 데이터 매싱
-    with st.spinner("데이터 동기화 중..."):
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            port_results = list(executor.map(get_portfolio_market_data, [p['name'] for p in st.session_state.my_portfolio]))
-
     for i, p in enumerate(st.session_state.my_portfolio):
-        # 구조 체크 및 복구 로직 (이게 없어서 0이 떴던 것임)
-        if not isinstance(p, dict):
+        name = p.get('name')
+        buy = float(p.get('buy', 0.0))
+        
+        # 여기서 p가 딕셔너리가 아니면 강제로 건너뜀
+        if not isinstance(p, dict) or buy <= 0:
             continue
             
-        name = p.get('name', 'N/A')
-        buy = float(p.get('buy', 0.0)) # 여기가 핵심입니다. 0이면 데이터 오류 발생
+        # 데이터 조회
+        stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = get_portfolio_market_data(name)
         
-        # 데이터가 비어있을 때를 대비한 강제 보정
-        if buy <= 0:
-            st.error(f"종목 {name}의 평단가가 0으로 설정되어 있습니다. 삭제 후 다시 등록하세요.")
-        
-        stock_label, curr, score, rsi, currency, cat, calc_stop, calc_target = port_results[i]
-        
-        # 결과 출력
         sym = "₩" if currency == "KRW" else "$"
-        profit = ((curr - buy) / buy * 100) if buy > 0 else 0
+        profit = ((curr - buy) / buy * 100)
         
         st.markdown(f"### 📈 {stock_label}")
-        col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("내 평단가", f"{sym}{buy:,.2f}") # 저장된 buy 값 그대로 출력
-        col_m2.metric("현재가", f"{sym}{curr:,.2f}")
-        col_m3.metric("수익률", f"{profit:+.2f}%")
+        cols = st.columns(3)
+        cols[0].metric("내 평단가", f"{sym}{buy:,.2f}") # 이제 여기서 buy가 0으로 나올 수 없음
+        cols[1].metric("현재가", f"{sym}{curr:,.2f}")
+        cols[2].metric("수익률", f"{profit:+.2f}%")
         
-        if st.button(f"🗑️ {name} 삭제", key=f"del_{i}"):
-            to_remove = i
-            
-    if to_remove is not None:
-        st.session_state.my_portfolio.pop(to_remove)
-        save_portfolio(st.session_state.my_portfolio)
-        st.rerun()
+        if st.button(f"🗑️ 삭제", key=f"del_{i}"):
+            st.session_state.my_portfolio.pop(i)
+            save_portfolio(st.session_state.my_portfolio)
+            st.rerun()
