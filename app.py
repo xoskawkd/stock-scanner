@@ -143,7 +143,7 @@ def load_price(code):
 
 
 # =========================
-# 🔥 급등 직전 확률 모델 (최종 수정본)
+# 🔥 급등 직전 확률 모델 (보정 최종)
 # =========================
 def breakout_probability(df):
 
@@ -157,32 +157,42 @@ def breakout_probability(df):
     last = close.iloc[-1]
 
     # =========================
-    # 🚨 0. 이미 급등한 종목 제거 (핵심)
+    # 🚨 0. 초입 필터 강화 (핵심 추가)
     # =========================
-    recent_3d = close.iloc[-1] / close.iloc[-4] - 1
-    if recent_3d > 0.05:
+
+    # 변동성 너무 낮으면 제거 (죽은 종목 제거)
+    range20 = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
+    if range20 < 0.08:
         return 0
 
-    high20 = close.rolling(20).max().iloc[-1]
-    if last / high20 > 0.97:
+    # 최근 5일 정체 종목 제거
+    if close.pct_change().abs().rolling(5).mean().iloc[-1] < 0.008:
         return 0
 
-    vol_mean20 = volume.rolling(20).mean().iloc[-1]
-    vol_ratio = volume.iloc[-1] / vol_mean20 if vol_mean20 != 0 else 0
+    # 거래량 "가속" 필터 (핵심)
+    vol_now = volume.iloc[-1]
+    vol_prev = volume.iloc[-6] if len(volume) > 6 else 0
 
-    if vol_ratio < 0.9 or vol_ratio > 1.8:
+    if vol_prev == 0 or (vol_now / vol_prev) < 1.25:
         return 0
 
     # =========================
     # 1️⃣ 변동성 압축
     # =========================
-    range20 = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
     compression = max(0, (0.18 - range20) / 0.18)
 
     # =========================
-    # 2️⃣ 거래량 점수
+    # 2️⃣ 거래량
     # =========================
-    volume_score = max(0, min(1, (vol_ratio - 0.7) / 1.1))
+    vol_mean20 = volume.rolling(20).mean().iloc[-1]
+    vol_ratio = vol_now / vol_mean20 if vol_mean20 != 0 else 0
+
+    if vol_ratio < 0.6:
+        volume_score = 0
+    elif vol_ratio < 1.2:
+        volume_score = (vol_ratio - 0.6) / 0.6
+    else:
+        volume_score = 1
 
     # =========================
     # 3️⃣ 이평선 밀착
@@ -237,9 +247,9 @@ def get_realtime_kr_hot_stocks():
 
     df = load_krx()
 
-    # 🔥 우량주 필터 (중소형 제거)
+    # 🔥 중대형 + 유동성 필터 (잡주 제거)
     targets = df[
-        (df['Marcap'] > 5e11) &   # 5000억 이상 (중대형만)
+        (df['Marcap'] > 5e11) &   # 5000억 이상
         (df['Marcap'] < 5e13)
     ].sort_values('Marcap', ascending=False).head(50)
 
@@ -255,7 +265,7 @@ def get_realtime_kr_hot_stocks():
         try:
             prob = breakout_probability(dfp)
 
-            # 🔥 노이즈 컷 강화
+            # 🔥 노이즈 컷 (조금 더 엄격)
             if prob < 0.55:
                 continue
 
@@ -277,7 +287,7 @@ def get_realtime_kr_hot_stocks():
 # =========================
 # UI
 # =========================
-st.title("🚀 진짜 1~2일 전 급등 TOP 3 스캐너 (최종)")
+st.title("🚀 진짜 1~2일 전 급등 TOP 3 스캐너 (최종 보정)")
 
 if st.button("실행"):
     with st.status("시장 데이터 분석 중..."):
