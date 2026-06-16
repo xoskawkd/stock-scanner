@@ -128,52 +128,36 @@ import FinanceDataReader as fdr
 def get_realtime_kr_hot_stocks():
     import FinanceDataReader as fdr
     import pandas as pd
+    
+    # 1. 시총/거래대금 상위 30개만 먼저 뽑음
+    df_list = fdr.StockListing('KRX')
+    df_list = df_list[(df_list['Marcap'] > 500_000_000_000) & (df_list['Amount'] >= 10_000_000_000)]
+    df_list = df_list.sort_values(by='Amount', ascending=False).head(30)
+    
+    # 2. 결과 저장용
+    result = {}
+    
+    # 3. 30번을 다 돌지 말고, 딱 5개만 효율적으로 분석
+    for code, name in zip(df_list['Code'], df_list['Name']):
+        try:
+            # 60일 데이터만 가져옴
+            price = fdr.DataReader(code, start='2026-04-01') # 최근 2~3개월 정도
+            if len(price) < 40: continue
+            
+            # 이동평균선과 위치 계산
+            ma20 = price['Close'].rolling(20).mean().iloc[-1]
+            high60 = price['Close'].rolling(40).max().iloc[-1]
+            last = price['Close'].iloc[-1]
+            
+            # 여기서 조건이 맞으면 바로 추가하고 5개 채워지면 중단 (속도 최적화)
+            if (last > ma20) and (0.70 <= (last / high60) <= 0.95):
+                result[code] = name
+                if len(result) >= 5: break
+        except:
+            continue
+            
+    return result
 
-    df = fdr.StockListing('KRX')
-
-    # -------------------------
-    # 1. 유동성 필터
-    # -------------------------
-    df = df[df['Marcap'] > 500_000_000_000]
-
-    if 'Amount' in df.columns:
-        df = df[df['Amount'] >= 10_000_000_000]
-
-    # -------------------------
-    # 2. 거래대금 상위 (핵심 속도)
-    # -------------------------
-    df = df.sort_values(by='Amount', ascending=False).head(30)
-
-    # -------------------------
-    # 3. 스윙 초입 필터 (DataReader 없이)
-    # -------------------------
-
-    # ① 오늘 변동률 (과열 제거)
-    if 'ChangeRate' in df.columns:
-        df = df[(df['ChangeRate'] >= -3) & (df['ChangeRate'] <= 3)]
-
-    # ② 거래대금 집중 (수급 초기)
-    df = df[df['Amount'] > df['Amount'].quantile(0.5)]
-
-    # ③ 시총 필터 (너무 잡주 제거)
-    df = df[df['Marcap'] > 1_000_000_000_000]
-
-    # -------------------------
-    # 4. 점수화 (핵심)
-    # -------------------------
-    df['score'] = (
-        df['Amount'].rank(pct=True) * 0.5 +
-        (-df['ChangeRate'].fillna(0)).rank(pct=True) * 0.5
-    )
-
-    df = df.sort_values('score', ascending=False)
-
-    # -------------------------
-    # 5. 결과
-    # -------------------------
-    sampled = df.head(10).sample(n=min(5, len(df)), random_state=42)
-
-    return dict(zip(sampled['Code'], sampled['Name']))
 
 
 
