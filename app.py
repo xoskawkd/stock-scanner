@@ -122,10 +122,10 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-@st.cache_data(ttl=300)
+
 def get_realtime_kr_hot_stocks():
 
-    from io import StringIO
+    st.write("함수 실행됨")
 
     url = "https://finance.naver.com/sise/sise_quant.naver"
 
