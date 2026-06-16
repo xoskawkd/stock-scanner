@@ -139,20 +139,34 @@ def get_realtime_kr_hot_stocks():
     
     # 3. 30번을 다 돌지 말고, 딱 5개만 효율적으로 분석
     for code, name in zip(df_list['Code'], df_list['Name']):
+        # 기존 루프 로직 안에 이 부분만 교체해서 넣어주세요
         try:
-            # 60일 데이터만 가져옴
-            price = fdr.DataReader(code, start='2026-04-01') # 최근 2~3개월 정도
+            price = fdr.DataReader(code, start='2026-04-01')
             if len(price) < 40: continue
             
-            # 이동평균선과 위치 계산
-            ma20 = price['Close'].rolling(20).mean().iloc[-1]
-            high60 = price['Close'].rolling(40).max().iloc[-1]
-            last = price['Close'].iloc[-1]
+            close = price['Close']
             
-            # 여기서 조건이 맞으면 바로 추가하고 5개 채워지면 중단 (속도 최적화)
-            if (last > ma20) and (0.70 <= (last / high60) <= 0.95):
+            # 1. RSI 계산 (간이 RSI 14일 기준)
+            delta = close.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            rsi = 100 - (100 / (1 + rs))
+            
+            # [핵심] RSI 50 미만인 놈만 통과 (과열 종목 차단)
+            rsi_ok = rsi.iloc[-1] < 50
+            
+            # 2. 이동평균선 & 고점 위치 (기존 로직 유지)
+            ma20 = close.rolling(20).mean().iloc[-1]
+            high60 = close.rolling(40).max().iloc[-1]
+            last = close.iloc[-1]
+            
+            # 최종 조건: RSI 50 미만 + 이평선 추세 + 고점 눌림
+            if rsi_ok and (last > ma20) and (0.70 <= (last / high60) <= 0.85):
                 result[code] = name
+                # 데이터가 너무 많으면 상위 5개만
                 if len(result) >= 5: break
+
         except:
             continue
             
