@@ -128,7 +128,7 @@ import pandas as pd
 import numpy as np
 
 # =========================
-# 데이터
+# 캐시
 # =========================
 @st.cache_data(ttl=3600)
 def load_krx():
@@ -137,17 +137,17 @@ def load_krx():
 @st.cache_data(ttl=3600)
 def load_price(code):
     try:
-        return fdr.DataReader(code, start="2024-01-01")
+        return fdr.DataReader(code, start="2025-01-01")  # 속도 개선 핵심
     except:
         return None
 
 
 # =========================
-# 🔥 진짜 폭발 직전 모델
+# 🔥 초경량 급등 직전 모델
 # =========================
 def breakout_probability(df):
 
-    df = df.tail(100).dropna()
+    df = df.tail(80).dropna()
 
     close = df['Close']
     high = df['High']
@@ -156,61 +156,22 @@ def breakout_probability(df):
 
     last = close.iloc[-1]
 
-    # -------------------------
-    # 1️⃣ 변동성 압축 (핵심)
-    # -------------------------
+    # 1️⃣ 변동성 압축
     range20 = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
-    range60 = (high.rolling(60).max().iloc[-1] - low.rolling(60).min().iloc[-1]) / low.rolling(60).min().iloc[-1]
+    compression = max(0, (0.15 - range20) / 0.15)
 
-    compression_score = max(0, (0.20 - range20) / 0.20) * 0.7 + max(0, (0.35 - range60) / 0.35) * 0.3
+    # 2️⃣ 거래량
+    vol_ma = volume.rolling(20).mean().iloc[-1]
+    vol_ratio = volume.iloc[-1] / vol_ma if vol_ma != 0 else 0
 
-    # -------------------------
-    # 2️⃣ 거래량 “잠복 → 첫 유입”
-    # -------------------------
-    vol_mean = volume.rolling(20).mean().iloc[-1]
-    vol_prev_mean = volume.rolling(40).mean().iloc[-1]
+    volume_score = min(1, max(0, vol_ratio - 0.7))
 
-    vol_ratio = volume.iloc[-1] / vol_mean if vol_mean != 0 else 0
-    vol_trend = vol_mean / vol_prev_mean if vol_prev_mean != 0 else 0
-
-    # 핵심: “평소 조용 + 지금만 튐”
-    volume_score = 0
-
-    if vol_trend < 1.05 and 1.1 <= vol_ratio <= 1.8:
-        volume_score = 1.0
-    elif 0.9 <= vol_ratio < 1.1:
-        volume_score = 0.4
-    else:
-        volume_score = 0.1
-
-    # -------------------------
-    # 3️⃣ 이평선 “붙어있는 상태”
-    # -------------------------
+    # 3️⃣ 이평선 밀착
     ma5 = close.rolling(5).mean().iloc[-1]
     ma20 = close.rolling(20).mean().iloc[-1]
-    ma60 = close.rolling(60).mean().iloc[-1]
+    ma_score = max(0, 1 - abs(ma5 - ma20) / ma20)
 
-    ma_score = 1 - min(1, abs(ma5 - ma20) / ma20)
-
-    trend_ok = 1 if ma20 >= ma60 * 0.98 else 0.3
-
-    # -------------------------
-    # 4️⃣ 상승 각도 (중요)
-    # -------------------------
-    slope5 = (close.iloc[-1] / close.iloc[-5] - 1)
-    slope10 = (close.iloc[-1] / close.iloc[-10] - 1)
-
-    # 너무 오른 애 제거 + 너무 죽은 애 제거
-    if slope5 > 0.06 or slope10 > 0.12:
-        momentum_score = 0
-    elif 0.005 <= slope5 <= 0.04:
-        momentum_score = 1
-    else:
-        momentum_score = 0.3
-
-    # -------------------------
-    # 5️⃣ RSI (중립 유지 구간만)
-    # -------------------------
+    # 4️⃣ RSI (간단)
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
@@ -218,52 +179,48 @@ def breakout_probability(df):
     rsi = 100 - (100 / (1 + rs))
     rsi_last = rsi.iloc[-1]
 
-    if 45 <= rsi_last <= 58:
-        rsi_score = 1
-    elif 40 <= rsi_last <= 65:
-        rsi_score = 0.5
-    else:
-        rsi_score = 0.2
+    rsi_score = 1 if 45 <= rsi_last <= 60 else 0.4
 
-    # -------------------------
-    # 🔥 최종 확률
-    # -------------------------
+    # 5️⃣ 과열 방지
+    high60 = close.rolling(60).max().iloc[-1]
+    safety = 1 if last / high60 < 0.95 else 0.3
+
+    # 최종 점수
     prob = (
-        compression_score * 0.35 +
+        compression * 0.35 +
         volume_score * 0.25 +
-        ma_score * 0.15 +
-        momentum_score * 0.15 +
-        rsi_score * 0.10
+        ma_score * 0.2 +
+        rsi_score * 0.15 +
+        safety * 0.05
     )
 
     return round(max(0, min(1, prob)), 3)
 
 
 # =========================
-# 스캐너
+# 🚀 스캐너 (속도 최적화 핵심)
 # =========================
 def get_realtime_kr_hot_stocks():
 
     df = load_krx()
 
-    # 🔥 중대형만
-    targets = df[
-        (df['Marcap'] > 5e11)
-    ].sort_values('Marcap', ascending=False).head(80)
+    # 🔥 핵심: 중대형 + 상위 20개만
+    targets = df[df['Marcap'] > 1e11].nlargest(20, 'Marcap')
 
     results = []
 
-    for code, name in zip(targets['Code'], targets['Name']):
+    # 🔥 status 제거 (속도 개선 핵심)
+    for code, name in zip(targets['Code'][:5], targets['Name'][:5]):  # ⭐ 5개만 분석
 
         dfp = load_price(code)
+
         if dfp is None or len(dfp) < 80:
             continue
 
         try:
             prob = breakout_probability(dfp)
 
-            # 🔥 노이즈 제거 (강함)
-            if prob < 0.62:
+            if prob < 0.55:
                 continue
 
             results.append({
@@ -283,17 +240,16 @@ def get_realtime_kr_hot_stocks():
 # =========================
 # UI
 # =========================
-st.title("🚀 진짜 1~2일 전 폭발 포착기 v2")
+st.title("🚀 폭발 직전 TOP 3 스캐너 (속도 개선 버전)")
 
 if st.button("실행"):
-    with st.status("폭발 직전 패턴 분석 중..."):
-        data = get_realtime_kr_hot_stocks()
+    data = get_realtime_kr_hot_stocks()
 
     if data:
-        st.success("🔥 폭발 후보 TOP 3")
+        st.success("🔥 TOP 3 후보")
         st.write(data)
     else:
-        st.warning("아직 폭발 직전 종목 없음")
+        st.warning("조건 없음")
 
 
 
