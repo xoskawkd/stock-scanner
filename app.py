@@ -1,4 +1,4 @@
-mport streamlit as st
+import streamlit as st
 import pyupbit
 import yfinance as yf
 import pandas as pd
