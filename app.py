@@ -125,14 +125,14 @@ def get_market_status():
 import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
+import numpy as np
 
 # =========================
-# 캐시
+# 데이터 캐시
 # =========================
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_krx():
     return fdr.StockListing('KRX')
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_price(code):
@@ -143,86 +143,135 @@ def load_price(code):
 
 
 # =========================
-# 안전 스캐너 (핵심)
+# 🔥 급등 직전 확률 모델
+# =========================
+def breakout_probability(df):
+
+    df = df.tail(100).dropna()
+
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+    volume = df['Volume']
+
+    last = close.iloc[-1]
+
+    # -------------------------
+    # 1️⃣ 변동성 압축
+    # -------------------------
+    range20 = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
+    compression = max(0, (0.17 - range20) / 0.17)
+
+    # -------------------------
+    # 2️⃣ 거래량
+    # -------------------------
+    vol_ma = volume.rolling(20).mean().iloc[-1]
+    vol_ratio = volume.iloc[-1] / vol_ma if vol_ma != 0 else 0
+    volume_score = max(0, min(1, vol_ratio / 2))
+
+    # -------------------------
+    # 3️⃣ 이평선
+    # -------------------------
+    ma5 = close.rolling(5).mean().iloc[-1]
+    ma20 = close.rolling(20).mean().iloc[-1]
+    ma_score = max(0, 1 - abs(ma5 - ma20) / ma20)
+
+    # -------------------------
+    # 4️⃣ RSI
+    # -------------------------
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_last = rsi.iloc[-1]
+
+    rsi_score = 1 if 45 <= rsi_last <= 62 else 0.5
+
+    # -------------------------
+    # 5️⃣ 과열 방지 (핵심 수정)
+    # -------------------------
+    high60 = close.rolling(60).max().iloc[-1]
+    safety = 1 if last / high60 < 0.95 else 0.3
+
+    # -------------------------
+    # 🔥 최종 확률
+    # -------------------------
+    prob = (
+        compression * 0.3 +
+        volume_score * 0.25 +
+        ma_score * 0.2 +
+        rsi_score * 0.15 +
+        safety * 0.1
+    )
+
+    return round(max(0, min(1, prob)), 3)
+
+
+# =========================
+# 🔥 스캐너 (핵심 수정 부분)
 # =========================
 def get_realtime_kr_hot_stocks():
 
-    try:
-        df = load_krx()
+    df = load_krx()
 
-        # 🔥 None / empty 방어
-        if df is None or df.empty:
-            return {}
+    targets = df[df['Marcap'] > 1e11].nlargest(40, 'Marcap')
 
-        df = df.dropna(subset=["Marcap"])
+    results = []
 
-        targets = df[df["Marcap"] > 1e11].nlargest(15, "Marcap")
+    for code, name in zip(targets['Code'], targets['Name']):
 
-        results = []
+        dfp = load_price(code)
 
-        for code, name in zip(targets["Code"].head(5), targets["Name"].head(5)):
+        if dfp is None or len(dfp) < 80:
+            continue
 
-            dfp = load_price(code)
+        try:
+            close = dfp['Close']
+            last = close.iloc[-1]
 
-            # 🔥 None 방어
-            if dfp is None or dfp.empty:
+            # 🚨 핵심 추가 1: 이미 급등한 종목 제거
+            ma20 = close.rolling(20).mean().iloc[-1]
+            if last > ma20 * 1.12:   # 12% 이상 상승이면 제외
                 continue
 
-            if len(dfp) < 80:
+            ma60 = close.rolling(60).mean().iloc[-1]
+            if last > ma60 * 1.20:   # 장기 급등도 제외
                 continue
 
-            try:
-                close = dfp["Close"]
-                volume = dfp["Volume"]
+            prob = breakout_probability(dfp)
 
-                last = close.iloc[-1]
+            results.append({
+                "Code": code,
+                "Name": name,
+                "Probability": prob
+            })
 
-                # 🔥 아주 가벼운 점수 (안 멈추게)
-                vol_ma = volume.rolling(20).mean().iloc[-1]
-                vol_ratio = volume.iloc[-1] / vol_ma if vol_ma != 0 else 0
+        except:
+            continue
 
-                if vol_ratio < 0.8:
-                    continue
-
-                score = vol_ratio
-
-                results.append({
-                    "Code": code,
-                    "Name": name,
-                    "Score": round(score, 3)
-                })
-
-            except:
-                continue
-
-        # 🔥 TOP 3
-        if not results:
-            return {}
-
-        results = sorted(results, key=lambda x: x["Score"], reverse=True)[:3]
-
-        return {r["Code"]: r["Name"] for r in results}
-
-    except Exception as e:
-        # 🔥 절대 앱 안 죽게
+    if not results:
         return {}
 
+    results = sorted(results, key=lambda x: x["Probability"], reverse=True)[:3]
+
+    return {r["Code"]: r["Name"] for r in results}
+
 
 # =========================
-# UI (절대 자동 실행 금지)
+# UI
 # =========================
-st.title("🔥 국내 테마/거래대금 TOP 3")
+st.title("🚀 진짜 급등 직전 TOP 3 스캐너")
 
-if st.button("시장 분석 시작"):
-
-    with st.spinner("시장 데이터 분석 중..."):
+if st.button("실행"):
+    with st.status("시장 데이터 분석 중..."):
         data = get_realtime_kr_hot_stocks()
 
-    if data and len(data) > 0:
+    if data:
         st.success("TOP 3 후보")
         st.write(data)
     else:
-        st.warning("조건 없음 (또는 데이터 부족)")
+        st.warning("조건 없음")
 
 
 
