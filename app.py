@@ -63,11 +63,11 @@ def calculate_swing_score_and_bands(df):
         if 0.8 <= vol_ratio <= 1.3: score += 40
         elif vol_ratio > 2.0: score -= 20
 
-        63:    if 0.8 <= vol_ratio <= 1.3: score += 40
-64:    elif vol_ratio > 2.0: score -= 20
-65:
-66:    # [여기에 추가하세요]
-67:    score = min(score, 100)
+        if 0.8 <= vol_ratio <= 1.3: score += 40
+        elif vol_ratio > 2.0: score -= 20
+
+    # [여기에 추가하세요]
+        score = min(score, 100)
 
         # [동적 타점] 시장 상황에 따른 밴드 변경
         # RSI가 낮아 급락장일 경우 60일선까지 밴드 확장 (보수적 대응)
