@@ -125,139 +125,132 @@ def get_market_status():
 import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
-import numpy as np
 
-# =========================
-# 1️⃣ KRX 종목 리스트 (캐시)
-# =========================
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_krx():
-    df = fdr.StockListing('KRX')
-    return df
-
-# =========================
-# 2️⃣ 가격 데이터 캐시 (핵심)
-# =========================
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_price(code):
     return fdr.DataReader(code, start="2024-01-01")
 
-# =========================
-# 3️⃣ 메인 스캐너 (완전체)
-# =========================
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_krx():
+    return fdr.StockListing('KRX')
+
+
 def get_realtime_kr_hot_stocks():
 
-    df_krx = load_krx()
-
-    # 1️⃣ 대형주 + 잡주 필터
-    df_krx = df_krx[(df_krx['Marcap'] > 1e11) & (df_krx['Marcap'] < 3e13)]
-
-    targets = df_krx.sort_values(by='Marcap', ascending=False).head(30)
+    df = load_krx()
+    df = df[(df['Marcap'] > 1e11) & (df['Marcap'] < 3e13)]
+    targets = df.sort_values(by='Marcap', ascending=False).head(10)
 
     results = []
 
-    # 2️⃣ 속도 보호 (무조건 20개 제한)
-    for code, name in zip(targets['Code'][:20], targets['Name'][:20]):
+    with st.status("스캔 진행 중...", expanded=False) as status:
 
-        try:
-            price = load_price(code)  # 🔥 캐시된 데이터 (핵심)
+        for i, (code, name) in enumerate(zip(targets['Code'], targets['Name'])):
 
-            if price is None or len(price) < 80:
+            # 🔥 UI 업데이트 최소화 (핵심)
+            status.update(label=f"분석 중... ({i+1}/10)")
+
+            try:
+                price = load_price(code)
+
+                if price is None or len(price) < 80:
+                    continue
+
+                dfp = price.tail(80).dropna()
+
+                close = dfp['Close']
+                high = dfp['High']
+                low = dfp['Low']
+                volume = dfp['Volume']
+
+                last = close.iloc[-1]
+
+                # ------------------------
+                # 1️⃣ 급등 제거
+                # ------------------------
+                if last / close.iloc[-6] - 1 > 0.04:
+                    continue
+
+                # ------------------------
+                # 2️⃣ 추세
+                # ------------------------
+                ma20 = close.rolling(20).mean().iloc[-1]
+                ma60 = close.rolling(60).mean().iloc[-1]
+
+                if last < ma20 or last < ma60:
+                    continue
+
+                # ------------------------
+                # 3️⃣ 변동성
+                # ------------------------
+                vol = (high.rolling(20).max().iloc[-1] - low.rolling(20).min().iloc[-1]) / low.rolling(20).min().iloc[-1]
+                if vol > 0.18:
+                    continue
+
+                # ------------------------
+                # 4️⃣ 이평선
+                # ------------------------
+                ma5 = close.rolling(5).mean().iloc[-1]
+                if abs(ma5 - ma20) / ma20 > 0.025:
+                    continue
+
+                # ------------------------
+                # 5️⃣ 거래량
+                # ------------------------
+                vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+                if not (1.0 <= vol_ratio <= 2.2):
+                    continue
+
+                # ------------------------
+                # 6️⃣ 과열
+                # ------------------------
+                high60 = close.rolling(60).max().iloc[-1]
+                position = last / high60
+                if position > 0.93:
+                    continue
+
+                # ------------------------
+                # 점수
+                # ------------------------
+                score = 0
+                score += (0.18 - vol) * 400
+                score += (0.025 - abs(ma5 - ma20) / ma20) * 500
+                score += (vol_ratio - 1.0) * 120
+
+                if ma20 > ma60:
+                    score += 30
+                if last > ma20:
+                    score += 30
+
+                results.append({
+                    "Code": code,
+                    "Name": name,
+                    "Probability": round(score, 2)
+                })
+
+            except:
                 continue
 
-            df = price.tail(80).dropna()
-
-            close = df['Close']
-            high = df['High']
-            low = df['Low']
-            volume = df['Volume']
-
-            last = close.iloc[-1]
-
-            # =========================
-            # 1️⃣ 이미 급등 제거
-            # =========================
-            five_day = last / close.iloc[-6] - 1
-            if five_day > 0.04:
-                continue
-
-            # =========================
-            # 2️⃣ 추세 필터
-            # =========================
-            ma20 = close.rolling(20).mean().iloc[-1]
-            ma60 = close.rolling(60).mean().iloc[-1]
-
-            if last < ma20 or last < ma60:
-                continue
-
-            # =========================
-            # 3️⃣ 변동성 압축
-            # =========================
-            high20 = high.rolling(20).max().iloc[-1]
-            low20 = low.rolling(20).min().iloc[-1]
-
-            volatility = (high20 - low20) / low20
-            if volatility > 0.18:
-                continue
-
-            # =========================
-            # 4️⃣ 이평선 수렴
-            # =========================
-            ma5 = close.rolling(5).mean().iloc[-1]
-
-            if abs(ma5 - ma20) / ma20 > 0.025:
-                continue
-
-            # =========================
-            # 5️⃣ 거래량 초기 유입
-            # =========================
-            vol_mean = volume.rolling(20).mean().iloc[-1]
-            vol_ratio = volume.iloc[-1] / vol_mean if vol_mean != 0 else 0
-
-            if not (1.0 <= vol_ratio <= 2.2):
-                continue
-
-            # =========================
-            # 6️⃣ 과열 제거
-            # =========================
-            high60 = close.rolling(60).max().iloc[-1]
-            position = last / high60
-
-            if position > 0.93:
-                continue
-
-            # =========================
-            # 🔥 확률 점수
-            # =========================
-            score = 0
-
-            score += (0.18 - volatility) * 400
-            score += (0.025 - abs(ma5 - ma20) / ma20) * 500
-            score += (vol_ratio - 1.0) * 120
-
-            if ma20 > ma60:
-                score += 30
-            if last > ma20:
-                score += 30
-
-            results.append({
-                "Code": code,
-                "Name": name,
-                "Probability": round(score, 2)
-            })
-
-        except:
-            continue
-
-    df_res = pd.DataFrame(results)
-
-    if df_res.empty:
+    if not results:
         return {}
 
+    df_res = pd.DataFrame(results)
     df_res = df_res.sort_values(by="Probability", ascending=False).head(5)
 
     return dict(zip(df_res["Code"], df_res["Name"]))
+
+
+# =========================
+# UI
+# =========================
+if st.button("스캐너 시작"):
+    data = get_realtime_kr_hot_stocks()
+
+    if data:
+        st.success("결과")
+        st.json(data)
+    else:
+        st.warning("조건 종목 없음")
 
 
 
