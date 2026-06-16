@@ -126,26 +126,86 @@ import FinanceDataReader as fdr
 
 @st.cache_data(ttl=600)
 def get_realtime_kr_hot_stocks():
+    import FinanceDataReader as fdr
+
     df = fdr.StockListing('KRX')
-    
-    # 1. 시총 5천억 이상 우량주
+
+    # 1. 대형주 필터
     df = df[df['Marcap'] > 500_000_000_000]
-    
+
+    # (선택) 너무 과열 초대형주 살짝 제한
+    df = df[df['Marcap'] < 300_000_000_000_000]
+
     # 2. 거래대금 필터
     if 'Amount' in df.columns:
         df = df[df['Amount'] >= 10_000_000_000]
-        
-    # 3. 🔥 핵심 수정: 너무 횡보만 남는 문제 해결
-    # → "살짝 움직이기 시작한 종목"까지 포함
-    if 'ChangeRate' in df.columns:
-        df = df[(df['ChangeRate'] > -3.0) & (df['ChangeRate'] < 2.5)]
-    
-    # 4. 거래대금 상위 유지
-    df = df.sort_values(by='Amount', ascending=False).head(20)
-    
-    # 5. 안정 샘플
+
+    # 3. 거래대금 상위만 (속도 + 품질)
+    df = df.sort_values(by='Amount', ascending=False).head(30)
+
+    valid_codes = []
+
+    # 4. 가격 분석 (핵심 필터)
+    for code in df['Code'].tolist()[:30]:
+        try:
+            price = fdr.DataReader(code)
+
+            if len(price) < 60:
+                continue
+
+            close = price['Close']
+
+            last = close.iloc[-1]
+
+            # -------------------------
+            # 1) 20일선 추세 필터 (핵심)
+            # -------------------------
+            ma20 = close.rolling(20).mean().iloc[-1]
+            trend_ok = last > ma20
+
+            # -------------------------
+            # 2) 60일 고점 대비 위치
+            # -------------------------
+            high60 = close.rolling(60).max().iloc[-1]
+            position = last / high60
+            position_ok = 0.70 <= position <= 0.95
+
+            # -------------------------
+            # 3) 최근 과열 제거
+            # -------------------------
+            recent_5d = (close.iloc[-1] / close.iloc[-5] - 1) * 100
+            not_overheated = recent_5d < 8
+
+            # -------------------------
+            # 4) 거래량 증가
+            # -------------------------
+            volume = price['Volume']
+            vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+            vol_ok = vol_ratio > 1.2
+
+            # -------------------------
+            # 5) 눌림 구간
+            # -------------------------
+            change_rate = (close.iloc[-1] / close.iloc[-2] - 1) * 100
+            pullback_ok = -4 <= change_rate <= 2
+
+            # -------------------------
+            # 최종 조건
+            # -------------------------
+            if trend_ok and position_ok and not_overheated and vol_ok and pullback_ok:
+                valid_codes.append(code)
+
+        except:
+            continue
+
+    df = df[df['Code'].isin(valid_codes)]
+
+    # 5. 결과 안정화
+    if df.empty:
+        return {}
+
     sampled = df.sample(n=min(5, len(df)), random_state=42)
-    
+
     return dict(zip(sampled['Code'], sampled['Name']))
 
 
