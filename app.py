@@ -125,6 +125,8 @@ def get_market_status():
 @st.cache_data(ttl=300)
 def get_realtime_kr_hot_stocks():
 
+    from io import StringIO
+
     url = "https://finance.naver.com/sise/sise_quant.naver"
 
     headers = {
@@ -138,21 +140,45 @@ def get_realtime_kr_hot_stocks():
             timeout=5
         ).text
 
-        tables = pd.read_html(StringIO(html))
+        df = pd.read_html(StringIO(html))[1]
+        df = df.dropna()
 
-        df = tables[1].dropna()
+        result = {}
 
-        st.write(df.columns)
+        for _, row in df.head(30).iterrows():
+
+            name = str(row["종목명"]).strip()
+
+            try:
+                search_url = (
+                    f"https://m.stock.naver.com/api/search?keyword={name}"
+                )
+
+                res = requests.get(
+                    search_url,
+                    headers=headers,
+                    timeout=3
+                ).json()
+
+                stocks = res.get("stocks", [])
+
+                if stocks:
+                    code = stocks[0]["itemCode"]
+                    result[code] = name
+
+            except:
+                continue
+
+        return result
+
+    except Exception as e:
+        st.error(f"국내주식 로딩 실패: {e}")
 
         return {
             "005930": "삼성전자",
             "000660": "SK하이닉스",
             "035420": "NAVER"
         }
-
-    except Exception as e:
-        st.error(e)
-        return {}
 
 
 def get_safe_us_movers():
