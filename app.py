@@ -122,29 +122,29 @@ def get_market_status():
         return fg_val, fg_txt, f"{usd:,.2f}"
     except: return "50", "중립", "1,350.00"
 
-
 @st.cache_data(ttl=60)
 def get_realtime_kr_hot_stocks():
+    # 1. 네이버 거래대금 상위 페이지 요청
     url = "https://finance.naver.com/sise/sise_tr_amount.naver"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        # 네이버 금융에서 거래대금 상위 표를 읽어옵니다.
-        df_list = pd.read_html(url, header=0)[0]
-        # 종목명과 링크 정보를 긁어오기 위해 BeautifulSoup 사용
-        res = requests.get(url, headers=headers)
+        res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
         
+        # 2. 거래대금 상위 10개 종목을 크롤링
         stocks = {}
-        # 표에서 종목명과 코드를 추출
-        items = soup.select("a.tltle")
-        for item in items[:3]:  # 딱 3개만 가져옴
+        # 네이버 금융 테이블 내 종목명 링크 추출
+        items = soup.select("table.type_2 a.tltle")
+        for item in items[:10]: # 상위 10개를 먼저 확보
             name = item.text
             code = item['href'].split('code=')[1]
             stocks[code] = name
-        return stocks
+        return stocks # 이제 10개의 뜨거운 종목을 반환합니다
     except:
-        # 실패 시에도 최소한의 대장주 3개는 보장
-        return {"005930": "삼성전자", "000660": "SK하이닉스", "035420": "NAVER"}
+        # 실패 시에도 최소한의 대장주로 대체
+        return {"005930": "삼성전자", "000660": "SK하이닉스", "035420": "NAVER", "005380": "현대차", "068270": "셀트리온"}
+
+
 
 
 def get_safe_us_movers():
