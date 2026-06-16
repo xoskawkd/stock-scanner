@@ -128,56 +128,50 @@ import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
 from datetime import datetime, timedelta
+import time
 
-def get_swing_data():
-
-    df_list = fdr.StockListing('KRX')
-    target_df = df_list[(df_list['Marcap'] > 500_000_000_000) & (df_list['Amount'] >= 10_000_000_000)].sort_values(by='Amount', ascending=False).head(5)
-
-    valid_stocks = []
-    start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
-
-    for code, name in zip(target_df['Code'], target_df['Name']):
-        try:
-            price = fdr.DataReader(code, start=start_date)
-            if len(price) < 60: 
+# 1. 모든 로직을 하나의 함수에 통합 (이름 오류 방지)
+def get_realtime_kr_hot_stocks():
+    try:
+        df_list = fdr.StockListing('KRX')
+        target_df = df_list[(df_list['Marcap'] > 500_000_000_000) & (df_list['Amount'] >= 10_000_000_000)].sort_values(by='Amount', ascending=False).head(5)
+        
+        valid_stocks = []
+        start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+        
+        for code, name in zip(target_df['Code'], target_df['Name']):
+            try:
+                time.sleep(0.1) # 서버 부하 방지
+                price = fdr.DataReader(code, start=start_date)
+                if len(price) < 60: continue
+                
+                close = price['Close']
+                rsi = 100 - (100 / (1 + (close.diff().clip(lower=0).rolling(14).mean() / (-close.diff().clip(upper=0).rolling(14).mean()))))
+                ma20 = close.rolling(20).mean().iloc[-1]
+                high60 = close.rolling(60).max().iloc[-1]
+                position = close.iloc[-1] / high60
+                ma_diff = (close.iloc[-1] - ma20) / ma20 * 100
+                
+                if (40 <= rsi.iloc[-1] <= 60) and (0.70 <= position <= 0.85) and (ma_diff <= 3):
+                    score = int((0.85 - position) * 1000 + (60 - rsi.iloc[-1]) * 2)
+                    valid_stocks.append({'Name': name, 'Code': code, 'Score': score})
+            except:
                 continue
+        return sorted(valid_stocks, key=lambda x: x['Score'], reverse=True)
+    except:
+        return []
 
-            close = price['Close']
-
-            # RSI (정상 버전)
-            delta = close.diff()
-            gain = delta.clip(lower=0).rolling(14).mean()
-            loss = (-delta.clip(upper=0)).rolling(14).mean()
-            rsi = 100 - (100 / (1 + gain / loss))
-
-            ma20 = close.rolling(20).mean().iloc[-1]
-            high60 = close.rolling(60).max().iloc[-1]
-
-            last = close.iloc[-1]
-            position = last / high60
-            ma_diff = (last - ma20) / ma20 * 100
-
-            if (40 <= rsi.iloc[-1] <= 60) and (0.75 <= position <= 0.92) and (ma_diff <= 3):
-                score = int((0.92 - position) * 1000 + (60 - rsi.iloc[-1]) * 2)
-                valid_stocks.append({'Name': name, 'Score': score})
-
-        except:
-            continue
-
-    return sorted(valid_stocks, key=lambda x: x['Score'], reverse=True)
-
-
-st.title("🚀 스윙 초입 포착")
+# 2. 메인 화면 구성
+st.title("🚀 스윙 초입 포착 스캐너")
 
 if st.button("종목 분석 실행"):
-    with st.spinner('분석 중...'):
-        results = get_swing_data()
-
+    with st.spinner('서버 데이터를 안전하게 불러오는 중...'):
+        results = get_realtime_kr_hot_stocks()
         if results:
-            st.table(results)
+            for stock in results:
+                st.success(f"{stock['Name']} ({stock['Code']}) - 스윙 점수: {stock['Score']}")
         else:
-            st.warning("조건에 맞는 종목 없음")
+            st.warning("분석 결과가 없습니다.")
 
 
 
