@@ -270,7 +270,7 @@ def get_us_price_batch(tickers: tuple) -> dict:
 def load_krx_listing():
     return fdr.StockListing("KRX")
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def load_ohlcv_kr(code: str) -> pd.DataFrame | None:
     try:
         df = fdr.DataReader(code, start="2024-01-01")
@@ -281,7 +281,7 @@ def load_ohlcv_kr(code: str) -> pd.DataFrame | None:
         pass
     return None
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def load_ohlcv_us(ticker: str) -> pd.DataFrame | None:
     try:
         df = yf.Ticker(ticker).history(period="1y")
@@ -377,6 +377,7 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         if gain5 > th["max_gain5"]:
             OUT["signals"].append(f"❌ 5일 수익 {gain5*100:.1f}% — 이미 터진 종목")
             rejected = True
+
 
         hi60 = _safe_float(cl.rolling(60).max().iloc[-1])
         if hi60 > 0 and current > 0 and current >= hi60 * th["max_hi60"]:
@@ -581,7 +582,43 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         # setup_hits>=1 필수 → 트리거 점수만으로 셋업 없이 통과하는 노이즈 차단
         # setup_strong>=1 OR trigger>=1 → 약한 셋업 누적만으로 통과 방지
         qual_gate = (setup_strong >= 1) or (trigger_hits >= 1)
-        OUT["pass"] = (not rejected) and (setup_hits >= 1) and qual_gate and (score >= th["min_pass_score"])
+
+        # ── 변화감지: 오늘 처음으로 켜진 신호 확인 ──
+        # "셋업이 오늘 처음 성립한 종목"만 선별 → 1~2일 내 터질 확률 높음
+        try:
+            bbw_s   = (cl.rolling(20).std()*2) / cl.rolling(20).mean().replace(0, np.nan)
+            bw_t    = _safe_float(bbw_s.iloc[-1]);  bw_y = _safe_float(bbw_s.iloc[-2])
+            bw_av   = _safe_float(bbw_s.rolling(20).mean().iloc[-1])
+            bb_t    = bw_av>0 and bw_t>0 and bw_t<bw_av*0.85
+            bb_y    = bw_av>0 and bw_y>0 and bw_y<bw_av*0.85
+
+            vm5_t   = _safe_float(vo.rolling(5).mean().iloc[-1])
+            vm5_y   = _safe_float(vo.rolling(5).mean().iloc[-2])
+            vm20_v  = _safe_float(vo.rolling(20).mean().iloc[-1])
+            vd_t    = vm20_v>0 and vm5_t<vm20_v*0.65
+            vd_y    = vm20_v>0 and vm5_y<vm20_v*0.65
+
+            ma20_y  = _safe_float(cl.rolling(20).mean().iloc[-2])
+            cur_y   = _safe_float(cl.iloc[-2])
+            n5_t    = ma20>0 and current>0 and abs(current-ma20)/ma20<=0.05
+            n5_y    = ma20_y>0 and cur_y>0 and abs(cur_y-ma20_y)/ma20_y<=0.05
+            up_t    = ma5>0 and ma20>0 and ma60>0 and ma20>ma60
+
+            # 오늘 새로 켜진 신호
+            new_sigs = []
+            if bb_t and not bb_y:          new_sigs.append("BB수축시작")
+            if vd_t and not vd_y:          new_sigs.append("거래량눌림시작")
+            if n5_t and not n5_y and up_t: new_sigs.append("눌림목진입")
+
+            existing = sum([bb_t, vd_t, n5_t and up_t])
+            change_detected = len(new_sigs)>=1 and existing>=2
+            if change_detected:
+                OUT["signals"].append(f"🔔 변화감지: {','.join(new_sigs)} — 오늘 처음 셋업 성립")
+        except:
+            change_detected = False
+
+        # 통과 조건: 변화감지 OR 기존 강한 셋업
+        OUT["pass"] = (not rejected) and (setup_hits >= 1) and qual_gate and (score >= th["min_pass_score"]) and change_detected
 
         # ── 등급 ── 셋업 강도 + 트리거 유무로 계층화
         if setup_strong >= 2 and trigger_hits >= 1:
@@ -958,6 +995,21 @@ st.caption(
     "셋업(예측): BB수축·거래량눌림·추세눌림목 — 셋업 ≥1 + 점수 38↑ 통과 | "
     "트리거(가점): 거래량증가·RSI다이버전스·반등캔들 | "
     "v7: 셋업/트리거 분리·단계별 가점·추격가드 유지"
+)
+
+# ── 수동 재스캔 버튼 ──
+_col_scan, _col_time, _ = st.columns([1, 2, 4])
+if _col_scan.button("🔄 지금 재스캔", type="primary", use_container_width=True):
+    scan_kr.clear()
+    scan_us.clear()
+    scan_crypto.clear()
+    load_ohlcv_kr.clear()
+    load_ohlcv_us.clear()
+    st.rerun()
+_col_time.markdown(
+    f"<span style='font-size:12px;color:#94a3b8;line-height:2.5;'>"
+    f"마지막 스캔: {datetime.now().strftime('%H:%M:%S')}</span>",
+    unsafe_allow_html=True,
 )
 
 ph_us   = st.empty()
