@@ -666,6 +666,9 @@ def scan_kr() -> tuple:
         price, vol, src = get_kr_price_with_fallback(code)
         if price <= 0:
             price = r["current"]
+        # ★ 매수구간 항상 실시간 price 기준 (OHLCV MA 기준 사용 안 함)
+        bmin = int(price * 0.97) if price > 0 else 0
+        bmax = int(price * 1.02) if price > 0 else 0
         return {
             "_skip":    False,
             "종목":     name,
@@ -674,7 +677,7 @@ def scan_kr() -> tuple:
             "점수":     r["score"],
             "현재가":   int(price),
             "RSI":      round(r["rsi"], 1),
-            "매수구간": f"₩{int(r['buy_min']):,} ~ ₩{int(r['buy_max']):,}",
+            "매수구간": f"₩{bmin:,} ~ ₩{bmax:,}",
             "목표가":   int(price * 1.08),
             "손절가":   int(price * 0.93),
             "signals":  r["signals"],
@@ -706,6 +709,11 @@ def scan_us() -> tuple:
             price, src = get_us_price(ticker)
         if price <= 0:
             price = r["current"]; src = "OHLCV종가"
+        # ★ 매수구간 항상 실시간 price 기준
+        def _uf(v):
+            if v < 1: return f"${v:,.4f}"
+            elif v < 10: return f"${v:,.3f}"
+            else: return f"${v:,.2f}"
         return {
             "_skip":    False,
             "종목":     ticker,
@@ -713,7 +721,7 @@ def scan_us() -> tuple:
             "점수":     r["score"],
             "현재가":   round(price, 2),
             "RSI":      round(r["rsi"], 1),
-            "매수구간": f"${r['buy_min']:,.2f} ~ ${r['buy_max']:,.2f}",
+            "매수구간": f"{_uf(price*0.97)} ~ {_uf(price*1.02)}",
             "목표가":   round(price * 1.08, 2),
             "손절가":   round(price * 0.93, 2),
             "signals":  r["signals"],
@@ -745,6 +753,7 @@ def scan_crypto() -> tuple:
                 why = next((s for s in r["signals"] if "❌" in s), "조건 미충족")
                 return {"_skip": True, "ticker": coin, "why": why}
             c = r["current"]
+            # ★ 매수구간 항상 실시간 c 기준
             return {
                 "_skip":    False,
                 "종목":     coin.replace("KRW-", ""),
@@ -752,7 +761,7 @@ def scan_crypto() -> tuple:
                 "점수":     r["score"],
                 "현재가":   c,
                 "RSI":      round(r["rsi"], 1),
-                "매수구간": f"₩{int(r['buy_min']):,} ~ ₩{int(r['buy_max']):,}",
+                "매수구간": f"₩{int(c*0.97):,} ~ ₩{int(c*1.02):,}",
                 "목표가":   round(c * 1.10, 0),
                 "손절가":   round(c * 0.93, 0),
                 "signals":  r["signals"],
