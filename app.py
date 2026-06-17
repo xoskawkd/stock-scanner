@@ -332,41 +332,46 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         current = float(cl.iloc[-1])
         OUT["current"] = current
 
+        # rejected=True가 되는 항목이 있어도 등급/점수/RSI는 끝까지 계산한다.
+        # (포트폴리오 조회는 "스캔 통과 여부"와 무관하게 항상 현재 RSI/등급을 보여줘야 하므로
+        #  v1처럼 여기서 바로 return해버리면 보유종목이 전부 기본값(F등급, RSI 50)으로 보였음)
+        rejected = False
+
         # ── 잡주/저유동성 필터 ──
         if market == "CRYPTO":
             avg_value = float((vo * cl).rolling(20).mean().iloc[-1])  # 평균 거래대금(원화)
             if avg_value < th["min_value"]:
                 OUT["signals"].append(f"❌ 유동성 부족 (일평균 거래대금 {avg_value/1e8:.1f}억원)")
-                return OUT
+                rejected = True
         else:
             avg_vol = float(vo.rolling(20).mean().iloc[-1])
             if avg_vol < th["min_vol"]:
                 OUT["signals"].append(f"❌ 유동성 부족 (일평균 {int(avg_vol):,}주)")
-                return OUT
+                rejected = True
 
-        # ── 이미 오른 종목 탈락 ──
+        # ── 이미 오른 종목 표시(통과 제외용, 등급 계산은 계속 진행) ──
         ma20 = float(cl.rolling(20).mean().iloc[-1])
         if ma20 > 0 and current > ma20 * th["max_ma20_dev"]:
             OUT["signals"].append(f"❌ 이미 급등 (MA20 대비 +{(th['max_ma20_dev']-1)*100:.0f}% 초과)")
-            return OUT
+            rejected = True
 
         p5ago = float(cl.iloc[-6]) if len(cl) >= 6 else current
         gain5 = (current - p5ago) / p5ago if p5ago > 0 else 0
         if gain5 > th["max_gain5"]:
             OUT["signals"].append(f"❌ 5일 수익 {gain5*100:.1f}% — 이미 터진 종목")
-            return OUT
+            rejected = True
 
         hi60 = float(cl.rolling(60).max().iloc[-1])
         if hi60 > 0 and current >= hi60 * th["max_hi60"]:
             OUT["signals"].append(f"❌ 60일 고점권 ({th['max_hi60']*100:.0f}% 이상) — 고점 매수 위험")
-            return OUT
+            rejected = True
 
         # ── MA 계산 ──
         ma5  = float(cl.rolling(5).mean().iloc[-1])
         ma10 = float(cl.rolling(10).mean().iloc[-1])
         ma60 = float(cl.rolling(60).mean().iloc[-1])
 
-        # ── RSI ──
+        # ── RSI (항상 계산) ──
         delta = cl.diff()
         gain  = delta.clip(lower=0).rolling(14).mean()
         loss  = (-delta.clip(upper=0)).rolling(14).mean()
@@ -375,7 +380,7 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         OUT["rsi"] = rsi
         if rsi > th["max_rsi"]:
             OUT["signals"].append(f"❌ RSI 과열 ({rsi:.1f}) — 단기 고점 위험")
-            return OUT
+            rejected = True
 
         score = 0
 
@@ -483,13 +488,26 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
             OUT["signals"].append(f"⬜ RSI 구간 외 ({rsi:.1f})")
 
         # ── 매수 구간 ──
-        OUT["buy_min"] = round(min(ma20, ma10) * 0.985, 4)
-        OUT["buy_max"] = round(max(ma20, ma5)  * 1.010, 4)
+        # MA20/MA5가 현재가와 너무 멀어진 경우(급락 직후 MA가 아직 안 따라 내려온 경우 등)
+        # MA 기준 매수구간이 현재가보다 훨씬 위에 잡히는 문제가 있어, 현재가 기준으로 보정한다.
+        raw_low  = min(ma20, ma10) * 0.985
+        raw_high = max(ma20, ma5)  * 1.010
+        if current > 0:
+            cap_high = current * 1.05   # 매수 상단은 현재가 +5%를 넘지 않게
+            cap_low  = current * 0.90   # 매수 하단은 현재가 -10%까지만
+            buy_low  = max(min(raw_low, cap_high), cap_low)
+            buy_high = max(min(raw_high, cap_high), buy_low)
+        else:
+            buy_low, buy_high = raw_low, raw_high
+        OUT["buy_min"] = round(buy_low, 4)
+        OUT["buy_max"] = round(buy_high, 4)
         OUT["score"]   = int(score)
 
         # ── 등급 & pass 기준 (v2: 핵심신호 1개 이상 + 점수 40 이상) ──
+        # 등급/점수는 rejected 여부와 무관하게 항상 산출(포트폴리오 조회용).
+        # "통과(pass)"만 이미 급등/RSI과열/저유동성이면 제외.
         combo = s1 or s2 or s3
-        OUT["pass"]  = combo and score >= th["min_pass_score"]
+        OUT["pass"]  = (not rejected) and combo and score >= th["min_pass_score"]
         OUT["grade"] = ("A+" if score >= 90 else "A" if score >= 75
                         else "B+" if score >= 60 else "B" if score >= 40
                         else "C")
