@@ -33,8 +33,8 @@ except Exception:
 # ============================================================
 # ★ API 키 설정
 # ============================================================
-KRX_API_KEY     = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # ← data.krx.co.kr AUTH_KEY
-FINNHUB_API_KEY = "e196a49253d0408cadf883e01f6b78d9"   # ← Finnhub 키 (없으면 yfinance)
+KRX_API_KEY     = ""   # ← data.krx.co.kr AUTH_KEY
+FINNHUB_API_KEY = ""   # ← Finnhub 키 (없으면 yfinance)
 
 # ============================================================
 # ★ 스캔/필터 튜닝값
@@ -46,11 +46,11 @@ CRYPTO_SCAN_LIMIT = 80
 # [v7] THRESHOLDS — 추격 가드는 소폭만 완화, 감도 개선 중심
 # ============================================================
 THRESHOLDS = {
-    "KR":     {"min_vol": 50_000,  "max_rsi": 80, "max_gain5": 0.18,
-               "max_ma20_dev": 1.18, "max_hi60": 0.97, "min_pass_score": 38},
-    "US":     {"min_vol": 500_000, "max_rsi": 80, "max_gain5": 0.18,
-               "max_ma20_dev": 1.18, "max_hi60": 0.97, "min_pass_score": 38},
-    "CRYPTO": {"min_value": 1_000_000_000, "max_rsi": 82, "max_gain5": 0.30,
+    "KR":     {"min_vol": 50_000,  "max_rsi": 83, "max_gain5": 0.18,
+               "max_ma20_dev": 1.18, "max_hi60": 0.98, "min_pass_score": 38},
+    "US":     {"min_vol": 500_000, "max_rsi": 83, "max_gain5": 0.18,
+               "max_ma20_dev": 1.18, "max_hi60": 0.98, "min_pass_score": 38},
+    "CRYPTO": {"min_value": 1_000_000_000, "max_rsi": 83, "max_gain5": 0.30,
                "max_ma20_dev": 1.25, "max_hi60": 0.98, "min_pass_score": 38},
 }
 
@@ -433,68 +433,77 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
             OUT["signals"].append("⬜ [S1] 변동성 계산 불가")
         OUT["s1"] = s1
 
-        # ── [S2] 거래량 눌림 (셋업) + 증가 (트리거) 분리 ──
+        # ── [S2] 거래량 눌림 (셋업) — 기준 강화 ──
+        # 진짜 매집은 거래량이 MA20 대비 60% 이하로 마름
+        # 0.75~0.90 구간은 그냥 "평범한 날" — 셋업으로 인정 안 함
         vol_ma5  = _safe_float(vo.rolling(5).mean().iloc[-1])
         vol_ma20 = _safe_float(vo.rolling(20).mean().iloc[-1])
         vol_now  = _safe_float(vo.iloc[-1])
 
         s2 = False
-        if vol_ma20 > 0 and vol_ma5 < vol_ma20 * 0.75:
+        if vol_ma20 > 0 and vol_ma5 < vol_ma20 * 0.65:
             s2 = True; setup_hits += 1; setup_strong += 1; score += 20
             OUT["signals"].append(
-                f"✅ [S2] 거래량 눌림(매집) — 매도세 소진 ({vol_ma5/vol_ma20*100:.0f}% of MA20)")
-        elif vol_ma20 > 0 and vol_ma5 < vol_ma20 * 0.90:
+                f"✅ [S2] 거래량 강한 눌림(매집) — 매도세 완전 소진 ({vol_ma5/vol_ma20*100:.0f}% of MA20)")
+        elif vol_ma20 > 0 and vol_ma5 < vol_ma20 * 0.80:
             s2 = True; setup_hits += 1; score += 10
             OUT["signals"].append(
-                f"🔶 [S2] 거래량 완만한 눌림 ({vol_ma5/vol_ma20*100:.0f}% of MA20)")
+                f"🔶 [S2] 거래량 눌림 ({vol_ma5/vol_ma20*100:.0f}% of MA20)")
         else:
-            OUT["signals"].append("⬜ [S2] 거래량 눌림 없음")
+            OUT["signals"].append(f"⬜ [S2] 거래량 눌림 없음 ({vol_ma5/vol_ma20*100:.0f}% of MA20)")
         OUT["s2"] = s2
 
-        # S2T — 거래량 증가 트리거 (추격 아님: 가격 가드가 상단에서 이미 차단)
-        if vol_ma5 > 0 and vol_now > vol_ma5 * 1.50:
+        # S2T — 거래량 증가 트리거: 기준 강화 (1.5x → 2.0x)
+        if vol_ma5 > 0 and vol_now > vol_ma5 * 2.0:
             trigger_hits += 1; score += 10
             OUT["signals"].append(
-                f"➕ [S2T] 거래량 증가 트리거 ({vol_now/vol_ma5*100:.0f}% of MA5)")
-        elif vol_ma5 > 0 and vol_now > vol_ma5 * 1.20:
+                f"➕ [S2T] 거래량 폭발 트리거 ({vol_now/vol_ma5*100:.0f}% of MA5)")
+        elif vol_ma5 > 0 and vol_now > vol_ma5 * 1.50:
             trigger_hits += 1; score += 5
             OUT["signals"].append(
-                f"➕ [S2T] 거래량 소폭 증가 ({vol_now/vol_ma5*100:.0f}% of MA5)")
+                f"➕ [S2T] 거래량 증가 ({vol_now/vol_ma5*100:.0f}% of MA5)")
 
-        # ── [S3] 추세 눌림목 (예측 셋업) ──
+        # ── [S3] 추세 눌림목 — 기준 강화 ──
+        # near_ma20_7 단독(추세 미완)은 셋업 인정 제거 — 박스권 오탐 원인
+        # 반드시 상승추세(ma20 > ma60) 확인 후에만 눌림목 인정
         aligned_full = ma5 > 0 and ma20 > 0 and ma60 > 0 and ma5 > ma20 > ma60
         midterm_up   = ma20 > 0 and ma60 > 0 and ma20 > ma60
         near_ma20_5  = ma20 > 0 and current > 0 and abs(current - ma20) / ma20 <= 0.05
-        near_ma20_7  = ma20 > 0 and current > 0 and abs(current - ma20) / ma20 <= 0.07
         s3 = False
         if aligned_full and near_ma20_5:
             s3 = True; setup_hits += 1; setup_strong += 1; score += 25
-            OUT["signals"].append("✅ [S3] 정배열 + MA20 눌림목 — 최적 매수 타이밍")
+            OUT["signals"].append("✅ [S3] 완전 정배열 + MA20 눌림목 — 최적 매수 타이밍")
         elif midterm_up and near_ma20_5:
-            s3 = True; setup_hits += 1; score += 15
-            OUT["signals"].append("🔶 [S3] 중기 상승 + MA20 눌림목")
-        elif near_ma20_7:
-            s3 = True; setup_hits += 1; score += 8
-            OUT["signals"].append("🔶 [S3] MA20 인근 되돌림 (추세 미완)")
+            s3 = True; setup_hits += 1; score += 12
+            OUT["signals"].append("🔶 [S3] 중기 상승추세 + MA20 눌림목")
         else:
-            OUT["signals"].append("⬜ [S3] 추세 눌림목 없음")
+            near_str = f"{abs(current-ma20)/ma20*100:.1f}%" if ma20 > 0 and current > 0 else "-"
+            OUT["signals"].append(f"⬜ [S3] 추세 눌림목 없음 (MA20 이격 {near_str})")
         OUT["s3"] = s3
 
-        # ── [S4] RSI 강세 다이버전스 (트리거) ──
+        # ── [S4] RSI 강세 다이버전스 (트리거) — 저점 인덱스 비교 방식 ──
+        # 슬라이싱 방식(전반/후반 단순 비교)보다 실제 저점을 찾아 비교해 안정적
         s4 = False
         try:
-            price_window = cl.iloc[-10:]
-            rsi_window   = rsi_s.iloc[-10:]
-            p_low_prev = _safe_float(price_window.iloc[:5].min())
-            p_low_now  = _safe_float(price_window.iloc[5:].min())
-            r_low_prev = _safe_float(rsi_window.iloc[:5].min(), 50.0)
-            r_low_now  = _safe_float(rsi_window.iloc[5:].min(), 50.0)
-            s4 = (p_low_now < p_low_prev) and (r_low_now > r_low_prev + 2)
-            if s4:
-                trigger_hits += 1; score += 12
-                OUT["signals"].append("✅ [S4] RSI 강세 다이버전스 — 반등 임박")
+            if len(cl) >= 20:
+                pw = cl.iloc[-20:]
+                rw = rsi_s.iloc[-20:]
+                # 전반 10봉, 후반 10봉에서 각각 실제 저점 인덱스 탐색
+                i1 = pw.iloc[:10].idxmin()
+                i2 = pw.iloc[10:].idxmin()
+                p_low1 = _safe_float(pw.loc[i1])
+                p_low2 = _safe_float(pw.loc[i2])
+                r_low1 = _safe_float(rw.loc[i1], 50.0)
+                r_low2 = _safe_float(rw.loc[i2], 50.0)
+                # 가격은 더 낮은 저점, RSI는 더 높은 저점 → 강세 다이버전스
+                s4 = (p_low2 < p_low1) and (r_low2 > r_low1 + 3)
+                if s4:
+                    trigger_hits += 1; score += 12
+                    OUT["signals"].append(f"✅ [S4] RSI 강세 다이버전스 — 반등 임박 (저점↓ RSI↑)")
+                else:
+                    OUT["signals"].append("⬜ [S4] RSI 다이버전스 없음")
             else:
-                OUT["signals"].append("⬜ [S4] RSI 다이버전스 없음")
+                OUT["signals"].append("⬜ [S4] RSI 다이버전스 데이터 부족")
         except:
             OUT["signals"].append("⬜ [S4] RSI 다이버전스 계산 실패")
         OUT["s4"] = s4
@@ -531,15 +540,20 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
             OUT["signals"].append(f"⬜ [S5] 캔들 패턴 계산 실패 ({e5})")
         OUT["s5"] = s5
 
-        # ── RSI 구간 보너스 ──
-        if 35 <= rsi <= 55:
-            score += 10
-            OUT["signals"].append(f"✅ RSI 매수 구간 ({rsi:.1f})")
-        elif rsi < 35:
-            score += 6
-            OUT["signals"].append(f"🔶 RSI 과매도 ({rsi:.1f})")
+        # ── RSI 구간 보너스 — 기준 강화 ──
+        # 35~55는 "평범"한 구간 → 가산점 제거, 진짜 저평가 구간만 보너스
+        # 40~50: 건강한 눌림 +8점 / 30~40: 과매도 회복 기대 +5점 / 30 미만: 반등 기대 +3점
+        if 40 <= rsi <= 50:
+            score += 8
+            OUT["signals"].append(f"✅ RSI 건강한 눌림 구간 ({rsi:.1f})")
+        elif 30 <= rsi < 40:
+            score += 5
+            OUT["signals"].append(f"🔶 RSI 과매도 회복 구간 ({rsi:.1f})")
+        elif rsi < 30:
+            score += 3
+            OUT["signals"].append(f"🔶 RSI 극과매도 — 반등 기대 ({rsi:.1f})")
         else:
-            OUT["signals"].append(f"⬜ RSI 구간 외 ({rsi:.1f})")
+            OUT["signals"].append(f"⬜ RSI 보너스 없음 ({rsi:.1f})")
 
         # ── 매수구간 ──
         raw_low  = min(ma20, ma10) * 0.985 if min(ma20, ma10) > 0 else 0
@@ -564,8 +578,10 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
 
         # ── 통과 게이트 (예측형) ──
         # 추격 방지 = 상단 rejected 필터 담당
-        # 셋업 ≥1 요구 → 신호 없이 점수만 채운 통과 방지
-        OUT["pass"] = (not rejected) and (setup_hits >= 1) and (score >= th["min_pass_score"])
+        # setup_hits>=1 필수 → 트리거 점수만으로 셋업 없이 통과하는 노이즈 차단
+        # setup_strong>=1 OR trigger>=1 → 약한 셋업 누적만으로 통과 방지
+        qual_gate = (setup_strong >= 1) or (trigger_hits >= 1)
+        OUT["pass"] = (not rejected) and (setup_hits >= 1) and qual_gate and (score >= th["min_pass_score"])
 
         # ── 등급 ── 셋업 강도 + 트리거 유무로 계층화
         if setup_strong >= 2 and trigger_hits >= 1:
@@ -588,11 +604,38 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
 # ============================================================
 # 8. 스캐너
 # ============================================================
-US_WATCHLIST = [
-    "NVDA","META","GOOGL","AMZN","MSFT","AMD","TSLA",
-    "PYPL","SQ","SOFI","HOOD","UPST","AFRM",
-    "PLTR","ASTS","HIMS","AXSM","RIVN","SMCI","ARM",
-]
+# ── 나스닥100 자동 로딩 (Wikipedia 스크래핑, API 키 불필요) ──
+@st.cache_data(ttl=86400, show_spinner=False)  # 24시간 캐시 (구성 종목 잘 안 바뀜)
+def load_nasdaq100_tickers() -> list:
+    """
+    나스닥100 구성 종목을 Wikipedia에서 자동으로 가져옴.
+    실패 시 하드코딩 fallback 21개로 대체.
+    """
+    FALLBACK = [
+        "NVDA","META","GOOGL","AMZN","MSFT","AMD","TSLA",
+        "PYPL","SQ","SOFI","HOOD","UPST","AFRM",
+        "PLTR","ASTS","HIMS","AXSM","RIVN","SMCI","ARM",
+    ]
+    try:
+        tables = pd.read_html(
+            "https://en.wikipedia.org/wiki/Nasdaq-100",
+            attrs={"id": "constituents"},
+        )
+        if tables:
+            df_tickers = tables[0]
+            # 컬럼명이 버전마다 다를 수 있어서 유연하게 처리
+            col = next((c for c in df_tickers.columns if "ticker" in c.lower() or "symbol" in c.lower()), None)
+            if col:
+                tickers = df_tickers[col].dropna().tolist()
+                # BRK.B → BRK-B 등 yfinance 형식 변환
+                tickers = [t.replace(".", "-") for t in tickers if isinstance(t, str) and len(t) <= 6]
+                if len(tickers) >= 80:
+                    return tickers
+    except Exception as e:
+        pass
+    return FALLBACK
+
+US_WATCHLIST = load_nasdaq100_tickers()
 
 def summarize_skips(skips: list) -> dict:
     cnt = Counter()
@@ -678,7 +721,7 @@ def scan_us() -> tuple:
             "s_flags":  [r["s1"], r["s2"], r["s3"], r["s4"], r["s5"]],
         }
 
-    with ThreadPoolExecutor(max_workers=20) as ex:
+    with ThreadPoolExecutor(max_workers=40) as ex:  # 나스닥100 대응
         raw = list(ex.map(_fetch, US_WATCHLIST))
     skips = [r for r in raw if r.get("_skip")]
     top3  = sorted([r for r in raw if not r.get("_skip")], key=lambda x: x["점수"], reverse=True)[:3]
@@ -778,24 +821,25 @@ def get_portfolio_data(name: str) -> dict:
     # ── 해외 티커 — 포트폴리오용: 캐시 없이 매번 신선하게 fetch ──
     market_open = is_us_market_open()
 
-    # 1) 항상 1분봉 먼저 시도 (가장 정확)
-    yf_price, yf_src = _yf_fresh_price(name)
-
-    # 2) Finnhub (키 있을 때)
+    # Finnhub 먼저 (키 있으면 가장 정확)
     q = _fh_fetch_raw(name)
     fh_c, fh_pc = q["c"], q["pc"]
 
     if market_open and fh_c > 0:
+        # 장중: Finnhub 현재가
         price, src = fh_c, "Finnhub(정규장)"
     elif not market_open and fh_pc > 0:
-        price, src = fh_pc, "Finnhub(전일정규장종가)"
-    elif yf_price is not None and yf_price > 0:
-        # Finnhub 없으면 1분봉 값 사용
-        price, src = yf_price, yf_src
+        # 장마감 후: Finnhub 전일종가 (가장 정확)
+        price, src = fh_pc, "Finnhub(전일종가)"
     elif fh_c > 0:
-        price, src = fh_c, "Finnhub(시간외·참고용)"
+        price, src = fh_c, "Finnhub(시간외)"
     else:
-        price, src = 0.0, yf_src if yf_src else "실패"
+        # Finnhub 키 없거나 실패 → yfinance 1분봉
+        yf_price, yf_src = _yf_fresh_price(name)
+        if yf_price is not None and yf_price > 0:
+            price, src = yf_price, yf_src
+        else:
+            price, src = 0.0, yf_src if yf_src else "실패"
 
     df = load_ohlcv_us(name)
     if df is not None:
