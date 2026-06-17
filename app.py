@@ -45,8 +45,8 @@ except Exception:
 # ============================================================
 # ★ API 키 설정
 # ============================================================
-KRX_API_KEY     = ""   # ← data.krx.co.kr AUTH_KEY
-FINNHUB_API_KEY = ""   # ← Finnhub 키 (없으면 yfinance)
+KRX_API_KEY     = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # ← data.krx.co.kr AUTH_KEY
+FINNHUB_API_KEY = "e196a49253d0408cadf883e01f6b78d9"   # ← Finnhub 키 (없으면 yfinance)
 KIS_APP_KEY     = ""   # ← 한국투자증권 오픈API App Key (선택, 장중 실시간)
 KIS_APP_SECRET  = ""   # ← 한국투자증권 오픈API App Secret
 KIS_ACCOUNT_NO  = ""   # ← 계좌번호 앞 8자리
