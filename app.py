@@ -553,14 +553,26 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         OUT["buy_max"] = round(buy_high, 4)
         OUT["score"]   = int(score)
 
-        # ★ v5 수정 3: S1+S2+S3 모두 필수 AND (S4 or S5) 최소 1개 필수
-        # 기존: combo = s1 or s2 or s3 → false positive 많았음
-        core_pass  = s1 and s2 and s3                   # 핵심 3개 모두
-        conf_pass  = s4 or s5                            # 확인 신호 최소 1개
-        OUT["pass"]  = (not rejected) and core_pass and conf_pass and score >= th["min_pass_score"]
-        OUT["grade"] = ("A+" if score >= 90 else "A" if score >= 75
-                        else "B+" if score >= 60 else "B" if score >= 40
-                        else "C")
+        # ★ v6 수정: 탐색용 스캐너 — false negative 과다 문제 해소
+        # core: S1~S3 중 2개 이상 (AND 3개 필수 → 2-of-3으로 완화)
+        # conf: S4/S5는 가산점 전용 (필수 조건 제거)
+        # pass: rejected 아님 + score >= threshold (conf 필수 제거)
+        core_cnt  = sum([s1, s2, s3])
+        conf_hit  = s4 or s5                             # 가산점 여부 (필수 아님)
+        core_pass = core_cnt >= 2                        # 2-of-3
+
+        OUT["pass"]  = (not rejected) and core_pass and score >= th["min_pass_score"]
+
+        # grade: 시그널 조합으로 계층화 (score 기반 fallback 유지)
+        if core_cnt == 3 and conf_hit:
+            grade = "A+"
+        elif core_cnt >= 2 and conf_hit:
+            grade = "A"
+        elif core_cnt >= 2:
+            grade = "B+" if score >= 60 else "B"
+        else:
+            grade = "C"
+        OUT["grade"] = grade
 
     except Exception as e:
         OUT["signals"].append(f"오류: {e}")
