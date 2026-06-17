@@ -490,19 +490,18 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         # ── 매수 구간 ──
         # MA20/MA5가 현재가와 너무 멀어진 경우(급락 직후 MA가 아직 안 따라 내려온 경우 등)
         # MA 기준 매수구간이 현재가보다 훨씬 위에 잡히는 문제가 있어, 현재가 기준으로 보정한다.
-        # ── 매수 구간 (수정본) ──
         raw_low  = min(ma20, ma10) * 0.985
         raw_high = max(ma20, ma5)  * 1.010
-
-        cap_high = current * 1.03
-        cap_low  = current * 0.97
-
-        buy_low  = min(max(raw_low, cap_low), cap_high)
-        buy_high = min(max(raw_high, cap_low), cap_high)
-
-        if buy_low > buy_high:
-            buy_low, buy_high = cap_low, cap_high
-        
+        if current > 0:
+            cap_high = current * 1.05   # 매수 상단은 현재가 +5%를 넘지 않게
+            cap_low  = current * 0.90   # 매수 하단은 현재가 -10%까지만
+            buy_low  = max(min(raw_low, cap_high), cap_low)
+            buy_high = max(min(raw_high, cap_high), buy_low)
+        else:
+            buy_low, buy_high = raw_low, raw_high
+        OUT["buy_min"] = round(buy_low, 4)
+        OUT["buy_max"] = round(buy_high, 4)
+        OUT["score"]   = int(score)
 
         # ── 등급 & pass 기준 (v2: 핵심신호 1개 이상 + 점수 40 이상) ──
         # 등급/점수는 rejected 여부와 무관하게 항상 산출(포트폴리오 조회용).
