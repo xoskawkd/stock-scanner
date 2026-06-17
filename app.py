@@ -791,30 +791,46 @@ def get_portfolio_data(name: str) -> dict:
                 "score": r["score"], "grade": r["grade"],
                 "rsi": round(r["rsi"], 1), "currency": "USD",
                 "stop": 0.0, "target": 0.0,
-                "buy_min": r["buy_min"], "buy_max": r["buy_max"],
+                "buy_min": 0.0, "buy_max": 0.0,
                 "source": src, "ok": False, "signals": r["signals"],
             }
+
+        # ★ 핵심 수정: OHLCV 기준 buy_min/max가 실시간 가격과 크게 괴리나면
+        #   실시간 curr 기준으로 재계산 (±5% 이내면 OHLCV 기준 유지)
+        ohlcv_ref = r["current"] if r["current"] > 0 else curr
+        price_gap = abs(curr - ohlcv_ref) / ohlcv_ref if ohlcv_ref > 0 else 1.0
+
+        if price_gap > 0.05 or r["buy_min"] <= 0:
+            # 실시간 가격 기준 재계산
+            buy_min = round(curr * 0.97, 2)
+            buy_max = round(curr * 1.02, 2)
+            src_note = f"{src}(매수구간 실시간 재계산)"
+        else:
+            buy_min = r["buy_min"]
+            buy_max = r["buy_max"]
+            src_note = src
+
         return {
             "label":    f"{name} ({src})",
-            "curr":     curr,
+            "curr":     round(curr, 4),
             "score":    r["score"],
             "grade":    r["grade"],
             "rsi":      round(r["rsi"], 1),
             "currency": "USD",
-            "stop":     round(curr * 0.93, 2),
-            "target":   round(curr * 1.08, 2),
-            "buy_min":  r["buy_min"],
-            "buy_max":  r["buy_max"],
-            "source":   src,
+            "stop":     round(curr * 0.93, 4),
+            "target":   round(curr * 1.08, 4),
+            "buy_min":  buy_min,
+            "buy_max":  buy_max,
+            "source":   src_note,
             "ok":       curr > 0,
             "signals":  r["signals"],
         }
     if price > 0:
         return {
-            "label": f"{name} ({src}·지표없음)", "curr": price,
+            "label": f"{name} ({src}·지표없음)", "curr": round(price, 4),
             "score": 0, "grade": "-", "rsi": 50.0, "currency": "USD",
-            "stop": round(price * 0.93, 2), "target": round(price * 1.08, 2),
-            "buy_min": 0.0, "buy_max": 0.0,
+            "stop": round(price * 0.93, 4), "target": round(price * 1.08, 4),
+            "buy_min": round(price * 0.97, 4), "buy_max": round(price * 1.02, 4),
             "source": src, "ok": True, "signals": [],
         }
 
@@ -923,8 +939,15 @@ if st.session_state.my_portfolio:
         curr   = d["curr"]
         profit = (curr - buy) / buy * 100 if buy > 0 else 0
         is_kr  = d["currency"] == "KRW"
-        sym    = "₩" if is_kr else "$"
-        fmt    = (lambda v: f"{sym}{int(v):,}") if is_kr else (lambda v: f"{sym}{v:,.2f}")
+
+        # ★ 해외주식 소수점 자리수 동적 처리
+        def _usd_fmt(v: float) -> str:
+            if v <= 0:    return "$0"
+            if v < 1:     return f"${v:,.4f}"
+            elif v < 10:  return f"${v:,.3f}"
+            else:         return f"${v:,.2f}"
+
+        fmt = (lambda v: f"₩{int(v):,}") if is_kr else _usd_fmt
         p_color = "#10b981" if profit >= 0 else "#ef4444"
         grade_color = {"A+": "#f59e0b", "A": "#10b981", "B+": "#3b82f6",
                        "B": "#94a3b8", "C": "#64748b"}.get(d["grade"], "#64748b")
@@ -934,7 +957,7 @@ if st.session_state.my_portfolio:
         if is_kr:
             buy_range_str = f"₩{int(bmin):,} ~ ₩{int(bmax):,}" if bmin > 0 else "—"
         else:
-            buy_range_str = f"${bmin:,.2f} ~ ${bmax:,.2f}" if bmin > 0 else "—"
+            buy_range_str = f"{_usd_fmt(bmin)} ~ {_usd_fmt(bmax)}" if bmin > 0 else "—"
 
         stale_warn = any(kw in d.get("source", "") for kw in ["주의","오래됨","stale","지연"])
         warn_badge = (
