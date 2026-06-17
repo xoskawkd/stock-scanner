@@ -184,13 +184,28 @@ def _fh_fetch_raw(ticker: str) -> dict:
 
 def _yf_fresh_price(ticker: str) -> tuple:
     """
-    우선순위:
-    1) fast_info.last_price
-    2) 1분봉(1d, interval=1m)
-    3) 일봉(5d) — 3일 이내만 허용, 초과 시 None 반환(stale 차단)
+    가격 우선순위 (포트폴리오 실시간 기준):
+    1) 1분봉 마지막값  — 장중/장마감 직후 가장 신뢰도 높음
+    2) fast_info.last_price — 빠르지만 장외 이상값 있음 (2순위로 강등)
+    3) 일봉 최신값 — 3일 이내만 허용
+    ★ fast_info는 장외시간에 pre/after market 가격 섞여 이상값 나오는 케이스 있어서 1분봉 우선
     """
     try:
         t = yf.Ticker(ticker)
+
+        # 1) 1분봉 — 가장 신뢰도 높은 최근 체결가
+        try:
+            df_min = t.history(period="1d", interval="1m")
+            if not df_min.empty:
+                last_close = df_min["Close"].dropna()
+                if not last_close.empty:
+                    p = float(last_close.iloc[-1])
+                    if p > 0:
+                        return p, "yfinance(1분봉)"
+        except:
+            pass
+
+        # 2) fast_info — 1분봉 실패시 fallback
         try:
             p = getattr(t.fast_info, "last_price", 0)
             if p and float(p) > 0:
@@ -198,15 +213,7 @@ def _yf_fresh_price(ticker: str) -> tuple:
         except:
             pass
 
-        try:
-            df_min = t.history(period="1d", interval="1m")
-            if not df_min.empty:
-                last_close = df_min["Close"].dropna()
-                if not last_close.empty and float(last_close.iloc[-1]) > 0:
-                    return float(last_close.iloc[-1]), "yfinance(1분봉)"
-        except:
-            pass
-
+        # 3) 일봉 — 3일 이내만
         try:
             df_day = t.history(period="5d", interval="1d")
             if not df_day.empty:
@@ -736,6 +743,11 @@ def get_portfolio_data(name: str) -> dict:
             listing = load_krx_listing()
             row     = listing[listing["Code"] == name]
             label   = row["Name"].values[0] if not row.empty else name
+
+            # ★ 매수구간 항상 실시간 curr 기준으로만 계산 (OHLCV MA 기준 사용 안 함)
+            buy_min = int(curr * 0.97) if curr > 0 else 0
+            buy_max = int(curr * 1.02) if curr > 0 else 0
+
             return {
                 "label":    f"{name} ({label})",
                 "curr":     curr,
@@ -745,8 +757,8 @@ def get_portfolio_data(name: str) -> dict:
                 "currency": "KRW",
                 "stop":     int(curr * 0.93) if curr > 0 else 0,
                 "target":   int(curr * 1.08) if curr > 0 else 0,
-                "buy_min":  r["buy_min"],
-                "buy_max":  r["buy_max"],
+                "buy_min":  buy_min,
+                "buy_max":  buy_max,
                 "source":   src + ("⚠️지연" if is_ohlcv_fallback else ""),
                 "ok":       curr > 0 and not is_ohlcv_fallback,
                 "signals":  r["signals"],
@@ -763,8 +775,13 @@ def get_portfolio_data(name: str) -> dict:
                 "rsi": 0, "currency": "KRW", "stop": 0, "target": 0,
                 "buy_min": 0.0, "buy_max": 0.0, "source": "실패", "ok": False, "signals": []}
 
-    # ── 해외 티커 ──
+    # ── 해외 티커 — 포트폴리오용: 캐시 없이 매번 신선하게 fetch ──
     market_open = is_us_market_open()
+
+    # 1) 항상 1분봉 먼저 시도 (가장 정확)
+    yf_price, yf_src = _yf_fresh_price(name)
+
+    # 2) Finnhub (키 있을 때)
     q = _fh_fetch_raw(name)
     fh_c, fh_pc = q["c"], q["pc"]
 
@@ -772,14 +789,13 @@ def get_portfolio_data(name: str) -> dict:
         price, src = fh_c, "Finnhub(정규장)"
     elif not market_open and fh_pc > 0:
         price, src = fh_pc, "Finnhub(전일정규장종가)"
+    elif yf_price is not None and yf_price > 0:
+        # Finnhub 없으면 1분봉 값 사용
+        price, src = yf_price, yf_src
     elif fh_c > 0:
         price, src = fh_c, "Finnhub(시간외·참고용)"
     else:
-        yf_price, yf_src = _yf_fresh_price(name)
-        if yf_price is not None and yf_price > 0:
-            price, src = yf_price, yf_src
-        else:
-            price, src = 0.0, yf_src
+        price, src = 0.0, yf_src if yf_src else "실패"
 
     df = load_ohlcv_us(name)
     if df is not None:
@@ -795,33 +811,28 @@ def get_portfolio_data(name: str) -> dict:
                 "source": src, "ok": False, "signals": r["signals"],
             }
 
-        # ★ 핵심 수정: OHLCV 기준 buy_min/max가 실시간 가격과 크게 괴리나면
-        #   실시간 curr 기준으로 재계산 (±5% 이내면 OHLCV 기준 유지)
-        ohlcv_ref = r["current"] if r["current"] > 0 else curr
-        price_gap = abs(curr - ohlcv_ref) / ohlcv_ref if ohlcv_ref > 0 else 1.0
+        # ★ 매수구간/목표가/손절가 항상 실시간 curr 기준으로만 계산
+        #   OHLCV MA 기반 buy_min/max는 현재가보다 높게 나오는 버그 있어서 사용 안 함
+        def _usd_round(v):
+            if v < 1:   return round(v, 4)
+            elif v < 10: return round(v, 3)
+            else:        return round(v, 2)
 
-        if price_gap > 0.05 or r["buy_min"] <= 0:
-            # 실시간 가격 기준 재계산
-            buy_min = round(curr * 0.97, 2)
-            buy_max = round(curr * 1.02, 2)
-            src_note = f"{src}(매수구간 실시간 재계산)"
-        else:
-            buy_min = r["buy_min"]
-            buy_max = r["buy_max"]
-            src_note = src
+        buy_min = _usd_round(curr * 0.97)
+        buy_max = _usd_round(curr * 1.02)
 
         return {
             "label":    f"{name} ({src})",
-            "curr":     round(curr, 4),
+            "curr":     _usd_round(curr),
             "score":    r["score"],
             "grade":    r["grade"],
             "rsi":      round(r["rsi"], 1),
             "currency": "USD",
-            "stop":     round(curr * 0.93, 4),
-            "target":   round(curr * 1.08, 4),
+            "stop":     _usd_round(curr * 0.93),
+            "target":   _usd_round(curr * 1.08),
             "buy_min":  buy_min,
             "buy_max":  buy_max,
-            "source":   src_note,
+            "source":   src,
             "ok":       curr > 0,
             "signals":  r["signals"],
         }
