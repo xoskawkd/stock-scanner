@@ -1056,40 +1056,107 @@ if st.session_state.my_portfolio:
         profit = (curr - buy) / buy * 100 if buy > 0 else 0
         is_kr  = d["currency"] == "KRW"
 
-        # ★ 해외주식 소수점 자리수 동적 처리
         def _usd_fmt(v: float) -> str:
-            if v <= 0:    return "$0"
-            if v < 1:     return f"${v:,.4f}"
-            elif v < 10:  return f"${v:,.3f}"
-            else:         return f"${v:,.2f}"
+            if v <= 0:   return "$0"
+            if v < 1:    return f"${v:,.4f}"
+            elif v < 10: return f"${v:,.3f}"
+            else:        return f"${v:,.2f}"
 
         fmt = (lambda v: f"₩{int(v):,}") if is_kr else _usd_fmt
-        p_color = "#10b981" if profit >= 0 else "#ef4444"
+        p_color    = "#10b981" if profit >= 0 else "#ef4444"
         grade_color = {"A+": "#f59e0b", "A": "#10b981", "B+": "#3b82f6",
                        "B": "#94a3b8", "C": "#64748b"}.get(d["grade"], "#64748b")
 
-        bmin = d.get("buy_min", 0)
-        bmax = d.get("buy_max", 0)
-        if is_kr:
-            buy_range_str = f"₩{int(bmin):,} ~ ₩{int(bmax):,}" if bmin > 0 else "—"
-        else:
-            buy_range_str = f"{_usd_fmt(bmin)} ~ {_usd_fmt(bmax)}" if bmin > 0 else "—"
+        bmin = d.get("buy_min", 0); bmax = d.get("buy_max", 0)
+        buy_range_str = (f"₩{int(bmin):,} ~ ₩{int(bmax):,}" if is_kr else
+                         f"{_usd_fmt(bmin)} ~ {_usd_fmt(bmax)}") if bmin > 0 else "—"
 
-        stale_warn = any(kw in d.get("source", "") for kw in ["주의","오래됨","stale","지연"])
-        warn_badge = (
-            "<span style='background:#ef4444;color:#fff;font-size:10px;"
-            "padding:2px 6px;border-radius:4px;margin-left:8px;'>⚠️ 시세 지연 가능</span>"
-        ) if stale_warn else ""
+        stale_warn = any(kw in d.get("source","") for kw in ["주의","오래됨","stale","지연"])
+        warn_badge = ("<span style='background:#ef4444;color:#fff;font-size:10px;"
+                      "padding:2px 6px;border-radius:4px;margin-left:8px;'>⚠️ 시세 지연</span>"
+                      ) if stale_warn else ""
+
+        # ══ 포지션 판단 ══
+        rsi_v = d["rsi"]
+
+        # 1. 포지션 액션 (추가매수 / 홀딩 / 익절 / 손절)
+        stop  = d["stop"];  target = d["target"]
+        if curr <= stop:
+            action = "🔴 손절 고려"; action_color = "#ef4444"
+            action_reason = f"손절가({fmt(stop)}) 도달"
+        elif curr >= target:
+            action = "🟡 익절 고려"; action_color = "#f59e0b"
+            action_reason = f"목표가({fmt(target)}) 도달"
+        elif profit < -5 and rsi_v > 60:
+            action = "🔴 손절 고려"; action_color = "#ef4444"
+            action_reason = f"손실 {profit:.1f}% + RSI 과열"
+        elif profit > 5 and rsi_v > 70:
+            action = "🟡 익절 고려"; action_color = "#f59e0b"
+            action_reason = f"수익 {profit:.1f}% + RSI 과열"
+        elif profit < -3 and d["score"] >= 50:
+            action = "🟢 추가매수 검토"; action_color = "#10b981"
+            action_reason = f"눌림(-{abs(profit):.1f}%) + 신호 강함({d['score']}점)"
+        elif -2 <= profit <= 3 and rsi_v < 50:
+            action = "🟢 추가매수 검토"; action_color = "#10b981"
+            action_reason = f"평단 근처 + RSI 여유({rsi_v:.0f})"
+        else:
+            action = "⚪ 홀딩"; action_color = "#94a3b8"
+            action_reason = "특이사항 없음"
+
+        # 2. 변화감지 — 오늘 새 신호 켜졌나
+        change_signals = [s for s in d.get("signals", []) if "🔔 변화감지" in s]
+        change_html = ""
+        if change_signals:
+            change_html = f"""
+  <div style="background:#1e3a2f;border:1px solid #10b981;border-radius:6px;
+              padding:8px 12px;margin-bottom:8px;">
+    <span style="color:#10b981;font-size:12px;font-weight:bold;">
+      🔔 오늘 새 신호 감지 — 1~2일 내 변화 가능
+    </span><br>
+    <span style="color:#6ee7b7;font-size:11px;">{change_signals[0].replace("🔔 변화감지: ","")}</span>
+  </div>"""
+
+        # 3. 방향성 판단 (RSI + MA + 거래량 조합)
+        sigs = d.get("signals", [])
+        s1_on = any("S1" in s and "✅" in s for s in sigs)
+        s2_on = any("S2" in s and "✅" in s for s in sigs)
+        s3_on = any("S3" in s and "✅" in s for s in sigs)
+
+        if s1_on and s2_on and s3_on:
+            direction = "🚀 강한 상승 셋업"; dir_color = "#10b981"
+            dir_detail = "BB수축+거래량눌림+정배열 동시 — 폭발 직전"
+        elif (s1_on or s2_on) and s3_on:
+            direction = "📈 상승 가능성 높음"; dir_color = "#3b82f6"
+            dir_detail = "주요 셋업 2개 이상 충족"
+        elif s3_on and 40 <= rsi_v <= 60:
+            direction = "📈 완만한 상승 기대"; dir_color = "#3b82f6"
+            dir_detail = f"정배열 눌림목 + RSI 중립({rsi_v:.0f})"
+        elif rsi_v > 70:
+            direction = "⚠️ 과매수 주의"; dir_color = "#f59e0b"
+            dir_detail = f"RSI {rsi_v:.0f} — 단기 조정 가능"
+        elif rsi_v < 30:
+            direction = "🔄 반등 기대"; dir_color = "#a78bfa"
+            dir_detail = f"RSI {rsi_v:.0f} 극과매도 — 단기 반등 가능"
+        elif d["score"] >= 50:
+            direction = "🔶 중립 (신호 대기)"; dir_color = "#f59e0b"
+            dir_detail = f"점수 {d['score']}점 — 추가 신호 확인 필요"
+        else:
+            direction = "⬜ 방향 불명확"; dir_color = "#64748b"
+            dir_detail = "뚜렷한 신호 없음 — 관망"
 
         st.markdown(f"""
 <div style="background:#1e293b;padding:20px;border-radius:12px;
             border-left:6px solid {grade_color};margin-bottom:16px;">
+
   <h3 style="margin:0 0 12px 0;">📈 {d['label']}
     <span style="font-size:14px;background:{grade_color};color:#000;
                  padding:2px 8px;border-radius:4px;margin-left:8px;">
       {d['grade']}등급 {d['score']}점
     </span>{warn_badge}
   </h3>
+
+  {change_html}
+
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px;">
     <div><div style="font-size:11px;color:#94a3b8;">내 평단가</div>
          <div style="font-size:20px;font-weight:bold;">{fmt(buy)}</div></div>
@@ -1099,19 +1166,34 @@ if st.session_state.my_portfolio:
          <div style="font-size:20px;font-weight:bold;color:{p_color};">
            {'+' if profit>=0 else ''}{profit:.2f}%</div></div>
   </div>
+
+  <div style="background:#0f172a;padding:10px 14px;border-radius:8px;margin-bottom:8px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-size:13px;font-weight:bold;color:{action_color};">{action}</span>
+      <span style="font-size:11px;color:#94a3b8;">{action_reason}</span>
+    </div>
+  </div>
+
+  <div style="background:#0f172a;padding:10px 14px;border-radius:8px;margin-bottom:8px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-size:13px;font-weight:bold;color:{dir_color};">{direction}</span>
+      <span style="font-size:11px;color:#94a3b8;">{dir_detail}</span>
+    </div>
+  </div>
+
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:8px;">
     <div style="background:#0f172a;padding:8px;border-radius:6px;text-align:center;">
       <div style="font-size:10px;color:#94a3b8;">매수구간</div>
       <div style="color:#10b981;font-weight:bold;font-size:11px;">{buy_range_str}</div></div>
     <div style="background:#0f172a;padding:8px;border-radius:6px;text-align:center;">
       <div style="font-size:10px;color:#94a3b8;">목표가 (+8%)</div>
-      <div style="color:#3b82f6;font-weight:bold;">{fmt(d['target'])}</div></div>
+      <div style="color:#3b82f6;font-weight:bold;">{fmt(target)}</div></div>
     <div style="background:#0f172a;padding:8px;border-radius:6px;text-align:center;">
       <div style="font-size:10px;color:#94a3b8;">손절가 (-7%)</div>
-      <div style="color:#ef4444;font-weight:bold;">{fmt(d['stop'])}</div></div>
+      <div style="color:#ef4444;font-weight:bold;">{fmt(stop)}</div></div>
     <div style="background:#0f172a;padding:8px;border-radius:6px;text-align:center;">
       <div style="font-size:10px;color:#94a3b8;">RSI</div>
-      <div style="font-weight:bold;">{d['rsi']}</div></div>
+      <div style="font-weight:bold;">{rsi_v}</div></div>
   </div>
   <div style="font-size:10px;color:#475569;">📡 출처: {d['source']}</div>
 </div>""", unsafe_allow_html=True)
