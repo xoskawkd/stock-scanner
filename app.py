@@ -33,8 +33,8 @@ except Exception:
 # ============================================================
 # ★ API 키 설정
 # ============================================================
-KRX_API_KEY     = ""   # ← data.krx.co.kr AUTH_KEY
-FINNHUB_API_KEY = ""   # ← Finnhub 키 (없으면 yfinance)
+KRX_API_KEY     = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # ← data.krx.co.kr AUTH_KEY
+FINNHUB_API_KEY = "e196a49253d0408cadf883e01f6b78d9"   # ← Finnhub 키 (없으면 yfinance)
 
 # ============================================================
 # ★ 스캔/필터 튜닝값
