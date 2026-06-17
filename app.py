@@ -1,12 +1,15 @@
 """
-Tae Scanner — 퀀트 폭등 예측 엔진 (v3)
+Tae Scanner — 퀀트 폭등 예측 엔진 (v4)
 ==================================
-원본(v2) 기반, 최소 수정:
-1. 매수구간 0원 버그 수정 (current=0일 때 cap이 0이 되던 문제)
-2. KIS 제거 — 국내 가격: KRX → yfinance → OHLCV (원본과 동일)
-3. 해외 가격: 원본 로직 100% 복원 (Finnhub→yfinance 순서 그대로)
-4. _safe_float() 헬퍼로 NaN/Inf 방어 추가
-5. 그 외 원본 코드 구조 유지
+v3 기반, 최소 수정:
+1. [버그 수정] 해외 가격 yfinance fallback이 오래된 일봉 종가를 가져오던 문제 해결
+   - 기존: history(period="5d", interval="1d") 마지막 행을 그대로 사용 → 저유동성 종목에서
+     yfinance가 최신 거래일 데이터를 늦게 채우는 경우, 며칠 전 가격이 "최신가"처럼 표시됨
+   - 수정: 1) fast_info.last_price 우선 시도 (장중/장외 모두)
+           2) 1분봉(1d/1m) 마지막 값 시도 — 가장 최신 실제 체결가에 가까움
+           3) 그래도 실패하면 일봉 종가로 fallback (최후 수단)
+         + 일봉 fallback 시, 그 날짜가 너무 오래됐으면(3일 초과) source에 경고 표시
+2. 그 외 원본(v3) 코드 구조 100% 유지
 """
 
 import streamlit as st
@@ -29,8 +32,8 @@ except Exception:
 # ============================================================
 # ★ API 키 설정
 # ============================================================
-KRX_API_KEY     = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # ← data.krx.co.kr AUTH_KEY
-FINNHUB_API_KEY = "e196a49253d0408cadf883e01f6b78d9"   # ← Finnhub 키 (없으면 yfinance)
+KRX_API_KEY     = ""   # ← data.krx.co.kr AUTH_KEY
+FINNHUB_API_KEY = ""   # ← Finnhub 키 (없으면 yfinance)
 
 # ============================================================
 # ★ 스캔/필터 튜닝값
@@ -145,7 +148,8 @@ def get_kr_price_with_fallback(code: str) -> tuple:
 
 
 # ============================================================
-# 3. 해외 가격 — 원본 로직 100% 복원
+# 3. 해외 가격
+#    ★ v4: yfinance fallback 순서 수정 (버그 패치)
 # ============================================================
 def is_us_market_open() -> bool:
     if ZoneInfo is None:
@@ -175,9 +179,68 @@ def _fh_fetch_raw(ticker: str) -> dict:
         return {"c": 0.0, "pc": 0.0}
 
 
+def _yf_fresh_price(ticker: str) -> tuple:
+    """
+    ★ 버그 수정 핵심 함수
+    기존 코드는 history(period="5d", interval="1d")의 마지막 행을 바로 썼는데,
+    저유동성/소형주는 yfinance가 당일(혹은 최근) 일봉을 늦게 채우는 경우가 많아
+    실제로는 며칠 전 종가가 "최신가"처럼 리턴되는 문제가 있었음.
+
+    수정된 우선순위:
+    1) fast_info.last_price        — 가장 신뢰도 높은 실시간/직전 체결가
+    2) 1분봉(1d, interval=1m) 마지막 값 — 장중이면 거의 실시간, 장 마감 직후면 마지막 체결가
+    3) 일봉(5d, interval=1d) 마지막 값 — 최후 수단. 이때 해당 날짜가 오늘/전날이 아니면
+       "(주의:해당일자 오래됨)" 표시를 붙여 사용자가 데이터가 stale함을 알 수 있게 함
+    """
+    try:
+        t = yf.Ticker(ticker)
+
+        # 1) fast_info 우선
+        try:
+            p = getattr(t.fast_info, "last_price", 0)
+            if p and float(p) > 0:
+                return float(p), "yfinance(실시간)"
+        except:
+            pass
+
+        # 2) 1분봉 — 가장 최신 체결가에 가까움
+        try:
+            df_min = t.history(period="1d", interval="1m")
+            if not df_min.empty:
+                last_close = df_min["Close"].dropna()
+                if not last_close.empty and float(last_close.iloc[-1]) > 0:
+                    return float(last_close.iloc[-1]), "yfinance(1분봉)"
+        except:
+            pass
+
+        # 3) 일봉 — 최후 수단 + stale 여부 체크
+        try:
+            df_day = t.history(period="5d", interval="1d")
+            if not df_day.empty:
+                last_close = df_day["Close"].dropna()
+                if not last_close.empty and float(last_close.iloc[-1]) > 0:
+                    last_idx = df_day.index[-1]
+                    try:
+                        last_date = last_idx.tz_localize(None) if last_idx.tzinfo else last_idx
+                        days_old = (datetime.now() - last_date.to_pydatetime()).days
+                    except:
+                        days_old = 0
+                    tag = "yfinance(일봉종가)" if days_old <= 3 else f"yfinance(일봉종가·{days_old}일전·주의)"
+                    return float(last_close.iloc[-1]), tag
+        except:
+            pass
+
+    except:
+        pass
+    return 0.0, "실패"
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def get_us_price(ticker: str) -> tuple:
-    """원본과 동일: Finnhub(장중c/장마감pc) → yfinance"""
+    """
+    v4: Finnhub(장중c/장마감pc) → yfinance(실시간→1분봉→일봉 순)
+    Finnhub가 0을 주거나(키없음/요청제한/미지원 종목) 신뢰 불가 시 yfinance로 즉시 전환.
+    """
     market_open = is_us_market_open()
     q = _fh_fetch_raw(ticker)
     c, pc = q["c"], q["pc"]
@@ -189,17 +252,11 @@ def get_us_price(ticker: str) -> tuple:
     if c > 0:
         return c, "Finnhub(시간외·참고용)"
 
-    try:
-        t = yf.Ticker(ticker)
-        if market_open:
-            p = getattr(t.fast_info, "last_price", 0)
-            if p and float(p) > 0:
-                return float(p), "yfinance"
-        df = t.history(period="5d", interval="1d")
-        if not df.empty:
-            return float(df["Close"].iloc[-1]), "yfinance-일봉종가"
-    except:
-        pass
+    # Finnhub 완전 실패 → yfinance 신선도 우선 fallback
+    price, src = _yf_fresh_price(ticker)
+    if price > 0:
+        return price, src
+
     return 0.0, "실패"
 
 
@@ -262,8 +319,7 @@ def get_market_status():
         return "50", "중립", "1,350.00"
 
 # ============================================================
-# 6. ★ 퀀트 폭등 예측 엔진
-#    원본 로직 유지 + 매수구간 0원 버그 수정 + NaN 방어
+# 6. ★ 퀀트 폭등 예측 엔진 (원본 v3 로직 100% 유지)
 # ============================================================
 def _safe_float(val, default=0.0) -> float:
     try:
@@ -458,9 +514,7 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
             OUT["signals"].append(f"⬜ RSI 구간 외 ({rsi:.1f})")
 
         # ──────────────────────────────────────────────
-        # ★ 매수구간 버그 수정 핵심
-        # current=0 이면 cap_high=0 → min(raw, 0)=0 → 전부 0 되던 문제
-        # current가 유효할 때만 cap 적용, 아니면 raw MA 직접 사용
+        # 매수구간 (v3에서 0원 버그 수정된 로직 유지)
         # ──────────────────────────────────────────────
         raw_low  = min(ma20, ma10) * 0.985 if min(ma20, ma10) > 0 else 0
         raw_high = max(ma20, ma5)  * 1.010 if max(ma20, ma5)  > 0 else 0
@@ -663,7 +717,7 @@ def get_portfolio_data(name: str) -> dict:
                     "buy_min": r["buy_min"], "buy_max": r["buy_max"],
                     "source": src, "ok": price > 0, "signals": r["signals"]}
 
-    # 해외 — 원본과 동일하게 get_us_price 먼저
+    # 해외 — get_us_price (v4: 신선도 우선 fallback 적용됨)
     price, src = get_us_price(name)
     df = load_ohlcv_us(name)
     if df is not None:
@@ -723,7 +777,7 @@ with st.sidebar.expander("🔑 API 상태", expanded=True):
     st.write("Finnhub:", "✅ 연결됨" if FINNHUB_API_KEY else "❌ 키 없음 (yfinance 대체)")
 
 st.title("🚀 Tae's Quant 폭등 예측 스캐너")
-st.caption("📌 BB수축+거래량폭발+정배열눌림목+RSI다이버전스+캔들패턴 | 핵심신호 1개+점수40 통과 | v3: 매수구간 버그 수정")
+st.caption("📌 BB수축+거래량폭발+정배열눌림목+RSI다이버전스+캔들패턴 | 핵심신호 1개+점수40 통과 | v4: 해외 가격 yfinance fallback 신선도 버그 수정")
 
 ph_us   = st.empty()
 ph_coin = st.empty()
@@ -781,6 +835,11 @@ if st.session_state.my_portfolio:
         else:
             buy_range_str = f"${bmin:,.2f} ~ ${bmax:,.2f}" if bmin > 0 else "—"
 
+        # ★ v4: 가격이 오래된 데이터일 경우 경고 배지 표시
+        stale_warn = "주의" in d.get("source", "") or "오래됨" in d.get("source", "")
+        warn_badge = ("<span style='background:#ef4444;color:#fff;font-size:10px;"
+                      "padding:2px 6px;border-radius:4px;margin-left:8px;'>⚠️ 시세 지연 가능</span>") if stale_warn else ""
+
         st.markdown(f"""
 <div style="background:#1e293b;padding:20px;border-radius:12px;
             border-left:6px solid {grade_color};margin-bottom:16px;">
@@ -788,7 +847,7 @@ if st.session_state.my_portfolio:
     <span style="font-size:14px;background:{grade_color};color:#000;
                  padding:2px 8px;border-radius:4px;margin-left:8px;">
       {d['grade']}등급 {d['score']}점
-    </span>
+    </span>{warn_badge}
   </h3>
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px;">
     <div><div style="font-size:11px;color:#94a3b8;">내 평단가</div>
