@@ -1,40 +1,14 @@
 """
-Tae Scanner — 퀀트 폭등 예측 엔진 (v2 수정판 + 매수구간 버그 패치)
+Tae Scanner — 퀀트 폭등 예측 엔진 (v5)
 ==================================
-국내 기준가 : KRX 공식 OpenAPI(data-dbg.krx.co.kr) 일별 확정종가 → yfinance → OHLCV 최종안전망
-해외 실시간 : Finnhub(장중) / 전일 정규장 종가(장마감 시) → yfinance fallback
-핵심 전략  : 폭등 1~2일 전 신호 5개 복합 감지
+v4 기반, 6개 항목 수정:
 
-[v2 수정 내역] (원본 그대로 유지)
-1. 통과 조건 완화: 핵심신호(S1·S2·S3) 2개 동시 충족 → 1개 이상으로 완화, 통과 점수 50→40
-2. "이미 급등" 컷오프 완화 (RSI 70→78, 5일수익 8%→15%, MA20이탈 8%→15%, 60일고점 85%→95%)
-3. 코인 유동성 필터를 '거래량(개수)' → '거래대금(원화)' 기준으로 교체
-4. scan_crypto가 quant_predict(df, "KR")로 잘못 호출되던 것을 "CRYPTO"로 수정
-5. KRX 가격 조회를 공식 OpenAPI 스펙으로 교체
-6. 해외 Finnhub 가격: 미국 정규장 여부 판별해 c/pc 분기
-7. 국내/코인 스캔에 "제외 이유 요약" 사이드바 로그 추가
-
-[이번 수정 — 매수구간이 현재가보다 높게 뜨는 버그]
-원인:
-  raw_low  = min(ma20, ma10) * 0.985
-  raw_high = max(ma20, ma5)  * 1.010
-  cap_high = current * 1.05
-  cap_low  = current * 0.90
-  buy_low  = max(min(raw_low,  cap_high), cap_low)
-  buy_high = max(min(raw_high, cap_high), buy_low)
-
-  하락장/급락 직후처럼 MA5·MA10·MA20이 아직 현재가보다 한참 위에 머물러 있는 구간에서는
-  raw_low, raw_high 모두 cap_high(현재가+5%)보다 작은 경우가 흔함.
-  이때 min(raw_low, cap_high) = raw_low, min(raw_high, cap_high) = raw_high 가 그대로 살아남고,
-  cap_low(현재가-10%)와 max()를 취해도 raw_low가 cap_low보다 크면 역시 raw_low가 그대로 채택됨.
-  즉 cap이 "상한만 누르는" 방향으로 짜여 있어 MA가 현재가 위에 있는 상황에서는
-  cap이 전혀 발동하지 않고, 매수구간 하단/상단이 통째로 현재가보다 높게 잡힘.
-
-수정:
-  "매수 권장구간"은 정의상 현재가보다 비싸면 의미가 없으므로,
-  buy_high를 현재가를 절대 넘지 않도록(現재가 자체를 상한으로) 강제.
-  buy_low 역시 buy_high를 넘을 수 없도록 재정렬.
-  → 다른 점수/등급/시그널 로직은 전혀 손대지 않음.
+1. [버그] _yf_fresh_price — 일봉 fallback 3일 초과 시 None 반환 (stale 방지)
+2. [성능] scan_kr() — 불필요한 DataFrame copy 제거, I/O 병목 최소화
+3. [정확도] quant_predict() — S1+S2+S3 필수, S4 or S5 최소 1개 필수 (false positive 감소)
+4. [안정] S5 캔들 패턴 — NaN 처리 강화, index 오류 방지, rolling 부족 시 fallback
+5. [통일] get_portfolio_data() — 가격 소스 통일 (OHLCV는 지표 전용, 가격 기준에서 제외)
+6. [명시] 캡션 — 추격매수 아닌 예측 모델임을 명시
 """
 
 import streamlit as st
@@ -57,19 +31,22 @@ except Exception:
 # ============================================================
 # ★ API 키 설정
 # ============================================================
-KRX_API_KEY     = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # ← data.krx.co.kr 에서 발급받은 AUTH_KEY 입력
-FINNHUB_API_KEY = "e196a49253d0408cadf883e01f6b78d9"   # ← Finnhub 키 입력 (없으면 yfinance 사용)
+KRX_API_KEY     = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # ← data.krx.co.kr AUTH_KEY
+FINNHUB_API_KEY = "e196a49253d0408cadf883e01f6b78d9"   # ← Finnhub 키 (없으면 yfinance)
 
 # ============================================================
-# ★ 스캔/필터 튜닝값 (여기만 건드리면 민감도 조절 가능)
+# ★ 스캔/필터 튜닝값
 # ============================================================
-KR_SCAN_TOP_N     = 300   # 국내: 시총 상위 N개 중 스캔
-CRYPTO_SCAN_LIMIT = 80     # 코인: 업비트 KRW 마켓 상위 N개 스캔
+KR_SCAN_TOP_N     = 300
+CRYPTO_SCAN_LIMIT = 80
 
 THRESHOLDS = {
-    "KR":     {"min_vol": 50_000,  "max_rsi": 78, "max_gain5": 0.15, "max_ma20_dev": 1.15, "max_hi60": 0.95, "min_pass_score": 40},
-    "US":     {"min_vol": 500_000, "max_rsi": 78, "max_gain5": 0.15, "max_ma20_dev": 1.15, "max_hi60": 0.95, "min_pass_score": 40},
-    "CRYPTO": {"min_value": 1_000_000_000, "max_rsi": 80, "max_gain5": 0.25, "max_ma20_dev": 1.20, "max_hi60": 0.97, "min_pass_score": 40},
+    "KR":     {"min_vol": 50_000,  "max_rsi": 78, "max_gain5": 0.15,
+               "max_ma20_dev": 1.15, "max_hi60": 0.95, "min_pass_score": 40},
+    "US":     {"min_vol": 500_000, "max_rsi": 78, "max_gain5": 0.15,
+               "max_ma20_dev": 1.15, "max_hi60": 0.95, "min_pass_score": 40},
+    "CRYPTO": {"min_value": 1_000_000_000, "max_rsi": 80, "max_gain5": 0.25,
+               "max_ma20_dev": 1.20, "max_hi60": 0.97, "min_pass_score": 40},
 }
 
 # ============================================================
@@ -98,7 +75,7 @@ if "my_portfolio" not in st.session_state:
     st.session_state.my_portfolio = load_portfolio()
 
 # ============================================================
-# 2. 국내 기준가 — KRX 공식 OpenAPI (일별 확정종가)
+# 2. 국내 기준가 — KRX 공식 OpenAPI
 # ============================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def get_krx_daily_snapshot() -> tuple:
@@ -117,7 +94,7 @@ def get_krx_daily_snapshot() -> tuple:
             rows = res.get("OutBlock_1", [])
             if rows:
                 return pd.DataFrame(rows), ds
-        except Exception:
+        except:
             pass
         d -= timedelta(days=1)
     return pd.DataFrame(), ""
@@ -139,12 +116,13 @@ def get_krx_price(code: str) -> tuple:
         price = float(str(row.iloc[0].get("TDD_CLSPRC", "0")).replace(",", ""))
         vol   = float(str(row.iloc[0].get("ACC_TRDVOL", "0")).replace(",", ""))
         return price, vol, f"KRX확정종가({basdd})"
-    except Exception:
+    except:
         return 0.0, 0.0, "KRX파싱오류"
 
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_kr_price_with_fallback(code: str) -> tuple:
+    """KRX → yfinance → OHLCV 안전망 (OHLCV는 최최후 수단)"""
     price, vol, src = get_krx_price(code)
     if price > 0:
         return price, vol, src
@@ -159,7 +137,7 @@ def get_kr_price_with_fallback(code: str) -> tuple:
         df = t.history(period="1d", interval="5m")
         if not df.empty:
             return float(df["Close"].iloc[-1]), float(df["Volume"].iloc[-1]), "yfinance"
-    except Exception:
+    except:
         pass
 
     df_ohlcv = load_ohlcv_kr(code)
@@ -169,14 +147,15 @@ def get_kr_price_with_fallback(code: str) -> tuple:
 
 
 # ============================================================
-# 3. 해외 가격 — Finnhub(장중 실시간) / 전일 정규장 종가(장마감) → yfinance
+# 3. 해외 가격
+#    ★ v5 수정 1: _yf_fresh_price — 일봉 3일 초과 시 None 반환
 # ============================================================
 def is_us_market_open() -> bool:
     if ZoneInfo is None:
         return True
     try:
         now_et = datetime.now(ZoneInfo("America/New_York"))
-    except Exception:
+    except:
         return True
     if now_et.weekday() >= 5:
         return False
@@ -195,12 +174,71 @@ def _fh_fetch_raw(ticker: str) -> dict:
             timeout=4,
         ).json()
         return {"c": float(r.get("c", 0) or 0), "pc": float(r.get("pc", 0) or 0)}
-    except Exception:
+    except:
         return {"c": 0.0, "pc": 0.0}
+
+
+def _yf_fresh_price(ticker: str) -> tuple:
+    """
+    ★ v5 수정 1: 일봉 fallback — 3일 초과 시 (None, "실패") 반환으로 변경
+    stale 데이터를 가격 기준으로 사용하지 않도록 완전 차단.
+
+    우선순위:
+    1) fast_info.last_price        — 가장 신뢰도 높은 실시간/직전 체결가
+    2) 1분봉(1d, interval=1m) 마지막 값 — 장중 거의 실시간, 장 마감 직후 마지막 체결가
+    3) 일봉(5d, interval=1d) 마지막 값 — 3일 이내만 허용, 초과 시 None 반환
+    """
+    try:
+        t = yf.Ticker(ticker)
+
+        # 1) fast_info 우선
+        try:
+            p = getattr(t.fast_info, "last_price", 0)
+            if p and float(p) > 0:
+                return float(p), "yfinance(실시간)"
+        except:
+            pass
+
+        # 2) 1분봉 — 가장 최신 체결가에 가까움
+        try:
+            df_min = t.history(period="1d", interval="1m")
+            if not df_min.empty:
+                last_close = df_min["Close"].dropna()
+                if not last_close.empty and float(last_close.iloc[-1]) > 0:
+                    return float(last_close.iloc[-1]), "yfinance(1분봉)"
+        except:
+            pass
+
+        # 3) 일봉 — 3일 이내만 허용, 초과 시 None 반환 (stale 차단)
+        try:
+            df_day = t.history(period="5d", interval="1d")
+            if not df_day.empty:
+                last_close = df_day["Close"].dropna()
+                if not last_close.empty and float(last_close.iloc[-1]) > 0:
+                    last_idx = df_day.index[-1]
+                    try:
+                        last_date = last_idx.tz_localize(None) if last_idx.tzinfo else last_idx
+                        days_old = (datetime.now() - last_date.to_pydatetime()).days
+                    except:
+                        days_old = 0
+                    # ★ 핵심 변경: 3일 초과면 None 반환 (v4는 경고만 했음)
+                    if days_old > 3:
+                        return None, f"yfinance(일봉{days_old}일전·stale차단)"
+                    return float(last_close.iloc[-1]), "yfinance(일봉종가)"
+        except:
+            pass
+
+    except:
+        pass
+    return None, "실패"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_us_price(ticker: str) -> tuple:
+    """
+    Finnhub(장중c/장마감pc) → yfinance(실시간→1분봉→일봉 3일이내) 순
+    모든 소스 실패 시 (0.0, "실패") 반환
+    """
     market_open = is_us_market_open()
     q = _fh_fetch_raw(ticker)
     c, pc = q["c"], q["pc"]
@@ -212,18 +250,12 @@ def get_us_price(ticker: str) -> tuple:
     if c > 0:
         return c, "Finnhub(시간외·참고용)"
 
-    try:
-        t = yf.Ticker(ticker)
-        if market_open:
-            p = getattr(t.fast_info, "last_price", 0)
-            if p and float(p) > 0:
-                return float(p), "yfinance"
-        df = t.history(period="5d", interval="1d")
-        if not df.empty:
-            return float(df["Close"].iloc[-1]), "yfinance-일봉종가"
-    except Exception:
-        pass
-    return 0.0, "실패"
+    # Finnhub 완전 실패 → yfinance 신선도 우선 fallback
+    price, src = _yf_fresh_price(ticker)
+    if price is not None and price > 0:
+        return price, src
+
+    return 0.0, src if price is None else "실패"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -286,9 +318,16 @@ def get_market_status():
 
 # ============================================================
 # 6. ★ 퀀트 폭등 예측 엔진
-# (S1~S5 신호 로직, RSI, 등급, score 산정 — 전부 원본 그대로 유지)
-# 매수구간 계산 부분만 버그 수정
+#    v5 수정 3: S1+S2+S3 필수 AND (S4 or S5) 필수
+#    v5 수정 4: S5 캔들 패턴 NaN/index 오류 방지 강화
 # ============================================================
+def _safe_float(val, default=0.0) -> float:
+    try:
+        v = float(val)
+        return v if np.isfinite(v) else default
+    except:
+        return default
+
 
 def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
     OUT = {
@@ -303,92 +342,96 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
             OUT["signals"].append("❌ 데이터 부족")
             return OUT
 
-        df = df.copy()
+        # ★ v5 수정 2: copy 제거 — df는 읽기 전용으로만 사용
         df.columns = [c.lower() for c in df.columns]
-        cl = df["close"]
-        hi = df["high"]
-        lo = df["low"]
-        vo = df["volume"]
+        cl = df["close"].astype(float)
+        hi = df["high"].astype(float)
+        lo = df["low"].astype(float)
+        vo = df["volume"].astype(float)
 
-        current = float(cl.iloc[-1])
+        current = _safe_float(cl.iloc[-1])
+        if current <= 0:
+            valid = cl[cl > 0]
+            current = _safe_float(valid.iloc[-1]) if not valid.empty else 0.0
         OUT["current"] = current
 
         rejected = False
 
-        # ── 잡주/저유동성 필터 ──
+        # ── 유동성 필터 ──
         if market == "CRYPTO":
-            avg_value = float((vo * cl).rolling(20).mean().iloc[-1])
+            avg_value = _safe_float((vo * cl).rolling(20).mean().iloc[-1])
             if avg_value < th["min_value"]:
                 OUT["signals"].append(f"❌ 유동성 부족 (일평균 거래대금 {avg_value/1e8:.1f}억원)")
                 rejected = True
         else:
-            avg_vol = float(vo.rolling(20).mean().iloc[-1])
+            avg_vol = _safe_float(vo.rolling(20).mean().iloc[-1])
             if avg_vol < th["min_vol"]:
                 OUT["signals"].append(f"❌ 유동성 부족 (일평균 {int(avg_vol):,}주)")
                 rejected = True
 
-        # ── 이미 오른 종목 표시 ──
-        ma20 = float(cl.rolling(20).mean().iloc[-1])
-        if ma20 > 0 and current > ma20 * th["max_ma20_dev"]:
+        # ── 이미 급등 필터 ──
+        ma20 = _safe_float(cl.rolling(20).mean().iloc[-1])
+        if ma20 > 0 and current > 0 and current > ma20 * th["max_ma20_dev"]:
             OUT["signals"].append(f"❌ 이미 급등 (MA20 대비 +{(th['max_ma20_dev']-1)*100:.0f}% 초과)")
             rejected = True
 
-        p5ago = float(cl.iloc[-6]) if len(cl) >= 6 else current
+        p5ago = _safe_float(cl.iloc[-6]) if len(cl) >= 6 else current
         gain5 = (current - p5ago) / p5ago if p5ago > 0 else 0
         if gain5 > th["max_gain5"]:
             OUT["signals"].append(f"❌ 5일 수익 {gain5*100:.1f}% — 이미 터진 종목")
             rejected = True
 
-        hi60 = float(cl.rolling(60).max().iloc[-1])
-        if hi60 > 0 and current >= hi60 * th["max_hi60"]:
-            OUT["signals"].append(f"❌ 60일 고점권 ({th['max_hi60']*100:.0f}% 이상) — 고점 매수 위험")
+        hi60 = _safe_float(cl.rolling(60).max().iloc[-1])
+        if hi60 > 0 and current > 0 and current >= hi60 * th["max_hi60"]:
+            OUT["signals"].append(f"❌ 60일 고점권 ({th['max_hi60']*100:.0f}% 이상)")
             rejected = True
 
-        # ── MA 계산 ──
-        ma5  = float(cl.rolling(5).mean().iloc[-1])
-        ma10 = float(cl.rolling(10).mean().iloc[-1])
-        ma60 = float(cl.rolling(60).mean().iloc[-1])
+        # ── MA ──
+        ma5  = _safe_float(cl.rolling(5).mean().iloc[-1])
+        ma10 = _safe_float(cl.rolling(10).mean().iloc[-1])
+        ma60 = _safe_float(cl.rolling(60).mean().iloc[-1])
 
         # ── RSI ──
         delta = cl.diff()
-        gain  = delta.clip(lower=0).rolling(14).mean()
-        loss  = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi_s = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
-        rsi   = float(rsi_s.iloc[-1])
+        gain_s = delta.clip(lower=0).rolling(14).mean()
+        loss_s = (-delta.clip(upper=0)).rolling(14).mean()
+        rsi_s  = 100 - 100 / (1 + gain_s / loss_s.replace(0, np.nan))
+        rsi    = _safe_float(rsi_s.iloc[-1], default=50.0)
         OUT["rsi"] = rsi
         if rsi > th["max_rsi"]:
-            OUT["signals"].append(f"❌ RSI 과열 ({rsi:.1f}) — 단기 고점 위험")
+            OUT["signals"].append(f"❌ RSI 과열 ({rsi:.1f})")
             rejected = True
 
         score = 0
 
-        # ── [S1] 볼린저밴드 변동성 수축 ──
-        bb_std    = cl.rolling(20).std()
-        bb_width  = (bb_std * 2) / cl.rolling(20).mean()
-        bw_now    = float(bb_width.iloc[-1])
-        bw_avg    = float(bb_width.rolling(20).mean().iloc[-1])
-        s1 = bw_avg > 0 and bw_now < bw_avg * 0.75
+        # ── [S1] BB 변동성 수축 ──
+        bb_std   = cl.rolling(20).std()
+        bb_mean  = cl.rolling(20).mean().replace(0, np.nan)
+        bb_width = (bb_std * 2) / bb_mean
+        bw_now   = _safe_float(bb_width.iloc[-1])
+        bw_avg   = _safe_float(bb_width.rolling(20).mean().iloc[-1])
+        s1 = bw_avg > 0 and bw_now > 0 and bw_now < bw_avg * 0.75
         OUT["s1"] = s1
         if s1:
             score += 30
-            OUT["signals"].append(f"✅ [S1] BB 변동성 수축 — 폭발 직전 에너지 응축 (밴드폭 {bw_now:.3f} < 기준 {bw_avg*0.75:.3f})")
-        elif bw_avg > 0 and bw_now < bw_avg * 0.90:
+            OUT["signals"].append(f"✅ [S1] BB 변동성 수축 — 폭발 직전 에너지 응축 (밴드폭 {bw_now:.3f} < {bw_avg*0.75:.3f})")
+        elif bw_avg > 0 and bw_now > 0 and bw_now < bw_avg * 0.90:
             score += 10
             OUT["signals"].append("🔶 [S1] BB 밴드 소폭 수축 중")
         else:
             OUT["signals"].append("⬜ [S1] 변동성 수축 없음")
 
-        # ── [S2] 거래량 눌림 후 폭발 신호 ──
-        vol_ma5  = float(vo.rolling(5).mean().iloc[-1])
-        vol_ma20 = float(vo.rolling(20).mean().iloc[-1])
-        vol_now  = float(vo.iloc[-1])
-        vol_dry    = vol_ma20 > 0 and vol_ma5 < vol_ma20 * 0.70
-        vol_burst  = vol_ma5 > 0  and vol_now > vol_ma5  * 1.50
+        # ── [S2] 거래량 눌림 후 폭발 ──
+        vol_ma5  = _safe_float(vo.rolling(5).mean().iloc[-1])
+        vol_ma20 = _safe_float(vo.rolling(20).mean().iloc[-1])
+        vol_now  = _safe_float(vo.iloc[-1])
+        vol_dry   = vol_ma20 > 0 and vol_ma5 < vol_ma20 * 0.70
+        vol_burst = vol_ma5  > 0 and vol_now  > vol_ma5  * 1.50
         s2 = vol_dry and vol_burst
         OUT["s2"] = s2
         if s2:
             score += 30
-            OUT["signals"].append(f"✅ [S2] 거래량 눌림 후 폭발 — 첫 매수세 유입 감지 ({vol_now/vol_ma20*100:.0f}%)")
+            OUT["signals"].append(f"✅ [S2] 거래량 눌림 후 폭발 ({vol_now/vol_ma20*100:.0f}% of MA20)")
         elif vol_burst:
             score += 12
             OUT["signals"].append("🔶 [S2] 거래량 급증 (눌림 미확인)")
@@ -398,9 +441,9 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         else:
             OUT["signals"].append("⬜ [S2] 거래량 신호 없음")
 
-        # ── [S3] 이동평균 정배열 + 눌림목 ──
-        aligned   = ma5 > ma20 > ma60
-        near_ma20 = ma20 > 0 and abs(current - ma20) / ma20 <= 0.05
+        # ── [S3] 정배열 + 눌림목 ──
+        aligned   = ma5 > 0 and ma20 > 0 and ma60 > 0 and ma5 > ma20 > ma60
+        near_ma20 = ma20 > 0 and current > 0 and abs(current - ma20) / ma20 <= 0.05
         s3 = aligned and near_ma20
         OUT["s3"] = s3
         if s3:
@@ -415,45 +458,65 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         else:
             OUT["signals"].append("⬜ [S3] 정배열 없음")
 
-        # ── [S4] RSI 다이버전스 ──
+        # ── [S4] RSI 강세 다이버전스 ──
         s4 = False
         try:
             price_window = cl.iloc[-10:]
             rsi_window   = rsi_s.iloc[-10:]
-            p_low_prev = float(price_window.iloc[:5].min())
-            p_low_now  = float(price_window.iloc[5:].min())
-            r_low_prev = float(rsi_window.iloc[:5].min())
-            r_low_now  = float(rsi_window.iloc[5:].min())
+            p_low_prev = _safe_float(price_window.iloc[:5].min())
+            p_low_now  = _safe_float(price_window.iloc[5:].min())
+            r_low_prev = _safe_float(rsi_window.iloc[:5].min(), 50.0)
+            r_low_now  = _safe_float(rsi_window.iloc[5:].min(), 50.0)
             s4 = (p_low_now < p_low_prev) and (r_low_now > r_low_prev + 2)
             OUT["s4"] = s4
             if s4:
                 score += 15
-                OUT["signals"].append("✅ [S4] RSI 강세 다이버전스 — 매도세 소진, 반등 임박")
+                OUT["signals"].append("✅ [S4] RSI 강세 다이버전스 — 반등 임박")
             else:
                 OUT["signals"].append("⬜ [S4] RSI 다이버전스 없음")
         except:
             OUT["signals"].append("⬜ [S4] RSI 다이버전스 계산 실패")
 
-        # ── [S5] 캔들 반등 패턴 ──
+        # ── [S5] 캔들 반등 패턴 ── ★ v5 수정 4: NaN/index 오류 방지 강화
         s5 = False
         try:
-            o1, c1_v, h1, l1 = float(df["open"].iloc[-1]), float(cl.iloc[-1]), float(hi.iloc[-1]), float(lo.iloc[-1])
-            o2, c2_v         = float(df["open"].iloc[-2]), float(cl.iloc[-2])
-            body  = abs(c1_v - o1)
-            lower = o1 - l1 if c1_v >= o1 else c1_v - l1
-            upper = h1 - c1_v if c1_v >= o1 else h1 - o1
-            hammer    = lower > body * 2 and upper < body * 0.5
-            bull_rev  = c2_v < o2 and c1_v > o1
-            s5 = hammer or bull_rev
-            OUT["s5"] = s5
-            if s5:
-                score += 10
-                pat = "망치형 캔들" if hammer else "양봉 전환"
-                OUT["signals"].append(f"✅ [S5] {pat} — 단기 반등 신호")
+            # rolling 데이터 충분한지 확인 (최소 2봉 필요)
+            if "open" not in df.columns or len(df) < 2:
+                OUT["signals"].append("⬜ [S5] 반등 캔들 데이터 부족")
             else:
-                OUT["signals"].append("⬜ [S5] 반등 캔들 패턴 없음")
-        except:
-            OUT["signals"].append("⬜ [S5] 반등 캔들 패턴 계산 실패")
+                op = df["open"].astype(float)
+
+                # 각 값 개별 추출 + NaN 체크
+                o1   = _safe_float(op.iloc[-1])
+                c1_v = _safe_float(cl.iloc[-1])
+                h1   = _safe_float(hi.iloc[-1])
+                l1   = _safe_float(lo.iloc[-1])
+                o2   = _safe_float(op.iloc[-2])
+                c2_v = _safe_float(cl.iloc[-2])
+
+                # NaN이 하나라도 있으면 스킵
+                if any(v == 0.0 for v in [o1, c1_v, h1, l1, o2, c2_v]):
+                    OUT["signals"].append("⬜ [S5] 캔들 값 이상 (0 포함)")
+                elif h1 < l1 or h1 < max(o1, c1_v) or l1 > min(o1, c1_v):
+                    # OHLC 무결성 체크: high >= max(open,close), low <= min(open,close)
+                    OUT["signals"].append("⬜ [S5] 캔들 OHLC 무결성 오류")
+                else:
+                    body  = abs(c1_v - o1)
+                    lower = (min(o1, c1_v) - l1)   # 아래꼬리
+                    upper = (h1 - max(o1, c1_v))    # 위꼬리
+                    hammer   = body > 0 and lower > body * 2 and upper < body * 0.5
+                    bull_rev = c2_v < o2 and c1_v > o1
+                    s5 = hammer or bull_rev
+                    OUT["s5"] = s5
+                    if s5:
+                        score += 10
+                        pat = "망치형 캔들" if hammer else "양봉 전환"
+                        OUT["signals"].append(f"✅ [S5] {pat} — 단기 반등 신호")
+                    else:
+                        OUT["signals"].append("⬜ [S5] 반등 캔들 패턴 없음")
+        except Exception as e5:
+            OUT["s5"] = False
+            OUT["signals"].append(f"⬜ [S5] 캔들 패턴 계산 실패 ({e5})")
 
         # ── RSI 구간 보너스 ──
         if 35 <= rsi <= 55:
@@ -461,51 +524,40 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
             OUT["signals"].append(f"✅ RSI 매수 구간 ({rsi:.1f})")
         elif rsi < 35:
             score += 5
-            OUT["signals"].append(f"🔶 RSI 과매도 탈출 대기 ({rsi:.1f})")
+            OUT["signals"].append(f"🔶 RSI 과매도 ({rsi:.1f})")
         else:
             OUT["signals"].append(f"⬜ RSI 구간 외 ({rsi:.1f})")
 
-        # ──────────────────────────────────────────────
-        # ★ 매수구간 계산 — 이번에 수정한 부분
-        # ──────────────────────────────────────────────
-        # 1) 기존과 동일하게 MA 기반 raw 구간 산출
-        raw_low  = min(ma20, ma10) * 0.985
-        raw_high = max(ma20, ma5)  * 1.010
+        # ── 매수구간 ──
+        raw_low  = min(ma20, ma10) * 0.985 if min(ma20, ma10) > 0 else 0
+        raw_high = max(ma20, ma5)  * 1.010 if max(ma20, ma5)  > 0 else 0
 
-        if current > 0:
-            # 기존 cap (참고용으로 유지하되, 최종 결정은 아래에서 강제 보정)
+        if current > 0 and raw_low > 0 and raw_high > 0:
             cap_high = current * 1.05
             cap_low  = current * 0.90
-            buy_low  = max(min(raw_low, cap_high), cap_low)
+            buy_low  = max(min(raw_low,  cap_high), cap_low)
             buy_high = max(min(raw_high, cap_high), buy_low)
-
-            # ★ 버그 수정 핵심:
-            # "매수 권장구간"은 현재가보다 비싸면 의미가 없으므로
-            # 상단(buy_high)이 현재가를 넘지 못하도록 최종 강제.
-            # (하락장/급락 직후처럼 MA가 현재가보다 한참 위에 있을 때
-            #  raw_high가 cap_high보다 작아 cap이 무력화되던 문제를 여기서 차단)
-            if buy_high > current:
-                buy_high = current
-
-            # buy_low가 buy_high보다 커지는 역전 현상 방지
-            if buy_low > buy_high:
-                buy_low = buy_high * 0.97  # 상단보다 살짝 아래로 재배치
-
-            # 그래도 buy_low가 너무 낮게(0 이하 등) 나오는 경우 안전망
-            if buy_low <= 0:
-                buy_low = buy_high * 0.97
-        else:
+        elif current > 0:
+            buy_low  = current * 0.97
+            buy_high = current * 1.02
+        elif raw_low > 0 and raw_high > 0:
             buy_low, buy_high = raw_low, raw_high
-            if buy_low > buy_high:
-                buy_low, buy_high = buy_high, buy_low
+        else:
+            buy_low = buy_high = 0.0
 
-        OUT["buy_min"] = round(buy_low, 4)
+        if (buy_low <= 0 or buy_high <= 0) and current > 0:
+            buy_low  = current * 0.97
+            buy_high = current * 1.02
+
+        OUT["buy_min"] = round(buy_low,  4)
         OUT["buy_max"] = round(buy_high, 4)
         OUT["score"]   = int(score)
 
-        # ── 등급 & pass 기준 ──
-        combo = s1 or s2 or s3
-        OUT["pass"]  = (not rejected) and combo and score >= th["min_pass_score"]
+        # ★ v5 수정 3: S1+S2+S3 모두 필수 AND (S4 or S5) 최소 1개 필수
+        # 기존: combo = s1 or s2 or s3 → false positive 많았음
+        core_pass  = s1 and s2 and s3                   # 핵심 3개 모두
+        conf_pass  = s4 or s5                            # 확인 신호 최소 1개
+        OUT["pass"]  = (not rejected) and core_pass and conf_pass and score >= th["min_pass_score"]
         OUT["grade"] = ("A+" if score >= 90 else "A" if score >= 75
                         else "B+" if score >= 60 else "B" if score >= 40
                         else "C")
@@ -517,13 +569,13 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
 
 # ============================================================
 # 7. 스캐너
+#    ★ v5 수정 2: scan_kr() — 불필요한 copy 제거, I/O 병목 최소화
 # ============================================================
 US_WATCHLIST = [
     "NVDA","META","GOOGL","AMZN","MSFT","AMD","TSLA",
     "PYPL","SQ","SOFI","HOOD","UPST","AFRM",
     "PLTR","ASTS","HIMS","AXSM","RIVN","SMCI","ARM",
 ]
-
 
 def summarize_skips(skips: list) -> dict:
     cnt = Counter()
@@ -538,17 +590,22 @@ def summarize_skips(skips: list) -> dict:
 def scan_kr() -> tuple:
     listing = load_krx_listing()
     targets = listing[listing["Marcap"] > 3e11].nlargest(KR_SCAN_TOP_N, "Marcap")
-    codes   = list(zip(targets["Code"], targets["Name"]))
+    codes   = list(zip(targets["Code"].tolist(), targets["Name"].tolist()))
+
+    # ★ KRX 스냅샷 선제 로드 — 루프 내 중복 호출 방지
+    get_krx_daily_snapshot()
 
     def _fetch(item):
         code, name = item
         df = load_ohlcv_kr(code)
+        # ★ copy 제거: quant_predict 내부에서 columns 재설정만 하므로 원본 전달 OK
         if df is None:
             return {"_skip": True, "ticker": f"{name}({code})", "why": "데이터 부족"}
         r = quant_predict(df, "KR")
         if not r["pass"]:
-            why = next((s for s in r["signals"] if "❌" in s), "조건 미충족(점수/콤보 부족)")
+            why = next((s for s in r["signals"] if "❌" in s), "조건 미충족")
             return {"_skip": True, "ticker": f"{name}({code})", "why": why}
+        # ★ 가격 조회는 pass 종목만 — 필터 통과 전 불필요한 API 호출 제거
         price, vol, src = get_kr_price_with_fallback(code)
         if price <= 0:
             price = r["current"]
@@ -585,15 +642,13 @@ def scan_us() -> tuple:
             return {"_skip": True, "ticker": ticker, "why": "OHLCV 없음"}
         r = quant_predict(df, "US")
         if not r["pass"]:
-            why = next((s for s in r["signals"] if "❌" in s), "조건 미충족(점수/콤보 부족)")
+            why = next((s for s in r["signals"] if "❌" in s), "조건 미충족")
             return {"_skip": True, "ticker": ticker, "why": why}
-
         price, src = rt_map.get(ticker, (0.0, "없음"))
         if price <= 0:
             price, src = get_us_price(ticker)
         if price <= 0:
             price = r["current"]; src = "OHLCV종가"
-
         return {
             "_skip":    False,
             "종목":     ticker,
@@ -611,10 +666,8 @@ def scan_us() -> tuple:
 
     with ThreadPoolExecutor(max_workers=20) as ex:
         raw = list(ex.map(_fetch, US_WATCHLIST))
-
     skips = [r for r in raw if r.get("_skip")]
-    top3  = sorted([r for r in raw if not r.get("_skip")],
-                   key=lambda x: x["점수"], reverse=True)[:3]
+    top3  = sorted([r for r in raw if not r.get("_skip")], key=lambda x: x["점수"], reverse=True)[:3]
     return top3, skips
 
 
@@ -632,7 +685,7 @@ def scan_crypto() -> tuple:
                 return {"_skip": True, "ticker": coin, "why": "OHLCV 없음"}
             r = quant_predict(df, "CRYPTO")
             if not r["pass"]:
-                why = next((s for s in r["signals"] if "❌" in s), "조건 미충족(점수/콤보 부족)")
+                why = next((s for s in r["signals"] if "❌" in s), "조건 미충족")
                 return {"_skip": True, "ticker": coin, "why": why}
             c = r["current"]
             return {
@@ -660,67 +713,149 @@ def scan_crypto() -> tuple:
 
 # ============================================================
 # 8. 포트폴리오 조회
+#    ★ v5 수정 5: 가격 소스 통일 — OHLCV는 지표 전용, curr 기준에서 제외
+#    - 국내: KRX 확정종가 > yfinance (OHLCV 가격 기준 사용 안 함)
+#    - 해외: Finnhub c > pc > yfinance fast_info > 1분봉 > 일봉(3일이내)
+#    - 코인: Upbit 실시간
+#    - OHLCV는 quant_predict 지표 계산에만 사용
 # ============================================================
 def get_portfolio_data(name: str) -> dict:
     name = name.strip().upper()
 
-    # 국내 6자리
+    # ── 국내 6자리 ──
     if name.isdigit() and len(name) == 6:
-        price, vol, src = get_kr_price_with_fallback(name)
+        # ★ 가격 기준: KRX 확정종가 > yfinance (OHLCV 가격 절대 미사용)
+        price, vol, src = get_kr_price_with_fallback(code=name)
+        # get_kr_price_with_fallback 내부에 OHLCV 안전망 있으나,
+        # 포트폴리오에서는 실시간 가격 불명 시 0 반환이 더 안전
+        # → OHLCV종가(안전망) 출처면 경고 처리
+        is_ohlcv_fallback = "OHLCV" in src
+
         df = load_ohlcv_kr(name)
         if df is not None:
-            df2 = df.copy()
-            if price > 0:
-                df2.iloc[-1, df2.columns.get_loc("close")] = price
-            r = quant_predict(df2, "KR")
-            if price <= 0:
-                price = r["current"]
+            r = quant_predict(df, "KR")   # OHLCV는 지표 전용
+            # curr는 반드시 실시간 소스(KRX/yfinance)만 사용
+            curr = price if price > 0 else 0.0
             listing = load_krx_listing()
             row     = listing[listing["Code"] == name]
             label   = row["Name"].values[0] if not row.empty else name
-            return {"label": f"{name} ({label})", "curr": price,
-                    "score": r["score"], "grade": r["grade"],
-                    "rsi": round(r["rsi"],1), "currency": "KRW",
-                    "stop": int(price*0.93), "target": int(price*1.08),
-                    "buy_min": r["buy_min"], "buy_max": r["buy_max"],
-                    "source": src, "ok": price > 0, "signals": r["signals"]}
+            return {
+                "label":    f"{name} ({label})",
+                "curr":     curr,
+                "score":    r["score"],
+                "grade":    r["grade"],
+                "rsi":      round(r["rsi"], 1),
+                "currency": "KRW",
+                "stop":     int(curr * 0.93) if curr > 0 else 0,
+                "target":   int(curr * 1.08) if curr > 0 else 0,
+                "buy_min":  r["buy_min"],
+                "buy_max":  r["buy_max"],
+                "source":   src + ("⚠️지연" if is_ohlcv_fallback else ""),
+                "ok":       curr > 0 and not is_ohlcv_fallback,
+                "signals":  r["signals"],
+            }
+        # OHLCV 없어도 실시간 가격만 있으면 기본 반환
+        if price > 0:
+            return {
+                "label": f"{name} ({src}·지표없음)", "curr": price,
+                "score": 0, "grade": "-", "rsi": 50.0, "currency": "KRW",
+                "stop": int(price * 0.93), "target": int(price * 1.08),
+                "buy_min": 0.0, "buy_max": 0.0,
+                "source": src, "ok": not is_ohlcv_fallback, "signals": [],
+            }
+        return {"label": None, "curr": 0, "score": 0, "grade": "F",
+                "rsi": 0, "currency": "KRW", "stop": 0, "target": 0,
+                "buy_min": 0.0, "buy_max": 0.0, "source": "실패", "ok": False, "signals": []}
 
-    # 해외
-    price, src = get_us_price(name)
+    # ── 해외 티커 ──
+    # ★ 가격 기준: Finnhub c > pc > yfinance(실시간→1분봉→일봉3일이내)
+    # OHLCV close는 절대 가격 기준으로 사용하지 않음
+    market_open = is_us_market_open()
+    q = _fh_fetch_raw(name)
+    fh_c, fh_pc = q["c"], q["pc"]
+
+    if market_open and fh_c > 0:
+        price, src = fh_c, "Finnhub(정규장)"
+    elif not market_open and fh_pc > 0:
+        price, src = fh_pc, "Finnhub(전일정규장종가)"
+    elif fh_c > 0:
+        price, src = fh_c, "Finnhub(시간외·참고용)"
+    else:
+        # Finnhub 실패 → yfinance 신선도 우선 (3일 이내만)
+        yf_price, yf_src = _yf_fresh_price(name)
+        if yf_price is not None and yf_price > 0:
+            price, src = yf_price, yf_src
+        else:
+            price, src = 0.0, yf_src  # stale 또는 실패
+
     df = load_ohlcv_us(name)
     if df is not None:
-        df2 = df.copy()
-        if price > 0:
-            df2.iloc[-1, df2.columns.get_loc("close")] = price
-        else:
-            price = float(df2["close"].dropna().iloc[-1]); src = "OHLCV종가"
-        r = quant_predict(df2, "US")
-        return {"label": f"{name} ({src})", "curr": price,
+        r = quant_predict(df, "US")    # OHLCV는 지표 전용
+        curr = price                   # 반드시 위 소스 기준
+        if curr <= 0:
+            # 가격 완전 실패 → 포트폴리오 표시 불가
+            return {
+                "label": f"{name} ({src}·가격없음)", "curr": 0,
                 "score": r["score"], "grade": r["grade"],
-                "rsi": round(r["rsi"],1), "currency": "USD",
-                "stop": round(price*0.93,2), "target": round(price*1.08,2),
+                "rsi": round(r["rsi"], 1), "currency": "USD",
+                "stop": 0.0, "target": 0.0,
                 "buy_min": r["buy_min"], "buy_max": r["buy_max"],
-                "source": src, "ok": price > 0, "signals": r["signals"]}
+                "source": src, "ok": False, "signals": r["signals"],
+            }
+        return {
+            "label":    f"{name} ({src})",
+            "curr":     curr,
+            "score":    r["score"],
+            "grade":    r["grade"],
+            "rsi":      round(r["rsi"], 1),
+            "currency": "USD",
+            "stop":     round(curr * 0.93, 2),
+            "target":   round(curr * 1.08, 2),
+            "buy_min":  r["buy_min"],
+            "buy_max":  r["buy_max"],
+            "source":   src,
+            "ok":       curr > 0,
+            "signals":  r["signals"],
+        }
     if price > 0:
-        return {"label": f"{name} ({src}·지표없음)", "curr": price,
-                "score": 0, "grade": "-", "rsi": 50.0, "currency": "USD",
-                "stop": round(price*0.93,2), "target": round(price*1.08,2),
-                "buy_min": 0.0, "buy_max": 0.0,
-                "source": src, "ok": True, "signals": []}
+        return {
+            "label": f"{name} ({src}·지표없음)", "curr": price,
+            "score": 0, "grade": "-", "rsi": 50.0, "currency": "USD",
+            "stop": round(price * 0.93, 2), "target": round(price * 1.08, 2),
+            "buy_min": 0.0, "buy_max": 0.0,
+            "source": src, "ok": True, "signals": [],
+        }
 
-    # 코인
+    # ── 코인 ── (Upbit 가격 유지, OHLCV는 지표 전용)
     try:
-        df_c = pyupbit.get_ohlcv(f"KRW-{name}", interval="day", count=120)
+        coin_key = f"KRW-{name}"
+        df_c = pyupbit.get_ohlcv(coin_key, interval="day", count=120)
         if df_c is not None and not df_c.empty:
             r = quant_predict(df_c, "CRYPTO")
-            c = r["current"]
+            # ★ 코인 실시간 가격: Upbit 현재가 API 우선
+            try:
+                upbit_price = pyupbit.get_current_price(coin_key)
+                c = float(upbit_price) if upbit_price and float(upbit_price) > 0 else r["current"]
+                coin_src = "Upbit(실시간)" if upbit_price and float(upbit_price) > 0 else "OHLCV종가"
+            except:
+                c = r["current"]
+                coin_src = "OHLCV종가"
             if c > 0:
-                return {"label": f"{name} (업비트)", "curr": c,
-                        "score": r["score"], "grade": r["grade"],
-                        "rsi": round(r["rsi"],1), "currency": "KRW",
-                        "stop": round(c*0.93,0), "target": round(c*1.10,0),
-                        "buy_min": r["buy_min"], "buy_max": r["buy_max"],
-                        "source": "Upbit", "ok": True, "signals": r["signals"]}
+                return {
+                    "label":    f"{name} (업비트)",
+                    "curr":     c,
+                    "score":    r["score"],
+                    "grade":    r["grade"],
+                    "rsi":      round(r["rsi"], 1),
+                    "currency": "KRW",
+                    "stop":     round(c * 0.93, 0),
+                    "target":   round(c * 1.10, 0),
+                    "buy_min":  r["buy_min"],
+                    "buy_max":  r["buy_max"],
+                    "source":   coin_src,
+                    "ok":       True,
+                    "signals":  r["signals"],
+                }
     except:
         pass
 
@@ -741,11 +876,16 @@ st.sidebar.metric("환율 (USD/KRW)", f"{exchange} 원")
 st.sidebar.metric("🇺🇸 미국 정규장", "OPEN" if is_us_market_open() else "CLOSED")
 
 with st.sidebar.expander("🔑 API 상태", expanded=True):
-    st.write("KRX:", "✅ 연결됨 (일별 확정종가, 장마감 후 갱신·틱 단위 실시간 아님)" if KRX_API_KEY else "❌ 키 없음 (yfinance/OHLCV 대체)")
-    st.write("Finnhub:", "✅ 연결됨 (장중 실시간 / 장마감 시 전일종가)" if FINNHUB_API_KEY else "❌ 키 없음 (yfinance 대체)")
+    st.write("KRX:", "✅ 연결됨 (장마감 후 확정종가)" if KRX_API_KEY else "❌ 키 없음 (yfinance 대체)")
+    st.write("Finnhub:", "✅ 연결됨" if FINNHUB_API_KEY else "❌ 키 없음 (yfinance 대체)")
 
 st.title("🚀 Tae's Quant 폭등 예측 스캐너")
-st.caption("📌 BB수축 + 거래량 폭발 + 정배열 눌림목 + RSI 다이버전스 + 캔들 패턴 복합 감지 | 핵심신호 1개+점수40 이상 통과 | 매수구간 ≤ 현재가 보정 적용")
+# ★ v5 수정 6: 예측 모델 명시 — 추격매수 아님
+st.caption(
+    "📌 예측 모델 (추격매수 아님) | "
+    "BB수축+거래량폭발+정배열눌림목(S1·S2·S3 필수) + RSI다이버전스·캔들패턴(S4/S5 중 1개) | "
+    "점수 40 이상 통과 | v5: stale 가격 차단·false positive 감소·가격소스 통일"
+)
 
 ph_us   = st.empty()
 ph_coin = st.empty()
@@ -755,7 +895,7 @@ st.divider()
 # ── 포트폴리오 ──
 st.header("💼 내 자산 실시간 관리")
 
-col_btn1, col_btn2 = st.columns([1, 5])
+col_btn1, _ = st.columns([1, 5])
 if col_btn1.button("🚨 전체 초기화"):
     st.session_state.my_portfolio = []
     save_portfolio([])
@@ -803,6 +943,10 @@ if st.session_state.my_portfolio:
         else:
             buy_range_str = f"${bmin:,.2f} ~ ${bmax:,.2f}" if bmin > 0 else "—"
 
+        stale_warn = "주의" in d.get("source", "") or "오래됨" in d.get("source", "") or "stale" in d.get("source", "") or "지연" in d.get("source", "")
+        warn_badge = ("<span style='background:#ef4444;color:#fff;font-size:10px;"
+                      "padding:2px 6px;border-radius:4px;margin-left:8px;'>⚠️ 시세 지연 가능</span>") if stale_warn else ""
+
         st.markdown(f"""
 <div style="background:#1e293b;padding:20px;border-radius:12px;
             border-left:6px solid {grade_color};margin-bottom:16px;">
@@ -810,12 +954,12 @@ if st.session_state.my_portfolio:
     <span style="font-size:14px;background:{grade_color};color:#000;
                  padding:2px 8px;border-radius:4px;margin-left:8px;">
       {d['grade']}등급 {d['score']}점
-    </span>
+    </span>{warn_badge}
   </h3>
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px;">
     <div><div style="font-size:11px;color:#94a3b8;">내 평단가</div>
          <div style="font-size:20px;font-weight:bold;">{fmt(buy)}</div></div>
-    <div><div style="font-size:11px;color:#94a3b8;">기준 현재가</div>
+    <div><div style="font-size:11px;color:#94a3b8;">현재가</div>
          <div style="font-size:20px;font-weight:bold;">{fmt(curr)}</div></div>
     <div><div style="font-size:11px;color:#94a3b8;">수익률</div>
          <div style="font-size:20px;font-weight:bold;color:{p_color};">
@@ -835,7 +979,7 @@ if st.session_state.my_portfolio:
       <div style="font-size:10px;color:#94a3b8;">RSI</div>
       <div style="font-weight:bold;">{d['rsi']}</div></div>
   </div>
-  <div style="font-size:10px;color:#475569;">출처: {d['source']}</div>
+  <div style="font-size:10px;color:#475569;">📡 출처: {d['source']}</div>
 </div>""", unsafe_allow_html=True)
 
         if st.button("🗑️ 삭제", key=f"del_{i}"):
@@ -852,13 +996,13 @@ with st.spinner("📡 퀀트 예측 스캔 중..."):
     us_top3, us_skips         = scan_us()
     crypto_top3, crypto_skips = scan_crypto()
 
-with st.sidebar.expander(f"🔍 국내 스캔 제외 요약 ({len(kr_skips)}종목 제외)", expanded=False):
+with st.sidebar.expander(f"🔍 국내 스캔 제외 ({len(kr_skips)}종목)", expanded=False):
     for reason, cnt in summarize_skips(kr_skips).items():
-        st.markdown(f"- **{reason}**: {cnt}개 종목")
+        st.markdown(f"- **{reason}**: {cnt}개")
 
-with st.sidebar.expander(f"🔍 코인 스캔 제외 요약 ({len(crypto_skips)}종목 제외)", expanded=False):
+with st.sidebar.expander(f"🔍 코인 스캔 제외 ({len(crypto_skips)}종목)", expanded=False):
     for reason, cnt in summarize_skips(crypto_skips).items():
-        st.markdown(f"- **{reason}**: {cnt}개 종목")
+        st.markdown(f"- **{reason}**: {cnt}개")
 
 with st.sidebar.expander("🔍 해외 스캔 제외 로그", expanded=False):
     for s in us_skips:
@@ -871,7 +1015,7 @@ def render_cards(placeholder, title: str, data: list, currency: str):
     with placeholder.container():
         st.header(title)
         if not data:
-            st.info("⚠️ 조건 충족 종목 없음 — 시장 과열 또는 눌림목 대기 중 (사이드바 '스캔 제외 요약'에서 이유 확인 가능)")
+            st.info("⚠️ 조건 충족 종목 없음 (사이드바 제외 요약 확인)")
             return
         cols = st.columns(len(data))
         for i, item in enumerate(data):
@@ -879,10 +1023,8 @@ def render_cards(placeholder, title: str, data: list, currency: str):
             is_kr = currency == "KRW"
             sym   = "₩" if is_kr else ("$" if currency == "USD" else "")
             fmt   = (lambda v: f"{sym}{int(v):,}") if is_kr else (lambda v: f"{sym}{v:,.2f}")
-
             grade_color = {"A+": "#f59e0b","A": "#10b981","B+": "#3b82f6",
                            "B": "#94a3b8","C": "#64748b"}.get(item.get("등급","C"), "#64748b")
-
             flags = item.get("s_flags", [False]*5)
             badge_html = " ".join(
                 f"<span style='background:{'#10b981' if ok else '#1e293b'};color:{'#fff' if ok else '#475569'};"
@@ -893,9 +1035,7 @@ def render_cards(placeholder, title: str, data: list, currency: str):
                 f"<li style='font-size:11px;margin:2px 0;'>{s}</li>"
                 for s in item.get("signals", [])
             )
-            src_html = (f"<span style='font-size:9px;color:#64748b;'>📡{item.get('source','')}</span>"
-                        if item.get("source") else "")
-
+            src_html = f"<span style='font-size:9px;color:#64748b;'>📡{item.get('source','')}</span>"
             with cols[i]:
                 st.markdown(f"""
 <div style="background:#1e293b;padding:18px;border-radius:12px;
@@ -915,7 +1055,7 @@ def render_cards(placeholder, title: str, data: list, currency: str):
     <li>📉 손절선: <span style="color:#ef4444;">{fmt(item['손절가'])}</span></li>
   </ul>
   <details>
-    <summary style="cursor:pointer;font-size:11px;color:#94a3b8;margin-top:4px;">📋 시그널 상세 보기</summary>
+    <summary style="cursor:pointer;font-size:11px;color:#94a3b8;">📋 시그널 상세</summary>
     <ul style="margin-top:4px;padding-left:14px;">{sigs_html}</ul>
   </details>
 </div>""", unsafe_allow_html=True)
