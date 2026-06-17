@@ -290,31 +290,53 @@ def _fh_fetch_raw(ticker: str) -> dict:
     except:
         return {"c": 0.0, "pc": 0.0}
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def get_us_price(ticker: str) -> tuple:
+    """
+    해외 주식 가격 조회 우선순위:
+    [장중] Finnhub c → yfinance fast_info → yfinance 1분봉
+    [장마감] Finnhub pc → yfinance 일봉 종가(iloc[-1], auto_adjust=False)
+    Finnhub 키 없어도 yfinance 실시간/종가를 올바르게 가져옴.
+    """
     market_open = is_us_market_open()
-    q = _fh_fetch_raw(ticker)
-    c, pc = q["c"], q["pc"]
-    if market_open and c > 0:
-        return c, "Finnhub(정규장)"
-    if not market_open and pc > 0:
-        return pc, "Finnhub(전일정규장종가)"
-    if c > 0:
-        return c, "Finnhub(시간외·참고용)"
+
+    # ── [1] Finnhub (키 있을 때) ──
+    if FINNHUB_API_KEY:
+        q = _fh_fetch_raw(ticker)
+        c, pc = q["c"], q["pc"]
+        if market_open and c > 0:
+            return c, "Finnhub(정규장실시간)"
+        if not market_open and pc > 0:
+            return pc, "Finnhub(전일정규장종가)"
+        if c > 0:
+            return c, "Finnhub(시간외·참고)"
+
+    # ── [2] yfinance — 장중 실시간 ──
     try:
         t = yf.Ticker(ticker)
         if market_open:
-            p = getattr(t.fast_info, "last_price", 0)
-            if p and float(p) > 0:
-                return float(p), "yfinance"
-        df = t.history(period="5d", interval="1d")
-        if not df.empty:
-            return float(df["Close"].iloc[-1]), "yfinance(일봉종가)"
-    except:
+            # fast_info.last_price = 정규장 실시간 최신가
+            p = getattr(t.fast_info, "last_price", None)
+            if p is not None and float(p) > 0:
+                return float(p), "yfinance(실시간)"
+            # 1분봉 마지막 close
+            df1m = t.history(period="1d", interval="1m", auto_adjust=True)
+            if not df1m.empty:
+                return float(df1m["Close"].iloc[-1]), "yfinance(1분봉)"
+
+        # ── [3] yfinance — 장마감 정규장 종가 ──
+        # auto_adjust=False 로 수정주가 왜곡 방지
+        # period="5d" 대신 "2d" + iloc[-1] 로 가장 최근 확정 종가만 가져옴
+        df_d = t.history(period="2d", interval="1d", auto_adjust=False)
+        if not df_d.empty:
+            # 정규장 종가 = Close (수정 전)
+            return float(df_d["Close"].iloc[-1]), "yfinance(정규장종가)"
+    except Exception:
         pass
+
     return 0.0, "실패"
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def get_us_price_batch(tickers: tuple) -> dict:
     with ThreadPoolExecutor(max_workers=min(len(tickers), 10)) as ex:
         futs = {t: ex.submit(get_us_price, t) for t in tickers}
