@@ -710,14 +710,14 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         except:
             pass
 
-        # ── 등급 ── 셋업 강도 + 트리거 유무로 계층화
-        if setup_strong >= 2 and trigger_hits >= 1:
+        # ── 등급 ── 점수 기반 (셋업강도 보조 조건)
+        if score >= 65 and setup_strong >= 1 and trigger_hits >= 1:
             grade = "A+"
-        elif setup_hits >= 2 and trigger_hits >= 1:
+        elif score >= 55 and setup_hits >= 1 and trigger_hits >= 1:
             grade = "A"
-        elif setup_hits >= 2:
+        elif score >= 45 and setup_hits >= 1:
             grade = "B+"
-        elif setup_hits >= 1 and score >= 50:
+        elif score >= 38 and setup_hits >= 1:
             grade = "B"
         else:
             grade = "C"
