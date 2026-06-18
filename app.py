@@ -1088,14 +1088,18 @@ if col_btn1.button("🚨 전체 초기화"):
     st.rerun()
 
 with st.form(key="portfolio_form", clear_on_submit=True):
-    c1, c2, c3 = st.columns([2, 1, 1])
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     n_in = c1.text_input("종목코드 / 티커 / 코인",
                          placeholder="국내: 005930  해외: AAPL  코인: BTC")
     b_in = c2.number_input("내 평단가", min_value=0.0, step=0.01, format="%.4f")
-    if c3.form_submit_button("➕ 추가"):
+    d_in = c3.text_input("매수일자", placeholder="2024-01-15")
+    if c4.form_submit_button("➕ 추가"):
         if n_in and b_in > 0:
-            st.session_state.my_portfolio.append(
-                {"name": n_in.strip().upper(), "buy": float(b_in)})
+            st.session_state.my_portfolio.append({
+                "name": n_in.strip().upper(),
+                "buy":  float(b_in),
+                "date": d_in.strip() if d_in.strip() else "",
+            })
             save_portfolio(st.session_state.my_portfolio)
             st.rerun()
         else:
@@ -1137,32 +1141,82 @@ if st.session_state.my_portfolio:
                       "padding:2px 6px;border-radius:4px;margin-left:8px;'>⚠️ 시세 지연</span>"
                       ) if stale_warn else ""
 
-        # ══ 포지션 판단 ══
+        # ══ 포지션 판단 (개선판) ══
         rsi_v = d["rsi"]
 
-        # 1. 포지션 액션 (추가매수 / 홀딩 / 익절 / 손절)
-        stop  = d["stop"];  target = d["target"]
-        if curr <= stop:
+        # ── 보유일수 계산 ──
+        hold_days = 0
+        buy_date_str = p.get("date", "")
+        if buy_date_str:
+            try:
+                from datetime import datetime as _dt
+                buy_dt = _dt.strptime(buy_date_str, "%Y-%m-%d")
+                hold_days = (_dt.now() - buy_dt).days
+            except: hold_days = 0
+
+        # ── 평단가 기준 고정 손절가 ──
+        fixed_stop   = buy * 0.93   # 평단 -7% 고정
+        fixed_target = buy * 1.08   # 평단 +8% (1차 익절 참고)
+
+        # ── 추세 이탈 감지 (MA 꺾임) ──
+        sigs = d.get("signals", [])
+        s3_on   = any("S3" in s and "✅" in s for s in sigs)
+        s1_on   = any("S1" in s and "✅" in s for s in sigs)
+        # MA 꺾임: S3 꺼짐 = 정배열 깨짐
+        trend_broken = not s3_on  # 정배열 미충족 = 추세 약화
+
+        # ── 거래량 이상 감지 ──
+        s2_on = any("S2" in s and "✅" in s for s in sigs)
+        vol_dry = s2_on  # 거래량 눌림 = 매집 or 이탈 가능성
+
+        # ── 판단 로직 (우선순위 순) ──
+
+        # 1순위: 평단 기준 손절 (가장 중요)
+        if curr <= fixed_stop:
+            action = "🔴 즉시 손절 고려"; action_color = "#ef4444"
+            action_reason = f"평단 대비 -7% 이탈 ({profit:.1f}%)"
+
+        # 2순위: 추세 붕괴 + 손실
+        elif trend_broken and profit < -3:
             action = "🔴 손절 고려"; action_color = "#ef4444"
-            action_reason = f"손절가({fmt(stop)}) 도달"
-        elif curr >= target:
+            action_reason = f"정배열 붕괴 + 손실 {profit:.1f}%"
+
+        # 3순위: RSI 과열 + 수익 (익절)
+        elif rsi_v > 70 and profit > 5:
             action = "🟡 익절 고려"; action_color = "#f59e0b"
-            action_reason = f"목표가({fmt(target)}) 도달"
-        elif profit < -5 and rsi_v > 60:
-            action = "🔴 손절 고려"; action_color = "#ef4444"
-            action_reason = f"손실 {profit:.1f}% + RSI 과열"
-        elif profit > 5 and rsi_v > 70:
+            action_reason = f"RSI 과열({rsi_v:.0f}) + 수익 {profit:.1f}%"
+
+        # 4순위: 목표가 도달
+        elif curr >= fixed_target:
             action = "🟡 익절 고려"; action_color = "#f59e0b"
-            action_reason = f"수익 {profit:.1f}% + RSI 과열"
-        elif profit < -3 and d["score"] >= 50:
+            action_reason = f"평단 기준 목표가({fmt(fixed_target)}) 도달"
+
+        # 5순위: 장기보유 + 추세 약화
+        elif hold_days >= 10 and trend_broken:
+            action = "🟡 익절/손절 검토"; action_color = "#f59e0b"
+            action_reason = f"보유 {hold_days}일 + 추세 약화 — 재검토 필요"
+
+        # 6순위: 추가매수 (정배열 유지 + RSI 여유 + 소폭 손실)
+        elif s3_on and 40 <= rsi_v <= 60 and -3 <= profit <= 0:
             action = "🟢 추가매수 검토"; action_color = "#10b981"
-            action_reason = f"눌림(-{abs(profit):.1f}%) + 신호 강함({d['score']}점)"
-        elif -2 <= profit <= 3 and rsi_v < 50:
-            action = "🟢 추가매수 검토"; action_color = "#10b981"
-            action_reason = f"평단 근처 + RSI 여유({rsi_v:.0f})"
-        else:
+            action_reason = f"정배열 유지 + RSI 여유({rsi_v:.0f}) + 눌림 {profit:.1f}%"
+
+        # 7순위: 홀딩 (정배열 유지 + 수익 구간)
+        elif s3_on and profit > 0:
             action = "⚪ 홀딩"; action_color = "#94a3b8"
-            action_reason = "특이사항 없음"
+            action_reason = f"정배열 유지 + 수익 {profit:.1f}% — 추세 살아있음"
+
+        # 8순위: 단기보유 관망
+        elif hold_days > 0 and hold_days <= 3:
+            action = "⚪ 홀딩 (관망)"; action_color = "#94a3b8"
+            action_reason = f"매수 {hold_days}일차 — 추세 확인 중"
+
+        else:
+            action = "⬜ 관망"; action_color = "#64748b"
+            action_reason = "추세 불명확 — 신호 대기"
+
+        # 보유일수 표시
+        hold_str = f"{hold_days}일째 보유" if hold_days > 0 else ("매수일 미입력" if not buy_date_str else "오늘 매수")
 
         # 2. 변화감지 — 오늘 새 신호 켜졌나
         change_signals = [s for s in d.get("signals", []) if "🔔 변화감지" in s]
@@ -1242,19 +1296,24 @@ if st.session_state.my_portfolio:
     </div>
   </div>
 
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:8px;">
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:8px;margin-bottom:8px;">
     <div style="background:#0f172a;padding:8px;border-radius:6px;text-align:center;">
-      <div style="font-size:10px;color:#94a3b8;">매수구간</div>
-      <div style="color:#10b981;font-weight:bold;font-size:11px;">{buy_range_str}</div></div>
+      <div style="font-size:10px;color:#94a3b8;">평단기준 손절</div>
+      <div style="color:#ef4444;font-weight:bold;font-size:11px;">{fmt(fixed_stop)}</div>
+      <div style="font-size:9px;color:#64748b;">고정 -7%</div></div>
     <div style="background:#0f172a;padding:8px;border-radius:6px;text-align:center;">
-      <div style="font-size:10px;color:#94a3b8;">목표가 (+8%)</div>
-      <div style="color:#3b82f6;font-weight:bold;">{fmt(target)}</div></div>
-    <div style="background:#0f172a;padding:8px;border-radius:6px;text-align:center;">
-      <div style="font-size:10px;color:#94a3b8;">손절가 (-7%)</div>
-      <div style="color:#ef4444;font-weight:bold;">{fmt(stop)}</div></div>
+      <div style="font-size:10px;color:#94a3b8;">평단기준 목표</div>
+      <div style="color:#3b82f6;font-weight:bold;font-size:11px;">{fmt(fixed_target)}</div>
+      <div style="font-size:9px;color:#64748b;">+8%</div></div>
     <div style="background:#0f172a;padding:8px;border-radius:6px;text-align:center;">
       <div style="font-size:10px;color:#94a3b8;">RSI</div>
       <div style="font-weight:bold;">{rsi_v}</div></div>
+    <div style="background:#0f172a;padding:8px;border-radius:6px;text-align:center;">
+      <div style="font-size:10px;color:#94a3b8;">보유기간</div>
+      <div style="font-weight:bold;font-size:11px;">{hold_str}</div></div>
+    <div style="background:#0f172a;padding:8px;border-radius:6px;text-align:center;">
+      <div style="font-size:10px;color:#94a3b8;">추세</div>
+      <div style="font-weight:bold;font-size:11px;">{'🟢정배열' if s3_on else '🔴추세약화'}</div></div>
   </div>
   <div style="font-size:10px;color:#475569;">📡 출처: {d['source']}</div>
 </div>""", unsafe_allow_html=True)
