@@ -58,6 +58,7 @@ requests
 requests-file
 rich
 rpds-py
+scipy
 six
 smmap
 soupsieve
