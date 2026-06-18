@@ -1631,6 +1631,44 @@ if bt_run:
         hammer   = ((body > 0) & (lower > body * 2) & (upper < body * 0.5)).fillna(False).astype(bool)
         s5 = bull_rev | hammer
 
+        # ── S6: 거래량 폭발 후 눌림 (벡터화) ──
+        # 최근 3~15일 내 거래량 150% 이상 폭발 → 이후 눌림 → 현재가 유지
+        vm20_s6 = vo.rolling(20).mean()
+        burst   = (vo > vm20_s6 * 1.5)  # 폭발일 마스크
+
+        s6_basic  = pd.Series(False, index=cl.index)
+        s6_strong = pd.Series(False, index=cl.index)
+
+        for idx in range(25, len(cl)):
+            vm = _safe_float(vm20_s6.iloc[idx])
+            cur_p = _safe_float(cl.iloc[idx])
+            if vm <= 0 or cur_p <= 0:
+                continue
+            # 3~15일 전 폭발일 탐색
+            burst_day = -1; burst_price = 0.0
+            for k in range(3, 16):
+                if idx - k < 0: break
+                if burst.iloc[idx-k]:
+                    burst_day = k
+                    burst_price = _safe_float(cl.iloc[idx-k])
+                    break
+            if burst_day < 0: continue
+            # 폭발 후 거래량 눌림
+            vol_after = [_safe_float(vo.iloc[idx-j]) for j in range(1, burst_day)]
+            if not vol_after: continue
+            vol_dried = np.mean(vol_after) < vm * 0.85
+            # 현재가 폭발일 대비 -8% 이내
+            price_ok  = burst_price > 0 and cur_p >= burst_price * 0.92
+            if vol_dried and price_ok:
+                s6_basic.iloc[idx] = True
+                # 강화: 오늘 거래량 재상승
+                vol_today = _safe_float(vo.iloc[idx])
+                if len(vol_after) >= 2 and vol_today > np.mean(vol_after[1:]) * 1.2:
+                    s6_strong.iloc[idx] = True
+
+        s6_basic  = s6_basic.fillna(False).astype(bool)
+        s6_strong = s6_strong.fillna(False).astype(bool)
+
         # 변화감지: 오늘 켜짐 & 어제 꺼짐
         # shift() 후 NaN → bool 변환 필수 (pandas ~연산 오류 방지)
         bb_t = (bbw < bw_avg * 0.85).fillna(False).astype(bool)
@@ -1650,6 +1688,7 @@ if bt_run:
             "s1": s1, "s1_strong": s1_strong,
             "s2": s2, "s2_strong": s2_strong,
             "s3": s3, "s4": s4, "s5": s5,
+            "s6": s6_basic, "s6_strong": s6_strong,
             "change": change,
             "close": cl, "rsi": rsi,
         })
@@ -1746,8 +1785,8 @@ if bt_run:
                             row = {"code": code, "date": df_tmp.index[idx],
                                    "d1": _safe_float(d1.iloc[idx]),
                                    "d2": _safe_float(d2.iloc[idx])}
-                            for sig in ["s1","s1_strong","s2","s2_strong","s3","s4","s5","change"]:
-                                row[sig] = bool(flags[sig].iloc[idx])
+                            for sig in ["s1","s1_strong","s2","s2_strong","s3","s4","s5","s6","s6_strong","change"]:
+                                row[sig] = bool(flags[sig].iloc[idx]) if sig in flags.columns else False
                             rows.append(row)
                         return code, rows
                     except: return code, None
@@ -1833,13 +1872,15 @@ if bt_run:
 
         results_table = []
         sigs = [
-            ("s1",        "S1 BB수축(전체)",    "12~25"),
-            ("s1_strong", "S1 BB강수축",        "25"),
-            ("s2",        "S2 거래량눌림(전체)","10~20"),
-            ("s2_strong", "S2 거래량강눌림",    "20"),
-            ("s3",        "S3 정배열눌림목",    "12~25"),
-            ("s4",        "S4 RSI다이버전스",   "12"),
-            ("s5",        "S5 양봉전환",        "8"),
+            ("s1",        "S1 BB수축(전체)",      "12~25"),
+            ("s1_strong", "S1 BB강수축",          "25"),
+            ("s2",        "S2 거래량눌림(전체)",  "10~20"),
+            ("s2_strong", "S2 거래량강눌림",      "20"),
+            ("s3",        "S3 정배열눌림목",      "12~25"),
+            ("s4",        "S4 RSI다이버전스",     "12"),
+            ("s5",        "S5 양봉전환",          "8"),
+            ("s6",        "S6 거래량폭발후눌림",  "미정"),
+            ("s6_strong", "S6 거래량폭발+재상승", "미정"),
             ("change",    "변화감지(오늘첫셋업)", "보정"),
         ]
 
@@ -1917,6 +1958,11 @@ if bt_run:
                 ("변화감지+S3", (bt_df["change"]) & (bt_df["s3"])),
                 ("S3+S4",       (bt_df["s3"]) & (bt_df["s4"])),
                 ("S1+S2+S3+S5", (bt_df["s1"]) & (bt_df["s2"]) & (bt_df["s3"]) & (bt_df["s5"])),
+                ("S6(기본)",      bt_df["s6"] if "s6" in bt_df.columns else pd.Series(False, index=bt_df.index)),
+                ("S6(강화)",      bt_df["s6_strong"] if "s6_strong" in bt_df.columns else pd.Series(False, index=bt_df.index)),
+                ("S3+S6",        (bt_df["s3"]) & (bt_df["s6"] if "s6" in bt_df.columns else pd.Series(False, index=bt_df.index))),
+                ("S4+S6",        (bt_df["s4"]) & (bt_df["s6"] if "s6" in bt_df.columns else pd.Series(False, index=bt_df.index))),
+                ("S3+S4+S6",     (bt_df["s3"]) & (bt_df["s4"]) & (bt_df["s6"] if "s6" in bt_df.columns else pd.Series(False, index=bt_df.index))),
             ]
             base_d2 = bt_df["d2"].dropna().tolist()
             base_wr = sum(1 for r in base_d2 if r>0)/len(base_d2)*100
@@ -2267,8 +2313,8 @@ if bt_run:
                             row = {"code":code}
                             for n in [1,2,3,5,7,10]:
                                 row[f"d{n}"] = _safe_float(d[f"d{n}"].iloc[idx])
-                            for sig in ["s1","s1_strong","s2","s2_strong","s3","s4","s5","change"]:
-                                row[sig] = bool(flags[sig].iloc[idx])
+                            for sig in ["s1","s1_strong","s2","s2_strong","s3","s4","s5","s6","s6_strong","change"]:
+                                row[sig] = bool(flags[sig].iloc[idx]) if sig in flags.columns else False
                             rows_ext.append(row)
                     except: pass
                 return pd.DataFrame(rows_ext)
@@ -2389,7 +2435,10 @@ if bt_run:
                 if row["s3"]: s+=cur_w["s3_strong"]
                 if row["s4"]: s+=cur_w["s4"]; th_+=1
                 if row["s5"]: s+=cur_w["s5"]; th_+=1
-                core = row["s3"] or row["s4"]
+                # S6 가산점 (검증 중)
+                if row.get("s6_strong", False): s += 10
+                elif row.get("s6", False):      s += 5
+                core = row["s3"] and row["s4"]
                 return core and (sh>=1) and (s>=cur_w["min_pass_score"])
 
             bt_df["_pass"] = bt_df.apply(_full_pass, axis=1)
