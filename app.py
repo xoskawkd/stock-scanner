@@ -61,16 +61,19 @@ THRESHOLDS = {
 WEIGHTS_FILE = "weights.json"
 
 DEFAULT_WEIGHTS = {
-    "s1_strong": 18, "s1_weak": 9,
-    "s2_strong": 14, "s2_weak": 7,
-    "s2t_strong": 5, "s2t_weak": 3,
-    "s3_strong": 25, "s3_weak": 15,
-    "s4": 12,
-    "s5": 5,
+    # 백테스트 2회 반복 결과 반영 (KRX 199종목, 149,653봉, 2023~)
+    # S1/S2/S3/S5 모두 음수 리프트 일관 확인 → 단계적 하향
+    # S4 리프트 방향 미확인 (p>0.05) → 유지
+    "s1_strong": 12, "s1_weak": 6,   # 18→12 (리프트 -0.12% 2회 확인)
+    "s2_strong": 9,  "s2_weak": 5,   # 14→9  (리프트 -0.12% 2회 확인)
+    "s2t_strong": 5, "s2t_weak": 3,  # 유지
+    "s3_strong": 17, "s3_weak": 10,  # 25→17 (리프트 -0.14% 2회 확인)
+    "s4": 12,                         # 유지 (p=0.325, 방향 미확인)
+    "s5": 3,                          # 5→3   (리프트 -0.18% 2회 확인)
     "rsi_good": 5, "rsi_oversold": 3, "rsi_extreme": 2,
     "min_pass_score": 38,
-    "_updated": "초기값",
-    "_note": "백테스트 결과 기반 자동 업데이트"
+    "_updated": "2차 백테스트 반영",
+    "_note": "KRX 199종목 149,653봉 2회 검증"
 }
 
 def load_weights() -> dict:
@@ -580,42 +583,68 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         else:
             OUT["signals"].append(f"⬜ RSI 보너스 없음 ({rsi:.1f})")
 
-        # ── 목표가/손절가 — ATR+BB+60일고점 중간값 ──
+        # ── 목표가/손절가 — ATR + BB상단 (60일고점 제거) ──
+        # 60일고점은 과거 고점이라 이상값 유발 → 완전 제거
+        # 목표가 = min(BB상단, 현재가+ATR*2) — 현재 변동성 기반
+        # 손절가 = 현재가 - ATR*1.5 (단, 최대 -7%)
+        _atr_target = current * 1.08  # 기본값
+        _atr_stop   = current * 0.93
+        buy_low     = current * 0.97
+        buy_high    = current * 1.02
         try:
-            hi_col = df["high"].astype(float); lo_col = df["low"].astype(float)
+            hi_col = df["high"].astype(float)
+            lo_col = df["low"].astype(float)
             tr = pd.concat([
                 hi_col - lo_col,
                 (hi_col - cl.shift()).abs(),
                 (lo_col - cl.shift()).abs()
             ], axis=1).max(axis=1)
-            atr    = _safe_float(tr.rolling(14).mean().iloc[-1])
-            hi60_t = _safe_float(cl.rolling(60).max().iloc[-1])
-            t1     = hi60_t if hi60_t > current * 1.03 else current * 1.10
+            atr = _safe_float(tr.rolling(14).mean().iloc[-1])
+            if atr <= 0 or current <= 0:
+                raise ValueError("ATR 이상")
+
+            # BB 상단
             std20  = _safe_float(cl.rolling(20).std().iloc[-1])
-            bb_up  = ma20 + std20 * 2
-            t2     = bb_up if bb_up > current * 1.05 else ma20 + std20 * 2.5
-            t3     = current + atr * 3
-            cands  = sorted([t for t in [t1, t2, t3] if t > current])
-            ft     = cands[len(cands)//2] if len(cands)>=2 else (cands[0] if cands else current*1.07)
-            ft     = max(ft, current*1.05); ft = min(ft, current*1.20)
-            stop_t = min(current - atr*1.5, current*0.97)
-            buy_low  = max(current*0.97, current - atr*0.5)
-            buy_high = min(current*1.02, current + atr*0.3)
+            bb_top = ma20 + std20 * 2 if ma20 > 0 and std20 > 0 else 0
+
+            # 목표가 후보 두 개
+            t_atr = current + atr * 2          # ATR 2배
+            t_bb  = bb_top if bb_top > current else current + atr * 2
+
+            # 둘 중 보수적인 값 (더 낮은 것) 선택
+            _atr_target = min(t_atr, t_bb)
+
+            # 범위 제한: +5% ~ +15%
+            _atr_target = max(_atr_target, current * 1.05)
+            _atr_target = min(_atr_target, current * 1.15)
+
+            # 손절가: ATR 기반, 최대 -7%
+            _atr_stop = current - atr * 1.5
+            _atr_stop = max(_atr_stop, current * 0.93)  # 최대 -7%
+            _atr_stop = min(_atr_stop, current * 0.97)  # 최소 -3%
+
+            # 매수구간: ATR 기반
+            buy_low  = max(current * 0.97, current - atr * 0.5)
+            buy_high = min(current * 1.02, current + atr * 0.3)
         except:
-            ft=current*1.07; stop_t=current*0.93
-            buy_low=current*0.97; buy_high=current*1.02
+            pass  # 기본값 유지
 
         OUT["buy_min"] = round(buy_low,  4)
         OUT["buy_max"] = round(buy_high, 4)
-        OUT["target"]  = round(ft, 4) if 'ft' in dir() else round(current*1.08, 4)
-        OUT["stop"]    = round(stop_t, 4) if 'stop_t' in dir() else round(current*0.93, 4)
+        # ★ 'ft' in dir()는 항상 True → locals() 사용 또는 명시적 변수로 처리
+        try:
+            OUT["target"] = round(_atr_target, 4)
+            OUT["stop"]   = round(_atr_stop,   4)
+        except:
+            OUT["target"] = round(current * 1.08, 4)
+            OUT["stop"]   = round(current * 0.93, 4)
         OUT["score"]   = int(score)
 
-        # ── 통과 게이트 — 실제 백테스트 기반 재설계 ──
-        # S3(정배열눌림목) OR S4(RSI다이버전스) 최소 1개 필수
-        # 실제 KRX 199종목 149,653봉 백테스트에서 유일하게 조합시 양수 리프트
-        # S1/S2/S5/변화감지는 통과조건 제외, 점수 가산점만 유지
-        core_pass = s3 or s4
+        # ── 통과 게이트 — 3차 백테스트 기반 재설계 ──
+        # S3 AND S4 둘 다 필수
+        # S3 OR S4 → 리프트 -0.33%p (2차 백테스트)
+        # S3 AND S4 → 유일한 양수 방향 조합 (+0.10%, 승률 51.8%)
+        core_pass = s3 and s4
         OUT["pass"] = (not rejected) and core_pass and (score >= W['min_pass_score'])
 
         # 변화감지 — 참고 표시만 (통과조건 아님)
@@ -708,7 +737,7 @@ def summarize_skips(skips: list) -> dict:
     return dict(cnt.most_common())
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def scan_kr() -> tuple:
     listing = load_krx_listing()
     targets = listing[listing["Marcap"] > 3e11].nlargest(KR_SCAN_TOP_N, "Marcap")
@@ -740,8 +769,8 @@ def scan_kr() -> tuple:
             "현재가":   int(price),
             "RSI":      round(r["rsi"], 1),
             "매수구간": f"₩{bmin:,} ~ ₩{bmax:,}",
-            "목표가":   int(r["target"]) if r["target"] > 0 else int(price * 1.08),
-            "손절가":   int(r["stop"])   if r["stop"]   > 0 else int(price * 0.93),
+            "목표가":   int(r["target"]) if r.get("target",0) > price*1.03 and r.get("target",0) <= price*1.15 else int(price * 1.08),
+            "손절가":   int(r["stop"])   if r.get("stop",0) > price*0.85 and r.get("stop",0) < price*0.98 else int(price * 0.93),
             "signals":  r["signals"],
             "source":   src,
             "s_flags":  [r["s1"], r["s2"], r["s3"], r["s4"], r["s5"]],
@@ -754,7 +783,7 @@ def scan_kr() -> tuple:
     return top3, skips
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def scan_us() -> tuple:
     rt_map = get_us_price_batch(tuple(US_WATCHLIST))
 
@@ -784,8 +813,8 @@ def scan_us() -> tuple:
             "현재가":   round(price, 2),
             "RSI":      round(r["rsi"], 1),
             "매수구간": f"{_uf(price*0.97)} ~ {_uf(price*1.02)}",
-            "목표가":   round(r["target"], 2) if r["target"] > 0 else round(price * 1.08, 2),
-            "손절가":   round(r["stop"],   2) if r["stop"]   > 0 else round(price * 0.93, 2),
+            "목표가":   round(r["target"], 2) if r.get("target",0) > price*1.03 and r.get("target",0) <= price*1.15 else round(price * 1.08, 2),
+            "손절가":   round(r["stop"],   2) if r.get("stop",0) > price*0.85 and r.get("stop",0) < price*0.98 else round(price * 0.93, 2),
             "signals":  r["signals"],
             "source":   src,
             "s_flags":  [r["s1"], r["s2"], r["s3"], r["s4"], r["s5"]],
