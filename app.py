@@ -1526,6 +1526,7 @@ with st.expander("⚙️ 백테스트 설정", expanded=True):
     )
     bt_start   = bt_col2.text_input("시작일", value="2023-01-01")
     bt_max_n   = bt_col2.number_input("최대 종목수 (속도 조절)", min_value=10, max_value=200, value=100, step=10)
+    bt_ma_mode = bt_col2.selectbox("MA 방식 비교", ["현재(SMA)", "EMA5+EMA20+SMA60", "둘 다 비교"], index=2)
     bt_run     = bt_col3.button("🚀 백테스트 실행", type="primary", use_container_width=True)
     st.caption("⚠️ 코스피200 전체 + 2년치는 수분 소요될 수 있어요. 최대 종목수로 속도 조절하세요.")
 
@@ -1564,16 +1565,24 @@ if bt_run:
             pass
         return None
 
-    def calc_signal_flags(df):
-        """각 봉에서 S1~S5 + 변화감지 플래그 계산 (벡터화)"""
+    def calc_signal_flags(df, ma_mode="현재(SMA)"):
+        """각 봉에서 S1~S5 + 변화감지 플래그 계산 (벡터화)
+        ma_mode: "현재(SMA)" or "EMA5+EMA20+SMA60"
+        """
         cl = df["close"].astype(float)
         hi = df["high"].astype(float)
         lo = df["low"].astype(float)
         vo = df["volume"].astype(float)
 
-        ma5  = cl.rolling(5).mean()
-        ma20 = cl.rolling(20).mean()
-        ma60 = cl.rolling(60).mean()
+        # MA 방식 선택
+        if ma_mode == "EMA5+EMA20+SMA60":
+            ma5  = cl.ewm(span=5,  adjust=False).mean()   # EMA5
+            ma20 = cl.ewm(span=20, adjust=False).mean()   # EMA20
+            ma60 = cl.rolling(60).mean()                  # SMA60 유지
+        else:
+            ma5  = cl.rolling(5).mean()
+            ma20 = cl.rolling(20).mean()
+            ma60 = cl.rolling(60).mean()
 
         # S1: BB 수축
         bb_std  = cl.rolling(20).std()
@@ -1716,6 +1725,107 @@ if bt_run:
         bt_df = pd.DataFrame(all_rows)
         total_days = len(bt_df)
         st.success(f"✅ {len(loaded_codes)}개 종목 / {total_days:,}개 봉 로딩 완료")
+
+        # ── 둘 다 비교 모드: EMA 방식도 같이 계산 ──
+        if bt_ma_mode == "둘 다 비교":
+            st.subheader("📊 SMA vs EMA 비교")
+            st.caption("같은 종목/기간에서 MA 방식만 바꿔서 신호 성과 비교")
+
+            with st.spinner("EMA 방식 계산 중..."):
+                all_rows_ema = []
+                def _bt_fetch_ema(code):
+                    df_tmp = load_bt_ohlcv(code, bt_start)
+                    if df_tmp is None or len(df_tmp) < 80: return code, None
+                    try:
+                        flags = calc_signal_flags(df_tmp, ma_mode="EMA5+EMA20+SMA60")
+                        cl_tmp = df_tmp["close"].astype(float)
+                        d1 = cl_tmp.pct_change(1).shift(-1) * 100
+                        d2 = cl_tmp.pct_change(2).shift(-2) * 100
+                        rows = []
+                        for idx in range(60, len(df_tmp)-2):
+                            row = {"code": code, "date": df_tmp.index[idx],
+                                   "d1": _safe_float(d1.iloc[idx]),
+                                   "d2": _safe_float(d2.iloc[idx])}
+                            for sig in ["s1","s1_strong","s2","s2_strong","s3","s4","s5","change"]:
+                                row[sig] = bool(flags[sig].iloc[idx])
+                            rows.append(row)
+                        return code, rows
+                    except: return code, None
+
+                with ThreadPoolExecutor(max_workers=20) as ex:
+                    for fut in ex.map(_bt_fetch_ema, loaded_codes):
+                        try:
+                            c, rows = fut if isinstance(fut, tuple) else (None, None)
+                            if rows: all_rows_ema.extend(rows)
+                        except: pass
+
+                # 직접 map으로 재시도
+                if not all_rows_ema:
+                    with ThreadPoolExecutor(max_workers=20) as ex:
+                        results_ema = list(ex.map(_bt_fetch_ema, loaded_codes))
+                    for c, rows in results_ema:
+                        if rows: all_rows_ema.extend(rows)
+
+            if all_rows_ema:
+                bt_ema = pd.DataFrame(all_rows_ema)
+
+                # 비교 테이블
+                compare_rows = []
+                sigs_compare = [
+                    ("s1", "S1 BB수축"),
+                    ("s2", "S2 거래량눌림"),
+                    ("s3", "S3 정배열"),
+                    ("s4", "S4 RSI다이버전스"),
+                    ("s5", "S5 양봉전환"),
+                ]
+                base_d2_sma = bt_df["d2"].dropna().tolist()
+                base_d2_ema = bt_ema["d2"].dropna().tolist()
+
+                for sig, label in sigs_compare:
+                    # SMA 방식
+                    on_sma  = bt_df.loc[bt_df[sig]==True, "d2"].dropna().tolist()
+                    off_sma = bt_df.loc[bt_df[sig]==False,"d2"].dropna().tolist()
+                    # EMA 방식
+                    on_ema  = bt_ema.loc[bt_ema[sig]==True, "d2"].dropna().tolist()
+                    off_ema = bt_ema.loc[bt_ema[sig]==False,"d2"].dropna().tolist()
+
+                    if not on_sma or not on_ema: continue
+                    lift_sma = np.mean(on_sma) - np.mean(off_sma)
+                    lift_ema = np.mean(on_ema) - np.mean(off_ema)
+                    t1,p1 = sp.ttest_ind(on_sma, off_sma) if len(off_sma)>=5 else (0,1)
+                    t2,p2 = sp.ttest_ind(on_ema, off_ema) if len(off_ema)>=5 else (0,1)
+                    wr_sma = sum(1 for g in on_sma if g>0)/len(on_sma)*100
+                    wr_ema = sum(1 for g in on_ema if g>0)/len(on_ema)*100
+
+                    better = "EMA ✅" if lift_ema > lift_sma else ("SMA ✅" if lift_sma > lift_ema else "동일")
+                    compare_rows.append({
+                        "시그널": label,
+                        "SMA 발화수": len(on_sma),
+                        "SMA 리프트": f"{lift_sma:+.3f}%",
+                        "SMA 승률": f"{wr_sma:.1f}%",
+                        "SMA p값": f"{p1:.3f}",
+                        "EMA 발화수": len(on_ema),
+                        "EMA 리프트": f"{lift_ema:+.3f}%",
+                        "EMA 승률": f"{wr_ema:.1f}%",
+                        "EMA p값": f"{p2:.3f}",
+                        "우위": better,
+                    })
+
+                if compare_rows:
+                    st.dataframe(pd.DataFrame(compare_rows), use_container_width=True, hide_index=True)
+
+                    # 최종 판정
+                    ema_wins = sum(1 for r in compare_rows if "EMA" in r["우위"])
+                    sma_wins = sum(1 for r in compare_rows if "SMA" in r["우위"])
+                    if ema_wins > sma_wins:
+                        st.success(f"✅ EMA 방식이 {ema_wins}/{len(compare_rows)}개 신호에서 우위 — EMA 적용 권장")
+                    elif sma_wins > ema_wins:
+                        st.info(f"➡️ SMA 방식이 {sma_wins}/{len(compare_rows)}개 신호에서 우위 — 현재 유지 권장")
+                    else:
+                        st.warning("⚠️ 두 방식 차이 없음 — 현재 유지")
+
+                    # JSON 저장에 비교 결과 포함
+                    st.session_state["ema_compare"] = compare_rows
 
         # ── 시그널별 결과 테이블 ──
         st.subheader("📊 S1~S5 실제 예측력")
@@ -2148,7 +2258,7 @@ if bt_run:
                     df_tmp = load_bt_ohlcv(code, start)
                     if df_tmp is None or len(df_tmp) < 80: continue
                     try:
-                        flags = calc_signal_flags(df_tmp)
+                        flags = calc_signal_flags(df_tmp, ma_mode=bt_ma_mode if 'bt_ma_mode' in dir() else '현재(SMA)')
                         cl_tmp = df_tmp["close"].astype(float)
                         d = {}
                         for n in [1,2,3,5,7,10]:
