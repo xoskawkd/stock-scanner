@@ -35,7 +35,7 @@ except Exception:
 # ★ API 키 설정
 # ============================================================
 KRX_API_KEY     = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # ← data.krx.co.kr AUTH_KEY
-FINNHUB_API_KEY = "d8p0ftpr01qp954tu3ogd8p0ftpr01qp954tu3p0"   # ← Finnhub 키 (없으면 yfinance)
+FINNHUB_API_KEY = "e196a49253d0408cadf883e01f6b78d9"   # ← Finnhub 키 (없으면 yfinance)
 
 # ============================================================
 # ★ 스캔/필터 튜닝값
@@ -696,37 +696,74 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
 # 8. 스캐너
 # ============================================================
 # ── 나스닥100 자동 로딩 (Wikipedia 스크래핑, API 키 불필요) ──
-@st.cache_data(ttl=86400, show_spinner=False)  # 24시간 캐시 (구성 종목 잘 안 바뀜)
-def load_nasdaq100_tickers() -> list:
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_us_tickers() -> list:
     """
-    나스닥100 구성 종목을 Wikipedia에서 자동으로 가져옴.
-    실패 시 하드코딩 fallback 21개로 대체.
+    나스닥100 + S&P500 자동 로딩 (Wikipedia)
+    실패 시 하드코딩 fallback
     """
     FALLBACK = [
-        "NVDA","META","GOOGL","AMZN","MSFT","AMD","TSLA",
-        "PYPL","SQ","SOFI","HOOD","UPST","AFRM",
-        "PLTR","ASTS","HIMS","AXSM","RIVN","SMCI","ARM",
+        # 나스닥 대형주
+        "NVDA","META","GOOGL","AMZN","MSFT","AMD","TSLA","AAPL","NFLX","AVGO",
+        # 반도체
+        "QCOM","MU","AMAT","LRCX","KLAC","MRVL","SMCI","ARM","INTC","TXN",
+        # AI/클라우드
+        "PLTR","CRM","SNOW","DDOG","MDB","NET","ZS","CRWD","PANW","OKTA",
+        # 핀테크/성장
+        "PYPL","SQ","SOFI","HOOD","UPST","AFRM","COIN","MSTR",
+        # 바이오/헬스
+        "HIMS","AXSM","MRNA","BNTX","REGN","VRTX","ISRG","DXCM",
+        # 기타 성장
+        "ASTS","RIVN","LCID","NIO","RBLX","U","DKNG","PENN",
+        # S&P500 대형주
+        "JPM","BAC","GS","MS","V","MA","BRK-B","JNJ","UNH","PFE",
+        "XOM","CVX","LIN","APD","NEE","DUK","AMT","PLD","SPG",
+        "WMT","COST","TGT","HD","LOW","MCD","SBUX","NKE","DIS",
+        "BA","CAT","DE","HON","MMM","GE","RTX","LMT","NOC",
     ]
+    tickers = []
+
+    # 나스닥100 로딩
     try:
         tables = pd.read_html(
             "https://en.wikipedia.org/wiki/Nasdaq-100",
             attrs={"id": "constituents"},
         )
         if tables:
-            df_tickers = tables[0]
-            # 컬럼명이 버전마다 다를 수 있어서 유연하게 처리
-            col = next((c for c in df_tickers.columns if "ticker" in c.lower() or "symbol" in c.lower()), None)
+            df_t = tables[0]
+            col = next((c for c in df_t.columns
+                       if "ticker" in c.lower() or "symbol" in c.lower()), None)
             if col:
-                tickers = df_tickers[col].dropna().tolist()
-                # BRK.B → BRK-B 등 yfinance 형식 변환
-                tickers = [t.replace(".", "-") for t in tickers if isinstance(t, str) and len(t) <= 6]
-                if len(tickers) >= 80:
-                    return tickers
-    except Exception as e:
-        pass
+                ndq = [t.replace(".", "-") for t in df_t[col].dropna().tolist()
+                       if isinstance(t, str) and len(t) <= 6]
+                tickers.extend(ndq)
+    except: pass
+
+    # S&P500 로딩
+    try:
+        tables = pd.read_html(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        )
+        if tables:
+            df_t = tables[0]
+            col = next((c for c in df_t.columns
+                       if "ticker" in c.lower() or "symbol" in c.lower()), None)
+            if col:
+                sp5 = [t.replace(".", "-") for t in df_t[col].dropna().tolist()
+                       if isinstance(t, str) and len(t) <= 5]
+                tickers.extend(sp5)
+    except: pass
+
+    # 중복 제거 + 정렬
+    seen = set(); unique = []
+    for t in tickers:
+        if t not in seen: seen.add(t); unique.append(t)
+
+    if len(unique) >= 100:
+        return unique[:500]  # 최대 500개
     return FALLBACK
 
-US_WATCHLIST = load_nasdaq100_tickers()
+US_WATCHLIST = load_us_tickers()
 
 def summarize_skips(skips: list) -> dict:
     cnt = Counter()
@@ -820,7 +857,7 @@ def scan_us() -> tuple:
             "s_flags":  [r["s1"], r["s2"], r["s3"], r["s4"], r["s5"]],
         }
 
-    with ThreadPoolExecutor(max_workers=40) as ex:  # 나스닥100 대응
+    with ThreadPoolExecutor(max_workers=50) as ex:  # 나스닥+S&P500 대응
         raw = list(ex.map(_fetch, US_WATCHLIST))
     skips = [r for r in raw if r.get("_skip")]
     top3  = sorted([r for r in raw if not r.get("_skip")], key=lambda x: x["점수"], reverse=True)[:3]
