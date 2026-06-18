@@ -1732,8 +1732,8 @@ if bt_run:
                         "d1": _safe_float(d1.iloc[idx]),
                         "d2": _safe_float(d2.iloc[idx]),
                     }
-                    for sig in ["s1","s1_strong","s2","s2_strong","s3","s4","s5","change"]:
-                        row[sig] = bool(flags[sig].iloc[idx])
+                    for sig in ["s1","s1_strong","s2","s2_strong","s3","s4","s5","s6","s6_strong","change"]:
+                        row[sig] = bool(flags[sig].iloc[idx]) if sig in flags.columns else False
                     rows.append(row)
                 return code, rows
             except Exception as e:
@@ -1885,6 +1885,9 @@ if bt_run:
         ]
 
         for sig_key, label, cur_score in sigs:
+            # S6 등 새 컬럼이 없을 수 있어서 방어
+            if sig_key not in bt_df.columns:
+                continue
             on_d1  = bt_df.loc[bt_df[sig_key]==True,  "d1"].dropna().tolist()
             off_d1 = bt_df.loc[bt_df[sig_key]==False, "d1"].dropna().tolist()
             on_d2  = bt_df.loc[bt_df[sig_key]==True,  "d2"].dropna().tolist()
@@ -1970,7 +1973,10 @@ if bt_run:
                                    "D+2평균":f"{np.mean(base_d2):+.2f}%",
                                    "D+2승률":f"{base_wr:.1f}%","리프트":"기준","p값":"-"})
             for name, mask in combos:
-                subset = bt_df.loc[mask, "d2"].dropna().tolist()
+                try:
+                    subset = bt_df.loc[mask, "d2"].dropna().tolist()
+                except Exception:
+                    continue
                 if len(subset) < 5: continue
                 avg = np.mean(subset); wr = sum(1 for r in subset if r>0)/len(subset)*100
                 lift = avg - np.mean(base_d2)
