@@ -228,16 +228,10 @@ def _fh_fetch_raw(ticker: str) -> dict:
 
 def _yf_fresh_price(ticker: str) -> tuple:
     """
-    가격 우선순위 (포트폴리오 실시간 기준):
-    1) 1분봉 마지막값  — 장중/장마감 직후 가장 신뢰도 높음
-    2) fast_info.last_price — 빠르지만 장외 이상값 있음 (2순위로 강등)
-    3) 일봉 최신값 — 3일 이내만 허용
-    ★ fast_info는 장외시간에 pre/after market 가격 섞여 이상값 나오는 케이스 있어서 1분봉 우선
+    정규장 가격 반환 (스캔용 — 장외 제외)
     """
     try:
         t = yf.Ticker(ticker)
-
-        # 1) 1분봉 — 가장 신뢰도 높은 최근 체결가
         try:
             df_min = t.history(period="1d", interval="1m")
             if not df_min.empty:
@@ -246,18 +240,12 @@ def _yf_fresh_price(ticker: str) -> tuple:
                     p = float(last_close.iloc[-1])
                     if p > 0:
                         return p, "yfinance(1분봉)"
-        except:
-            pass
-
-        # 2) fast_info — 1분봉 실패시 fallback
+        except: pass
         try:
             p = getattr(t.fast_info, "last_price", 0)
             if p and float(p) > 0:
                 return float(p), "yfinance(실시간)"
-        except:
-            pass
-
-        # 3) 일봉 — 3일 이내만
+        except: pass
         try:
             df_day = t.history(period="5d", interval="1d")
             if not df_day.empty:
@@ -267,17 +255,65 @@ def _yf_fresh_price(ticker: str) -> tuple:
                     try:
                         last_date = last_idx.tz_localize(None) if last_idx.tzinfo else last_idx
                         days_old = (datetime.now() - last_date.to_pydatetime()).days
-                    except:
-                        days_old = 0
+                    except: days_old = 0
                     if days_old > 3:
                         return None, f"yfinance(일봉{days_old}일전·stale차단)"
                     return float(last_close.iloc[-1]), "yfinance(일봉종가)"
-        except:
-            pass
-
-    except:
-        pass
+        except: pass
+    except: pass
     return None, "실패"
+
+
+def _yf_prepost_price(ticker: str) -> tuple:
+    """
+    장외 가격 반환 (포트폴리오 전용 — prepost=True)
+    반환: (장외가격, 장외구분, 정규장종가)
+    """
+    try:
+        t = yf.Ticker(ticker)
+
+        # 정규장 종가 (1분봉 기준)
+        regular_price = 0.0
+        try:
+            df_reg = t.history(period="1d", interval="1m", prepost=False)
+            if not df_reg.empty:
+                lc = df_reg["Close"].dropna()
+                if not lc.empty: regular_price = float(lc.iloc[-1])
+        except: pass
+
+        # 장외 포함 1분봉
+        try:
+            df_pp = t.history(period="1d", interval="1m", prepost=True)
+            if not df_pp.empty and len(df_pp) > 0:
+                last_price = float(df_pp["Close"].dropna().iloc[-1])
+                last_time  = df_pp.index[-1]
+
+                # 시간대 판별
+                try:
+                    if ZoneInfo:
+                        now_et = datetime.now(ZoneInfo("America/New_York"))
+                        reg_open  = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
+                        reg_close = now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
+                        pre_start = now_et.replace(hour=4,  minute=0,  second=0, microsecond=0)
+                        aft_end   = now_et.replace(hour=20, minute=0,  second=0, microsecond=0)
+                        if reg_open <= now_et <= reg_close:
+                            session = "정규장"
+                        elif pre_start <= now_et < reg_open:
+                            session = "🌅 프리마켓"
+                        elif reg_close < now_et <= aft_end:
+                            session = "🌙 애프터마켓"
+                        else:
+                            session = "장외마감"
+                    else:
+                        session = "장외"
+                except: session = "장외"
+
+                if last_price > 0:
+                    return last_price, session, regular_price
+        except: pass
+
+    except: pass
+    return 0.0, "실패", 0.0
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -959,28 +995,35 @@ def get_portfolio_data(name: str) -> dict:
                 "rsi": 0, "currency": "KRW", "stop": 0, "target": 0,
                 "buy_min": 0.0, "buy_max": 0.0, "source": "실패", "ok": False, "signals": []}
 
-    # ── 해외 티커 — 포트폴리오용: 캐시 없이 매번 신선하게 fetch ──
+    # ── 해외 티커 — 포트폴리오용: 장외가 + 정규장종가 둘 다 fetch ──
     market_open = is_us_market_open()
 
-    # Finnhub 먼저 (키 있으면 가장 정확)
+    # 장외가 먼저 시도 (포트폴리오 전용)
+    prepost_price, session, regular_price = _yf_prepost_price(name)
+
+    # Finnhub (정규장 기준)
     q = _fh_fetch_raw(name)
     fh_c, fh_pc = q["c"], q["pc"]
 
+    # 정규장가 결정
     if market_open and fh_c > 0:
-        # 장중: Finnhub 현재가
         price, src = fh_c, "Finnhub(정규장)"
     elif not market_open and fh_pc > 0:
-        # 장마감 후: Finnhub 전일종가 (가장 정확)
         price, src = fh_pc, "Finnhub(전일종가)"
     elif fh_c > 0:
-        price, src = fh_c, "Finnhub(시간외)"
+        price, src = fh_c, "Finnhub"
+    elif regular_price > 0:
+        price, src = regular_price, "yfinance(정규장)"
     else:
-        # Finnhub 키 없거나 실패 → yfinance 1분봉
         yf_price, yf_src = _yf_fresh_price(name)
-        if yf_price is not None and yf_price > 0:
-            price, src = yf_price, yf_src
-        else:
-            price, src = 0.0, yf_src if yf_src else "실패"
+        price = yf_price if yf_price and yf_price > 0 else 0.0
+        src   = yf_src if yf_src else "실패"
+
+    # 장외가 유효성 확인 (정규장가 대비 ±30% 이내만 신뢰)
+    has_prepost = (prepost_price > 0 and price > 0 and
+                   0.70 <= prepost_price/price <= 1.30 and
+                   session not in ["실패", "장외마감", "정규장"])
+    prepost_diff = (prepost_price - price) / price * 100 if has_prepost and price > 0 else 0
 
     df = load_ohlcv_us(name)
     if df is not None:
@@ -1022,6 +1065,10 @@ def get_portfolio_data(name: str) -> dict:
             "source":   src,
             "ok":       curr > 0,
             "signals":  r["signals"],
+            "has_prepost":      has_prepost,
+            "prepost_price":    _usd_round(prepost_price) if has_prepost else 0,
+            "prepost_session":  session if has_prepost else "",
+            "prepost_diff":     round(prepost_diff, 2) if has_prepost else 0,
         }
     if price > 0:
         # OHLCV 없으면 ATR 계산 불가 → 고정값 fallback (표시용)
@@ -1268,6 +1315,26 @@ if st.session_state.my_portfolio:
     <span style="color:#6ee7b7;font-size:11px;">{change_signals[0].replace("🔔 변화감지: ","")}</span>
   </div>"""
 
+        # 장외가 HTML (해외 종목만)
+        prepost_html = ""
+        if not is_kr and d.get("has_prepost", False):
+            pp_price  = d.get("prepost_price", 0)
+            pp_sess   = d.get("prepost_session", "")
+            pp_diff   = d.get("prepost_diff", 0)
+            pp_color  = "#10b981" if pp_diff >= 0 else "#ef4444"
+            pp_profit = (pp_price - buy) / buy * 100 if buy > 0 and pp_price > 0 else 0
+            prepost_html = f"""
+  <div style="background:#1a2744;border:1px solid #3b82f6;border-radius:6px;
+              padding:8px 12px;margin-bottom:8px;">
+    <span style="color:#3b82f6;font-size:12px;font-weight:bold;">{pp_sess}</span>
+    <span style="color:{pp_color};font-size:13px;font-weight:bold;margin-left:12px;">
+      {_usd_fmt(pp_price)} ({pp_diff:+.2f}%)
+    </span>
+    <span style="color:#94a3b8;font-size:11px;margin-left:8px;">
+      수익률 기준: {pp_profit:+.2f}%
+    </span>
+  </div>"""
+
         # 3. 방향성 판단 (RSI + MA + 거래량 조합)
         sigs = d.get("signals", [])
         s1_on = any("S1" in s and "✅" in s for s in sigs)
@@ -1308,6 +1375,7 @@ if st.session_state.my_portfolio:
   </h3>
 
   {change_html}
+  {prepost_html}
 
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px;">
     <div><div style="font-size:11px;color:#94a3b8;">내 평단가</div>
