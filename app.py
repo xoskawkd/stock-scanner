@@ -20,6 +20,7 @@ import pandas as pd
 import numpy as np
 import requests
 import json, os
+from scipy import stats as sp
 from datetime import datetime, timedelta
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -34,7 +35,7 @@ except Exception:
 # ★ API 키 설정
 # ============================================================
 KRX_API_KEY     = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # ← data.krx.co.kr AUTH_KEY
-FINNHUB_API_KEY = "e196a49253d0408cadf883e01f6b78d9"   # ← Finnhub 키 (없으면 yfinance)
+FINNHUB_API_KEY = "d8p0ftpr01qp954tu3ogd8p0ftpr01qp954tu3p0"   # ← Finnhub 키 (없으면 yfinance)
 
 # ============================================================
 # ★ 스캔/필터 튜닝값
@@ -53,6 +54,46 @@ THRESHOLDS = {
     "CRYPTO": {"min_value": 1_000_000_000, "max_rsi": 83, "max_gain5": 0.30,
                "max_ma20_dev": 1.25, "max_hi60": 0.98, "min_pass_score": 38},
 }
+
+# ============================================================
+# 0-A. 시그널 가중치 외부 파일 관리 (weights.json)
+# ============================================================
+WEIGHTS_FILE = "weights.json"
+
+DEFAULT_WEIGHTS = {
+    "s1_strong": 18, "s1_weak": 9,
+    "s2_strong": 14, "s2_weak": 7,
+    "s2t_strong": 5, "s2t_weak": 3,
+    "s3_strong": 25, "s3_weak": 15,
+    "s4": 12,
+    "s5": 5,
+    "rsi_good": 5, "rsi_oversold": 3, "rsi_extreme": 2,
+    "min_pass_score": 38,
+    "_updated": "초기값",
+    "_note": "백테스트 결과 기반 자동 업데이트"
+}
+
+def load_weights() -> dict:
+    if os.path.exists(WEIGHTS_FILE):
+        try:
+            with open(WEIGHTS_FILE, "r", encoding="utf-8") as f:
+                w = json.load(f)
+            # 누락된 키는 기본값으로 채움
+            for k, v in DEFAULT_WEIGHTS.items():
+                if k not in w:
+                    w[k] = v
+            return w
+        except:
+            pass
+    return DEFAULT_WEIGHTS.copy()
+
+def save_weights(w: dict):
+    w["_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(WEIGHTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(w, f, ensure_ascii=False, indent=2)
+
+# 앱 시작 시 가중치 로딩
+W = load_weights()
 
 # ============================================================
 # 0. 포트폴리오 영구 저장
@@ -332,6 +373,7 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
     OUT = {
         "score": 0, "grade": "F", "signals": [],
         "pass": False, "buy_min": 0.0, "buy_max": 0.0,
+        "target": 0.0, "stop": 0.0,
         "rsi": 50.0, "current": 0.0,
         "s1": False, "s2": False, "s3": False, "s4": False, "s5": False,
     }
@@ -412,7 +454,7 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         setup_strong = 0   # 강한 셋업 수
         trigger_hits = 0   # 트리거 발화 수
 
-        # ── [S1] 변동성 수축 (BB) — 예측 셋업 ──
+        # ── [S1] BB수축 — 가산점 전용 (백테스트: 리프트 -0.11%, 통과조건 제외) ──
         bb_std   = cl.rolling(20).std()
         bb_mean  = cl.rolling(20).mean().replace(0, np.nan)
         bb_width = (bb_std * 2) / bb_mean
@@ -421,86 +463,70 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
         s1 = False
         if bw_avg > 0 and bw_now > 0:
             if bw_now < bw_avg * 0.80:
-                s1 = True; setup_hits += 1; setup_strong += 1; score += 25
-                OUT["signals"].append(
-                    f"✅ [S1] 변동성 강수축 — 폭발 직전 응축 ({bw_now:.3f} < {bw_avg*0.80:.3f})")
+                s1 = True; setup_hits += 1; setup_strong += 1; score += W['s1_strong']
+                OUT["signals"].append(f"✅ [S1] 변동성 강수축 ({bw_now:.3f} < {bw_avg*0.80:.3f})")
             elif bw_now < bw_avg * 0.92:
-                s1 = True; setup_hits += 1; score += 12
-                OUT["signals"].append(
-                    f"🔶 [S1] 변동성 수축 진행 ({bw_now:.3f} < {bw_avg*0.92:.3f})")
+                s1 = True; setup_hits += 1; score += W['s1_weak']
+                OUT["signals"].append(f"🔶 [S1] 변동성 수축 진행 ({bw_now:.3f} < {bw_avg*0.92:.3f})")
             else:
                 OUT["signals"].append("⬜ [S1] 변동성 수축 없음")
         else:
             OUT["signals"].append("⬜ [S1] 변동성 계산 불가")
         OUT["s1"] = s1
 
-        # ── [S2] 거래량 눌림 (셋업) — 기준 강화 ──
-        # 진짜 매집은 거래량이 MA20 대비 60% 이하로 마름
-        # 0.75~0.90 구간은 그냥 "평범한 날" — 셋업으로 인정 안 함
+        # ── [S2] 거래량 눌림 — 가산점 전용 (백테스트: 리프트 -0.12%, 통과조건 제외) ──
         vol_ma5  = _safe_float(vo.rolling(5).mean().iloc[-1])
         vol_ma20 = _safe_float(vo.rolling(20).mean().iloc[-1])
         vol_now  = _safe_float(vo.iloc[-1])
-
         s2 = False
         if vol_ma20 > 0 and vol_ma5 < vol_ma20 * 0.65:
-            s2 = True; setup_hits += 1; setup_strong += 1; score += 20
-            OUT["signals"].append(
-                f"✅ [S2] 거래량 강한 눌림(매집) — 매도세 완전 소진 ({vol_ma5/vol_ma20*100:.0f}% of MA20)")
+            s2 = True; setup_hits += 1; setup_strong += 1; score += W['s2_strong']
+            OUT["signals"].append(f"✅ [S2] 거래량 강한 눌림 ({vol_ma5/vol_ma20*100:.0f}% of MA20)")
         elif vol_ma20 > 0 and vol_ma5 < vol_ma20 * 0.80:
-            s2 = True; setup_hits += 1; score += 10
-            OUT["signals"].append(
-                f"🔶 [S2] 거래량 눌림 ({vol_ma5/vol_ma20*100:.0f}% of MA20)")
+            s2 = True; setup_hits += 1; score += W['s2_weak']
+            OUT["signals"].append(f"🔶 [S2] 거래량 눌림 ({vol_ma5/vol_ma20*100:.0f}% of MA20)")
         else:
             OUT["signals"].append(f"⬜ [S2] 거래량 눌림 없음 ({vol_ma5/vol_ma20*100:.0f}% of MA20)")
         OUT["s2"] = s2
-
-        # S2T — 거래량 증가 트리거: 기준 강화 (1.5x → 2.0x)
         if vol_ma5 > 0 and vol_now > vol_ma5 * 2.0:
-            trigger_hits += 1; score += 10
-            OUT["signals"].append(
-                f"➕ [S2T] 거래량 폭발 트리거 ({vol_now/vol_ma5*100:.0f}% of MA5)")
+            trigger_hits += 1; score += W['s2t_strong']
+            OUT["signals"].append(f"➕ [S2T] 거래량 폭발 ({vol_now/vol_ma5*100:.0f}% of MA5)")
         elif vol_ma5 > 0 and vol_now > vol_ma5 * 1.50:
-            trigger_hits += 1; score += 5
-            OUT["signals"].append(
-                f"➕ [S2T] 거래량 증가 ({vol_now/vol_ma5*100:.0f}% of MA5)")
+            trigger_hits += 1; score += W['s2t_weak']
+            OUT["signals"].append(f"➕ [S2T] 거래량 증가 ({vol_now/vol_ma5*100:.0f}% of MA5)")
 
-        # ── [S3] 추세 눌림목 — 기준 강화 ──
-        # near_ma20_7 단독(추세 미완)은 셋업 인정 제거 — 박스권 오탐 원인
-        # 반드시 상승추세(ma20 > ma60) 확인 후에만 눌림목 인정
+        # ── [S3] 정배열+MA20 눌림목 — 핵심 진입 신호 (백테스트: 조합시 양수) ──
         aligned_full = ma5 > 0 and ma20 > 0 and ma60 > 0 and ma5 > ma20 > ma60
         midterm_up   = ma20 > 0 and ma60 > 0 and ma20 > ma60
         near_ma20_5  = ma20 > 0 and current > 0 and abs(current - ma20) / ma20 <= 0.05
         s3 = False
         if aligned_full and near_ma20_5:
-            s3 = True; setup_hits += 1; setup_strong += 1; score += 25
-            OUT["signals"].append("✅ [S3] 완전 정배열 + MA20 눌림목 — 최적 매수 타이밍")
+            s3 = True; setup_hits += 1; setup_strong += 1; score += W['s3_strong']
+            OUT["signals"].append("✅ [S3] 완전 정배열 + MA20 눌림목 ★핵심진입")
         elif midterm_up and near_ma20_5:
-            s3 = True; setup_hits += 1; score += 12
+            s3 = True; setup_hits += 1; score += W['s3_weak']
             OUT["signals"].append("🔶 [S3] 중기 상승추세 + MA20 눌림목")
         else:
             near_str = f"{abs(current-ma20)/ma20*100:.1f}%" if ma20 > 0 and current > 0 else "-"
             OUT["signals"].append(f"⬜ [S3] 추세 눌림목 없음 (MA20 이격 {near_str})")
         OUT["s3"] = s3
 
-        # ── [S4] RSI 강세 다이버전스 (트리거) — 저점 인덱스 비교 방식 ──
-        # 슬라이싱 방식(전반/후반 단순 비교)보다 실제 저점을 찾아 비교해 안정적
+        # ── [S4] RSI 강세 다이버전스 — 핵심 진입 신호 (백테스트: 유일한 양수 리프트 조합) ──
         s4 = False
         try:
             if len(cl) >= 20:
                 pw = cl.iloc[-20:]
                 rw = rsi_s.iloc[-20:]
-                # 전반 10봉, 후반 10봉에서 각각 실제 저점 인덱스 탐색
                 i1 = pw.iloc[:10].idxmin()
                 i2 = pw.iloc[10:].idxmin()
                 p_low1 = _safe_float(pw.loc[i1])
                 p_low2 = _safe_float(pw.loc[i2])
                 r_low1 = _safe_float(rw.loc[i1], 50.0)
                 r_low2 = _safe_float(rw.loc[i2], 50.0)
-                # 가격은 더 낮은 저점, RSI는 더 높은 저점 → 강세 다이버전스
                 s4 = (p_low2 < p_low1) and (r_low2 > r_low1 + 3)
                 if s4:
-                    trigger_hits += 1; score += 12
-                    OUT["signals"].append(f"✅ [S4] RSI 강세 다이버전스 — 반등 임박 (저점↓ RSI↑)")
+                    trigger_hits += 1; score += W['s4']
+                    OUT["signals"].append(f"✅ [S4] RSI 강세 다이버전스 (저점↓ RSI↑)")
                 else:
                     OUT["signals"].append("⬜ [S4] RSI 다이버전스 없음")
             else:
@@ -531,7 +557,7 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
                     bull_rev = c2_v < o2 and c1_v > o1
                     s5 = hammer or bull_rev
                     if s5:
-                        trigger_hits += 1; score += 8
+                        trigger_hits += 1; score += W['s5']
                         pat = "망치형" if hammer else "양봉전환"
                         OUT["signals"].append(f"✅ [S5] {pat} 캔들 — 단기 반등 신호")
                     else:
@@ -541,84 +567,83 @@ def quant_predict(df: pd.DataFrame, market: str = "KR") -> dict:
             OUT["signals"].append(f"⬜ [S5] 캔들 패턴 계산 실패 ({e5})")
         OUT["s5"] = s5
 
-        # ── RSI 구간 보너스 — 기준 강화 ──
-        # 35~55는 "평범"한 구간 → 가산점 제거, 진짜 저평가 구간만 보너스
-        # 40~50: 건강한 눌림 +8점 / 30~40: 과매도 회복 기대 +5점 / 30 미만: 반등 기대 +3점
-        if 40 <= rsi <= 50:
-            score += 8
-            OUT["signals"].append(f"✅ RSI 건강한 눌림 구간 ({rsi:.1f})")
+        # ── RSI 구간 보너스 ──
+        if 40 <= rsi <= 55:
+            score += W['rsi_good']
+            OUT["signals"].append(f"✅ RSI 매수 구간 ({rsi:.1f})")
         elif 30 <= rsi < 40:
-            score += 5
-            OUT["signals"].append(f"🔶 RSI 과매도 회복 구간 ({rsi:.1f})")
+            score += W['rsi_oversold']
+            OUT["signals"].append(f"🔶 RSI 과매도 ({rsi:.1f})")
         elif rsi < 30:
-            score += 3
-            OUT["signals"].append(f"🔶 RSI 극과매도 — 반등 기대 ({rsi:.1f})")
+            score += W['rsi_extreme']
+            OUT["signals"].append(f"🔶 RSI 극과매도 ({rsi:.1f})")
         else:
             OUT["signals"].append(f"⬜ RSI 보너스 없음 ({rsi:.1f})")
 
-        # ── 매수구간 ──
-        raw_low  = min(ma20, ma10) * 0.985 if min(ma20, ma10) > 0 else 0
-        raw_high = max(ma20, ma5)  * 1.010 if max(ma20, ma5)  > 0 else 0
-        if current > 0 and raw_low > 0 and raw_high > 0:
-            cap_high = current * 1.05
-            cap_low  = current * 0.90
-            buy_low  = max(min(raw_low,  cap_high), cap_low)
-            buy_high = max(min(raw_high, cap_high), buy_low)
-        elif current > 0:
-            buy_low, buy_high = current * 0.97, current * 1.02
-        elif raw_low > 0 and raw_high > 0:
-            buy_low, buy_high = raw_low, raw_high
-        else:
-            buy_low = buy_high = 0.0
-        if (buy_low <= 0 or buy_high <= 0) and current > 0:
-            buy_low, buy_high = current * 0.97, current * 1.02
+        # ── 목표가/손절가 — ATR+BB+60일고점 중간값 ──
+        try:
+            hi_col = df["high"].astype(float); lo_col = df["low"].astype(float)
+            tr = pd.concat([
+                hi_col - lo_col,
+                (hi_col - cl.shift()).abs(),
+                (lo_col - cl.shift()).abs()
+            ], axis=1).max(axis=1)
+            atr    = _safe_float(tr.rolling(14).mean().iloc[-1])
+            hi60_t = _safe_float(cl.rolling(60).max().iloc[-1])
+            t1     = hi60_t if hi60_t > current * 1.03 else current * 1.10
+            std20  = _safe_float(cl.rolling(20).std().iloc[-1])
+            bb_up  = ma20 + std20 * 2
+            t2     = bb_up if bb_up > current * 1.05 else ma20 + std20 * 2.5
+            t3     = current + atr * 3
+            cands  = sorted([t for t in [t1, t2, t3] if t > current])
+            ft     = cands[len(cands)//2] if len(cands)>=2 else (cands[0] if cands else current*1.07)
+            ft     = max(ft, current*1.05); ft = min(ft, current*1.20)
+            stop_t = min(current - atr*1.5, current*0.97)
+            buy_low  = max(current*0.97, current - atr*0.5)
+            buy_high = min(current*1.02, current + atr*0.3)
+        except:
+            ft=current*1.07; stop_t=current*0.93
+            buy_low=current*0.97; buy_high=current*1.02
 
         OUT["buy_min"] = round(buy_low,  4)
         OUT["buy_max"] = round(buy_high, 4)
+        OUT["target"]  = round(ft, 4) if 'ft' in dir() else round(current*1.08, 4)
+        OUT["stop"]    = round(stop_t, 4) if 'stop_t' in dir() else round(current*0.93, 4)
         OUT["score"]   = int(score)
 
-        # ── 통과 게이트 (예측형) ──
-        # 추격 방지 = 상단 rejected 필터 담당
-        # setup_hits>=1 필수 → 트리거 점수만으로 셋업 없이 통과하는 노이즈 차단
-        # setup_strong>=1 OR trigger>=1 → 약한 셋업 누적만으로 통과 방지
-        qual_gate = (setup_strong >= 1) or (trigger_hits >= 1)
+        # ── 통과 게이트 — 실제 백테스트 기반 재설계 ──
+        # S3(정배열눌림목) OR S4(RSI다이버전스) 최소 1개 필수
+        # 실제 KRX 199종목 149,653봉 백테스트에서 유일하게 조합시 양수 리프트
+        # S1/S2/S5/변화감지는 통과조건 제외, 점수 가산점만 유지
+        core_pass = s3 or s4
+        OUT["pass"] = (not rejected) and core_pass and (score >= W['min_pass_score'])
 
-        # ── 변화감지: 오늘 처음으로 켜진 신호 확인 ──
-        # "셋업이 오늘 처음 성립한 종목"만 선별 → 1~2일 내 터질 확률 높음
+        # 변화감지 — 참고 표시만 (통과조건 아님)
         try:
-            bbw_s   = (cl.rolling(20).std()*2) / cl.rolling(20).mean().replace(0, np.nan)
-            bw_t    = _safe_float(bbw_s.iloc[-1]);  bw_y = _safe_float(bbw_s.iloc[-2])
-            bw_av   = _safe_float(bbw_s.rolling(20).mean().iloc[-1])
-            bb_t    = bw_av>0 and bw_t>0 and bw_t<bw_av*0.85
-            bb_y    = bw_av>0 and bw_y>0 and bw_y<bw_av*0.85
-
-            vm5_t   = _safe_float(vo.rolling(5).mean().iloc[-1])
-            vm5_y   = _safe_float(vo.rolling(5).mean().iloc[-2])
-            vm20_v  = _safe_float(vo.rolling(20).mean().iloc[-1])
-            vd_t    = vm20_v>0 and vm5_t<vm20_v*0.65
-            vd_y    = vm20_v>0 and vm5_y<vm20_v*0.65
-
-            ma20_y  = _safe_float(cl.rolling(20).mean().iloc[-2])
-            cur_y   = _safe_float(cl.iloc[-2])
-            n5_t    = ma20>0 and current>0 and abs(current-ma20)/ma20<=0.05
-            n5_y    = ma20_y>0 and cur_y>0 and abs(cur_y-ma20_y)/ma20_y<=0.05
-            up_t    = ma5>0 and ma20>0 and ma60>0 and ma20>ma60
-
-            # 오늘 새로 켜진 신호
-            new_sigs = []
+            bbw_s  = (cl.rolling(20).std()*2)/cl.rolling(20).mean().replace(0,np.nan)
+            bw_t   = _safe_float(bbw_s.iloc[-1]); bw_y=_safe_float(bbw_s.iloc[-2])
+            bw_av  = _safe_float(bbw_s.rolling(20).mean().iloc[-1])
+            bb_t   = bw_av>0 and bw_t>0 and bw_t<bw_av*0.85
+            bb_y   = bw_av>0 and bw_y>0 and bw_y<bw_av*0.85
+            vm5_t  = _safe_float(vo.rolling(5).mean().iloc[-1])
+            vm5_y  = _safe_float(vo.rolling(5).mean().iloc[-2])
+            vm20_v = _safe_float(vo.rolling(20).mean().iloc[-1])
+            vd_t   = vm20_v>0 and vm5_t<vm20_v*0.65
+            vd_y   = vm20_v>0 and vm5_y<vm20_v*0.65
+            ma20_y = _safe_float(cl.rolling(20).mean().iloc[-2])
+            cur_y  = _safe_float(cl.iloc[-2])
+            n5_t   = ma20>0 and current>0 and abs(current-ma20)/ma20<=0.05
+            n5_y   = ma20_y>0 and cur_y>0 and abs(cur_y-ma20_y)/ma20_y<=0.05
+            up_t   = ma5>0 and ma20>0 and ma60>0 and ma20>ma60
+            new_sigs=[]
             if bb_t and not bb_y:          new_sigs.append("BB수축시작")
             if vd_t and not vd_y:          new_sigs.append("거래량눌림시작")
             if n5_t and not n5_y and up_t: new_sigs.append("눌림목진입")
-
-            existing = sum([bb_t, vd_t, n5_t and up_t])
-            change_detected = len(new_sigs)>=1 and existing>=2
-            if change_detected:
-                OUT["signals"].append(f"🔔 변화감지: {','.join(new_sigs)} — 오늘 처음 셋업 성립")
+            existing=sum([bb_t,vd_t,n5_t and up_t])
+            if len(new_sigs)>=1 and existing>=2:
+                OUT["signals"].append(f"🔔 참고: {','.join(new_sigs)} 오늘 처음 감지")
         except:
-            change_detected = False
-
-        # 통과 조건: 변화감지 OR 기존 강한 셋업
-        OUT["pass"] = (not rejected) and (setup_hits >= 1) and qual_gate and (score >= th["min_pass_score"]) and change_detected
+            pass
 
         # ── 등급 ── 셋업 강도 + 트리거 유무로 계층화
         if setup_strong >= 2 and trigger_hits >= 1:
@@ -715,8 +740,8 @@ def scan_kr() -> tuple:
             "현재가":   int(price),
             "RSI":      round(r["rsi"], 1),
             "매수구간": f"₩{bmin:,} ~ ₩{bmax:,}",
-            "목표가":   int(price * 1.08),
-            "손절가":   int(price * 0.93),
+            "목표가":   int(r["target"]) if r["target"] > 0 else int(price * 1.08),
+            "손절가":   int(r["stop"])   if r["stop"]   > 0 else int(price * 0.93),
             "signals":  r["signals"],
             "source":   src,
             "s_flags":  [r["s1"], r["s2"], r["s3"], r["s4"], r["s5"]],
@@ -759,8 +784,8 @@ def scan_us() -> tuple:
             "현재가":   round(price, 2),
             "RSI":      round(r["rsi"], 1),
             "매수구간": f"{_uf(price*0.97)} ~ {_uf(price*1.02)}",
-            "목표가":   round(price * 1.08, 2),
-            "손절가":   round(price * 0.93, 2),
+            "목표가":   round(r["target"], 2) if r["target"] > 0 else round(price * 1.08, 2),
+            "손절가":   round(r["stop"],   2) if r["stop"]   > 0 else round(price * 0.93, 2),
             "signals":  r["signals"],
             "source":   src,
             "s_flags":  [r["s1"], r["s2"], r["s3"], r["s4"], r["s5"]],
@@ -799,8 +824,8 @@ def scan_crypto() -> tuple:
                 "현재가":   c,
                 "RSI":      round(r["rsi"], 1),
                 "매수구간": f"₩{int(c*0.97):,} ~ ₩{int(c*1.02):,}",
-                "목표가":   round(c * 1.10, 0),
-                "손절가":   round(c * 0.93, 0),
+                "목표가":   round(r["target"], 0) if r["target"] > 0 else round(c * 1.10, 0),
+                "손절가":   round(r["stop"],   0) if r["stop"]   > 0 else round(c * 0.93, 0),
                 "signals":  r["signals"],
                 "s_flags":  [r["s1"], r["s2"], r["s3"], r["s4"], r["s5"]],
             }
@@ -836,6 +861,9 @@ def get_portfolio_data(name: str) -> dict:
             # ★ 매수구간 항상 실시간 curr 기준으로만 계산 (OHLCV MA 기준 사용 안 함)
             buy_min = int(curr * 0.97) if curr > 0 else 0
             buy_max = int(curr * 1.02) if curr > 0 else 0
+            # ATR 기반 목표가/손절가 (quant_predict에서 계산된 값 우선)
+            tgt = int(r["target"]) if r.get("target",0) > curr > 0 else int(curr * 1.08) if curr > 0 else 0
+            stp = int(r["stop"])   if r.get("stop",0)   > 0        else int(curr * 0.93) if curr > 0 else 0
 
             return {
                 "label":    f"{name} ({label})",
@@ -844,8 +872,8 @@ def get_portfolio_data(name: str) -> dict:
                 "grade":    r["grade"],
                 "rsi":      round(r["rsi"], 1),
                 "currency": "KRW",
-                "stop":     int(curr * 0.93) if curr > 0 else 0,
-                "target":   int(curr * 1.08) if curr > 0 else 0,
+                "stop":     stp,
+                "target":   tgt,
                 "buy_min":  buy_min,
                 "buy_max":  buy_max,
                 "source":   src + ("⚠️지연" if is_ohlcv_fallback else ""),
@@ -853,11 +881,12 @@ def get_portfolio_data(name: str) -> dict:
                 "signals":  r["signals"],
             }
         if price > 0:
+            # OHLCV 없으면 ATR 계산 불가 → 고정값 fallback (표시용)
             return {
                 "label": f"{name} ({src}·지표없음)", "curr": price,
                 "score": 0, "grade": "-", "rsi": 50.0, "currency": "KRW",
                 "stop": int(price * 0.93), "target": int(price * 1.08),
-                "buy_min": 0.0, "buy_max": 0.0,
+                "buy_min": int(price*0.97), "buy_max": int(price*1.02),
                 "source": src, "ok": not is_ohlcv_fallback, "signals": [],
             }
         return {"label": None, "curr": 0, "score": 0, "grade": "F",
@@ -911,6 +940,8 @@ def get_portfolio_data(name: str) -> dict:
         buy_min = _usd_round(curr * 0.97)
         buy_max = _usd_round(curr * 1.02)
 
+        tgt_us = _usd_round(r["target"]) if r.get("target",0) > curr > 0 else _usd_round(curr * 1.08)
+        stp_us = _usd_round(r["stop"])   if r.get("stop",0)   > 0        else _usd_round(curr * 0.93)
         return {
             "label":    f"{name} ({src})",
             "curr":     _usd_round(curr),
@@ -918,8 +949,8 @@ def get_portfolio_data(name: str) -> dict:
             "grade":    r["grade"],
             "rsi":      round(r["rsi"], 1),
             "currency": "USD",
-            "stop":     _usd_round(curr * 0.93),
-            "target":   _usd_round(curr * 1.08),
+            "stop":     stp_us,
+            "target":   tgt_us,
             "buy_min":  buy_min,
             "buy_max":  buy_max,
             "source":   src,
@@ -927,6 +958,7 @@ def get_portfolio_data(name: str) -> dict:
             "signals":  r["signals"],
         }
     if price > 0:
+        # OHLCV 없으면 ATR 계산 불가 → 고정값 fallback (표시용)
         return {
             "label": f"{name} ({src}·지표없음)", "curr": round(price, 4),
             "score": 0, "grade": "-", "rsi": 50.0, "currency": "USD",
@@ -956,8 +988,8 @@ def get_portfolio_data(name: str) -> dict:
                     "grade":    r["grade"],
                     "rsi":      round(r["rsi"], 1),
                     "currency": "KRW",
-                    "stop":     round(c * 0.93, 0),
-                    "target":   round(c * 1.10, 0),
+                    "stop":     round(r["stop"], 0)   if r.get("stop",0)   > 0       else round(c * 0.93, 0),
+                    "target":   round(r["target"], 0) if r.get("target",0) > c > 0 else round(c * 1.10, 0),
                     "buy_min":  r["buy_min"],
                     "buy_max":  r["buy_max"],
                     "source":   coin_src,
@@ -991,10 +1023,10 @@ st.title("🚀 Tae's Quant 폭등 예측 스캐너")
 
 # ★ v7 캡션 — 실제 로직과 일치
 st.caption(
-    "📌 예측 모델 (추격매수 아님) | "
-    "셋업(예측): BB수축·거래량눌림·추세눌림목 — 셋업 ≥1 + 점수 38↑ 통과 | "
-    "트리거(가점): 거래량증가·RSI다이버전스·반등캔들 | "
-    "v7: 셋업/트리거 분리·단계별 가점·추격가드 유지"
+    "📌 매수 검토 후보 탐지기 (추격매수 아님) | "
+    "핵심진입: S3 정배열눌림목 OR S4 RSI다이버전스 필수 | "
+    "가산점: S1 BB수축·S2 거래량눌림·S5 캔들 | "
+    "실제 KRX 199종목 백테스트 기반 재설계 (2023~)"
 )
 
 # ── 수동 재스캔 버튼 ──
@@ -1279,3 +1311,936 @@ def render_cards(placeholder, title: str, data: list, currency: str):
 render_cards(ph_us,   "🇺🇸 해외 폭등 예측 TOP 3",  us_top3,     "USD")
 render_cards(ph_coin, "🪙 코인 폭등 예측 TOP 3",    crypto_top3, "KRW")
 render_cards(ph_kr,   "🔥 국내 폭등 예측 TOP 3",    kr_top3,     "KRW")
+
+# ============================================================
+# 11. ★ 백테스트 탭 — 실제 KRX 데이터로 S1~S5 검증
+# ============================================================
+st.divider()
+st.header("🔬 시그널 백테스트 (실제 KRX 데이터)")
+st.caption("실제 과거 OHLCV 데이터로 S1~S5 각각의 예측력을 검증합니다.")
+
+with st.expander("⚙️ 백테스트 설정", expanded=True):
+    bt_col1, bt_col2, bt_col3 = st.columns(3)
+    bt_universe = bt_col1.selectbox(
+        "종목 유니버스",
+        ["코스피200 전체(자동)", "코스피100(자동)", "직접입력"],
+        index=0,
+    )
+    bt_codes_input = bt_col1.text_input(
+        "직접입력 시 종목코드 (쉼표 구분)",
+        value="005930,000660,035420,005380,051910,035720,000270,028260,012330,066570",
+        disabled=(bt_universe != "직접입력"),
+    )
+    bt_start   = bt_col2.text_input("시작일", value="2023-01-01")
+    bt_max_n   = bt_col2.number_input("최대 종목수 (속도 조절)", min_value=10, max_value=200, value=100, step=10)
+    bt_run     = bt_col3.button("🚀 백테스트 실행", type="primary", use_container_width=True)
+    st.caption("⚠️ 코스피200 전체 + 2년치는 수분 소요될 수 있어요. 최대 종목수로 속도 조절하세요.")
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_kospi200_codes(top_n=200) -> list:
+    """KRX 상장 종목에서 시총 상위 N개 코드 자동 로딩"""
+    try:
+        listing = fdr.StockListing("KRX")
+        kospi = listing[listing["Market"].str.contains("KOSPI", na=False)]
+        kospi = kospi[kospi["Marcap"] > 0].nlargest(top_n, "Marcap")
+        return kospi["Code"].tolist()
+    except Exception as e:
+        st.warning(f"코스피 종목 로딩 실패: {e}")
+        return ["005930","000660","035420","005380","051910",
+                "035720","000270","028260","012330","066570"]
+
+if bt_run:
+    if bt_universe == "코스피200 전체(자동)":
+        bt_codes = load_kospi200_codes(top_n=bt_max_n)
+        st.info(f"📋 코스피 시총 상위 {len(bt_codes)}개 종목으로 백테스트")
+    elif bt_universe == "코스피100(자동)":
+        bt_codes = load_kospi200_codes(top_n=min(100, bt_max_n))
+        st.info(f"📋 코스피 시총 상위 {len(bt_codes)}개 종목으로 백테스트")
+    else:
+        bt_codes = [c.strip() for c in bt_codes_input.split(",") if c.strip()]
+        st.info(f"📋 직접 입력 {len(bt_codes)}개 종목으로 백테스트")
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def load_bt_ohlcv(code, start):
+        try:
+            df = fdr.DataReader(code, start=start)
+            if df is not None and len(df) >= 80:
+                df.columns = [c.lower() for c in df.columns]
+                return df
+        except:
+            pass
+        return None
+
+    def calc_signal_flags(df):
+        """각 봉에서 S1~S5 + 변화감지 플래그 계산 (벡터화)"""
+        cl = df["close"].astype(float)
+        hi = df["high"].astype(float)
+        lo = df["low"].astype(float)
+        vo = df["volume"].astype(float)
+
+        ma5  = cl.rolling(5).mean()
+        ma20 = cl.rolling(20).mean()
+        ma60 = cl.rolling(60).mean()
+
+        # S1: BB 수축
+        bb_std  = cl.rolling(20).std()
+        bb_mean = cl.rolling(20).mean().replace(0, np.nan)
+        bbw     = (bb_std * 2) / bb_mean
+        bw_avg  = bbw.rolling(20).mean()
+        s1_strong = (bbw < bw_avg * 0.80).fillna(False).astype(bool)
+        s1_weak   = ((bbw < bw_avg * 0.92).fillna(False).astype(bool)) & ~s1_strong
+        s1 = s1_strong | s1_weak
+
+        # S2: 거래량 눌림
+        vm5  = vo.rolling(5).mean()
+        vm20 = vo.rolling(20).mean()
+        s2_strong = (vm5 < vm20 * 0.65).fillna(False).astype(bool)
+        s2_weak   = ((vm5 < vm20 * 0.80).fillna(False).astype(bool)) & ~s2_strong
+        s2 = s2_strong | s2_weak
+
+        # S3: 정배열 + MA20 눌림목
+        aligned = ((ma5 > ma20) & (ma20 > ma60)).fillna(False).astype(bool)
+        near    = (((cl - ma20).abs() / ma20) <= 0.05).fillna(False).astype(bool)
+        s3 = aligned & near
+
+        # S4: RSI 다이버전스 — 벡터화 (20봉 rolling, 속도 개선)
+        delta  = cl.diff()
+        gain_s = delta.clip(lower=0).rolling(14).mean()
+        loss_s = (-delta.clip(upper=0)).rolling(14).mean()
+        rsi    = 100 - 100 / (1 + gain_s / loss_s.replace(0, np.nan))
+        rsi_filled = rsi.fillna(50.0)
+
+        # 전반 10봉 최저가 / 후반 10봉 최저가 rolling 비교
+        # 전반: t-20~t-10 / 후반: t-10~t
+        p_low_prev = cl.rolling(20).apply(lambda x: x[:10].min(), raw=True)
+        p_low_now  = cl.rolling(20).apply(lambda x: x[10:].min(), raw=True)
+        r_low_prev = rsi_filled.rolling(20).apply(lambda x: x[:10].min(), raw=True)
+        r_low_now  = rsi_filled.rolling(20).apply(lambda x: x[10:].min(), raw=True)
+        s4 = ((p_low_now < p_low_prev) & (r_low_now > r_low_prev + 3)).fillna(False).astype(bool)
+
+        # S5: 양봉전환 캔들
+        op = df["open"].astype(float)
+        cl_shift = cl.shift(1).fillna(cl)
+        op_shift = op.shift(1).fillna(op)
+        bull_rev = ((cl_shift < op_shift) & (cl > op)).fillna(False).astype(bool)
+        body     = (cl - op).abs()
+        lower    = (op.clip(upper=cl) - lo)
+        upper    = (hi - op.clip(lower=cl))
+        hammer   = ((body > 0) & (lower > body * 2) & (upper < body * 0.5)).fillna(False).astype(bool)
+        s5 = bull_rev | hammer
+
+        # 변화감지: 오늘 켜짐 & 어제 꺼짐
+        # shift() 후 NaN → bool 변환 필수 (pandas ~연산 오류 방지)
+        bb_t = (bbw < bw_avg * 0.85).fillna(False).astype(bool)
+        bb_y = bb_t.shift(1).fillna(False).astype(bool)
+        vd_t = (vm5 < vm20 * 0.65).fillna(False).astype(bool)
+        vd_y = vd_t.shift(1).fillna(False).astype(bool)
+        n5_t = (near & (ma20 > ma60)).fillna(False).astype(bool)
+        n5_y = n5_t.shift(1).fillna(False).astype(bool)
+        new_bb   = bb_t & ~bb_y
+        new_vd   = vd_t & ~vd_y
+        new_n5   = n5_t & ~n5_y
+        existing = bb_t.astype(int) + vd_t.astype(int) + n5_t.astype(int)
+        new_any  = new_bb | new_vd | new_n5
+        change   = new_any & (existing >= 2)
+
+        return pd.DataFrame({
+            "s1": s1, "s1_strong": s1_strong,
+            "s2": s2, "s2_strong": s2_strong,
+            "s3": s3, "s4": s4, "s5": s5,
+            "change": change,
+            "close": cl, "rsi": rsi,
+        })
+
+    def calc_lift_sharpe(returns_on, returns_off, label):
+        """리프트, 샤프 계산"""
+        if len(returns_on) < 5:
+            return None
+        on_mean  = np.mean(returns_on)
+        off_mean = np.mean(returns_off)
+        lift     = on_mean - off_mean
+        on_std   = np.std(returns_on) if np.std(returns_on) > 0 else 1e-6
+        sharpe   = on_mean / on_std * np.sqrt(252)
+        wr       = sum(1 for r in returns_on if r > 0) / len(returns_on) * 100
+        t, p     = sp.ttest_ind(returns_on, returns_off) if len(returns_off) >= 5 else (0, 1)
+        return {"label": label, "n": len(returns_on),
+                "d1_avg": on_mean, "lift": lift, "sharpe": sharpe,
+                "wr": wr, "p": p}
+
+    with st.spinner("📊 실제 데이터 로딩 및 백테스트 계산 중..."):
+        all_rows = []
+        loaded_codes = []
+        progress = st.progress(0)
+        status_txt = st.empty()
+
+        def _bt_fetch(code):
+            """종목 하나 백테스트 행 반환"""
+            df = load_bt_ohlcv(code, bt_start)
+            if df is None or len(df) < 80:
+                return code, None
+            try:
+                flags = calc_signal_flags(df)
+                cl = df["close"].astype(float)
+                d1 = cl.pct_change(1).shift(-1) * 100
+                d2 = cl.pct_change(2).shift(-2) * 100
+                rows = []
+                for idx in range(60, len(df)-2):
+                    row = {
+                        "code": code,
+                        "date": df.index[idx],
+                        "d1": _safe_float(d1.iloc[idx]),
+                        "d2": _safe_float(d2.iloc[idx]),
+                    }
+                    for sig in ["s1","s1_strong","s2","s2_strong","s3","s4","s5","change"]:
+                        row[sig] = bool(flags[sig].iloc[idx])
+                    rows.append(row)
+                return code, rows
+            except Exception as e:
+                return code, None
+
+        # 병렬 로딩 (최대 20 workers)
+        with ThreadPoolExecutor(max_workers=20) as ex:
+            futures = {ex.submit(_bt_fetch, code): code for code in bt_codes}
+            done = 0
+            for fut in futures:
+                code = futures[fut]
+                try:
+                    c, rows = fut.result()
+                    if rows:
+                        all_rows.extend(rows)
+                        loaded_codes.append(c)
+                except: pass
+                done += 1
+                progress.progress(done / len(bt_codes))
+                status_txt.caption(f"로딩 중... {done}/{len(bt_codes)} ({len(loaded_codes)}개 성공)")
+
+        progress.empty()
+        status_txt.empty()
+
+    if not all_rows:
+        st.error("데이터를 불러올 수 없습니다.")
+    else:
+        bt_df = pd.DataFrame(all_rows)
+        total_days = len(bt_df)
+        st.success(f"✅ {len(loaded_codes)}개 종목 / {total_days:,}개 봉 로딩 완료")
+
+        # ── 시그널별 결과 테이블 ──
+        st.subheader("📊 S1~S5 실제 예측력")
+        st.caption("리프트 = ON 종목 D+2 평균 − OFF 종목 D+2 평균 / 샤프 = 연환산 / p<0.05 = 통계적으로 유의미")
+
+        results_table = []
+        sigs = [
+            ("s1",        "S1 BB수축(전체)",    "12~25"),
+            ("s1_strong", "S1 BB강수축",        "25"),
+            ("s2",        "S2 거래량눌림(전체)","10~20"),
+            ("s2_strong", "S2 거래량강눌림",    "20"),
+            ("s3",        "S3 정배열눌림목",    "12~25"),
+            ("s4",        "S4 RSI다이버전스",   "12"),
+            ("s5",        "S5 양봉전환",        "8"),
+            ("change",    "변화감지(오늘첫셋업)", "보정"),
+        ]
+
+        for sig_key, label, cur_score in sigs:
+            on_d1  = bt_df.loc[bt_df[sig_key]==True,  "d1"].dropna().tolist()
+            off_d1 = bt_df.loc[bt_df[sig_key]==False, "d1"].dropna().tolist()
+            on_d2  = bt_df.loc[bt_df[sig_key]==True,  "d2"].dropna().tolist()
+            off_d2 = bt_df.loc[bt_df[sig_key]==False, "d2"].dropna().tolist()
+            if len(on_d2) < 5: continue
+
+            lift_d2 = np.mean(on_d2) - np.mean(off_d2)
+            sharpe  = np.mean(on_d2) / (np.std(on_d2)+1e-6) * np.sqrt(252)
+            wr_d1   = sum(1 for r in on_d1 if r>0) / len(on_d1) * 100 if on_d1 else 0
+            wr_d2   = sum(1 for r in on_d2 if r>0) / len(on_d2) * 100
+            t,p     = sp.ttest_ind(on_d2, off_d2) if len(off_d2)>=5 else (0,1)
+            sig_flag = "✅" if p<0.05 and lift_d2>0 else ("❌" if lift_d2<0 else "⚠️")
+
+            results_table.append({
+                "시그널":    label,
+                "현재점수":  cur_score,
+                "발화횟수":  len(on_d2),
+                "D+1승률":   f"{wr_d1:.1f}%",
+                "D+2승률":   f"{wr_d2:.1f}%",
+                "D+2평균":   f"{np.mean(on_d2):+.2f}%",
+                "리프트":    f"{lift_d2:+.2f}%",
+                "샤프":      f"{sharpe:.2f}",
+                "p값":       f"{p:.4f}",
+                "유의성":    sig_flag,
+            })
+
+        if results_table:
+            result_df = pd.DataFrame(results_table)
+            st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+            # ── 과대/과소평가 분석 ──
+            st.subheader("📐 점수 적정성 분석")
+            cols = st.columns(3)
+            over, under, ok = [], [], []
+            for row in results_table:
+                try:
+                    lift = float(row["리프트"].replace("%",""))
+                    p    = float(row["p값"])
+                    # 현재점수 숫자 추출
+                    score_str = row["현재점수"].replace("~","-")
+                    score_num = int(score_str.split("-")[-1]) if "-" in score_str else int(score_str) if score_str.isdigit() else 15
+                    if p>0.05 or lift<0:
+                        over.append(f"{row['시그널']} ({row['현재점수']}점, 리프트{row['리프트']})")
+                    elif lift>1.0 and score_num<15:
+                        under.append(f"{row['시그널']} (리프트{row['리프트']}, 현재{row['현재점수']}점)")
+                    else:
+                        ok.append(row['시그널'])
+                except: pass
+
+            with cols[0]:
+                st.markdown("**⬇️ 과대평가 (점수 낮춰야)**")
+                for x in over: st.markdown(f"- {x}")
+                if not over: st.markdown("없음")
+            with cols[1]:
+                st.markdown("**⬆️ 과소평가 (점수 올려야)**")
+                for x in under: st.markdown(f"- {x}")
+                if not under: st.markdown("없음")
+            with cols[2]:
+                st.markdown("**✅ 적정**")
+                for x in ok: st.markdown(f"- {x}")
+
+            # ── 조합별 성과 ──
+            st.subheader("🔗 핵심 조합 성과")
+            combo_results = []
+            combos = [
+                ("S1+S2",       (bt_df["s1"]) & (bt_df["s2"])),
+                ("S1+S3",       (bt_df["s1"]) & (bt_df["s3"])),
+                ("S2+S3",       (bt_df["s2"]) & (bt_df["s3"])),
+                ("S1+S2+S3",    (bt_df["s1"]) & (bt_df["s2"]) & (bt_df["s3"])),
+                ("S1+S2+S5",    (bt_df["s1"]) & (bt_df["s2"]) & (bt_df["s5"])),
+                ("변화감지+S3", (bt_df["change"]) & (bt_df["s3"])),
+                ("S3+S4",       (bt_df["s3"]) & (bt_df["s4"])),
+                ("S1+S2+S3+S5", (bt_df["s1"]) & (bt_df["s2"]) & (bt_df["s3"]) & (bt_df["s5"])),
+            ]
+            base_d2 = bt_df["d2"].dropna().tolist()
+            base_wr = sum(1 for r in base_d2 if r>0)/len(base_d2)*100
+            combo_results.append({"조합":"전체(기준선)","발화수":len(base_d2),
+                                   "D+2평균":f"{np.mean(base_d2):+.2f}%",
+                                   "D+2승률":f"{base_wr:.1f}%","리프트":"기준","p값":"-"})
+            for name, mask in combos:
+                subset = bt_df.loc[mask, "d2"].dropna().tolist()
+                if len(subset) < 5: continue
+                avg = np.mean(subset); wr = sum(1 for r in subset if r>0)/len(subset)*100
+                lift = avg - np.mean(base_d2)
+                t,p = sp.ttest_ind(subset, base_d2)
+                combo_results.append({"조합":name,"발화수":len(subset),
+                                       "D+2평균":f"{avg:+.2f}%","D+2승률":f"{wr:.1f}%",
+                                       "리프트":f"{lift:+.2f}%","p값":f"{p:.4f}"})
+            st.dataframe(pd.DataFrame(combo_results), use_container_width=True, hide_index=True)
+
+            # ── 스캐너 전체 통과 조건 백테스트 ──
+            st.subheader("🎯 핵심: 스캐너 전체 통과 조건 vs 전체 비교")
+            st.caption("단독 시그널이 아닌 현재 스캐너가 실제로 통과시키는 종목의 D+2 성과")
+
+            def full_scanner_pass(row):
+                """현재 스캐너 통과 조건 재현 (백테스트 행 기준)"""
+                # 셋업 계산
+                sh = sum([row["s1"], row["s2"], row["s3"]])
+                ss = sum([row["s1_strong"], row["s2_strong"],
+                          (row["s3"] and row.get("s3_strong", row["s3"]))])
+                th = 0  # 트리거 (S4/S5는 별도 컬럼 없어서 0)
+
+                # 점수 재현 (현재 로직)
+                score = 0
+                if row["s1_strong"]: score += 25
+                elif row["s1"]:      score += 12
+                if row["s2_strong"]: score += 20
+                elif row["s2"]:      score += 10
+                if row["s3"]:        score += 25  # strong 가정
+                if row["s4"]:        score += 12; th += 1
+                if row["s5"]:        score += 8;  th += 1
+
+                qual = (ss >= 1) or (th >= 1)
+                return (sh >= 1) and qual and (score >= 38) and row["change"]
+
+            # s3_strong 컬럼 추가 (s3 발화 = strong으로 간주)
+            bt_df["s3_strong"] = bt_df["s3"]
+            bt_df["s2_strong_col"] = bt_df["s2_strong"]
+
+            scanner_mask = bt_df.apply(full_scanner_pass, axis=1)
+            scanner_pass = bt_df.loc[scanner_mask, "d2"].dropna().tolist()
+            scanner_fail = bt_df.loc[~scanner_mask, "d2"].dropna().tolist()
+            base_all     = bt_df["d2"].dropna().tolist()
+
+            sc_col1, sc_col2, sc_col3 = st.columns(3)
+            def show_metric(col, label, lst, baseline=None):
+                if not lst: return
+                avg = np.mean(lst)
+                wr  = sum(1 for g in lst if g>0)/len(lst)*100
+                ag  = np.mean([g for g in lst if g>0]) if any(g>0 for g in lst) else 0
+                al  = np.mean([g for g in lst if g<=0]) if any(g<=0 for g in lst) else 0
+                ev  = wr/100*ag + (1-wr/100)*al
+                lift_str = f"리프트 {avg-np.mean(baseline):+.2f}%p" if baseline else ""
+                col.metric(label, f"D+2 {avg:+.2f}%", f"승률 {wr:.1f}% | {lift_str}")
+                col.caption(f"종목수 {len(lst):,}개 | 기대값 {ev:+.2f}%")
+
+            show_metric(sc_col1, "📊 전체 기준선", base_all)
+            show_metric(sc_col2, "✅ 스캐너 통과", scanner_pass, base_all)
+            show_metric(sc_col3, "❌ 스캐너 탈락", scanner_fail, base_all)
+
+            if scanner_pass and scanner_fail:
+                from scipy import stats as sp2
+                t, p = sp2.ttest_ind(scanner_pass, scanner_fail)
+                lift = np.mean(scanner_pass) - np.mean(base_all)
+                wr_pass = sum(1 for g in scanner_pass if g>0)/len(scanner_pass)*100
+                wr_base = sum(1 for g in base_all if g>0)/len(base_all)*100
+
+                if p < 0.05 and lift > 0:
+                    verdict = "✅ 스캐너가 실제로 좋은 종목 선별 중"
+                    color   = "green"
+                elif p < 0.05 and lift < 0:
+                    verdict = "❌ 스캐너 통과 종목이 오히려 낮은 성과 — 로직 재설계 필요"
+                    color   = "red"
+                else:
+                    verdict = "⚠️ 통계적으로 유의미한 차이 없음 — 스캐너 효과 불분명"
+                    color   = "orange"
+
+                st.markdown(f"""
+<div style="background:#1e293b;padding:16px;border-radius:10px;border-left:5px solid {'#10b981' if color=='green' else '#ef4444' if color=='red' else '#f59e0b'};">
+  <b style="font-size:16px;">{verdict}</b><br><br>
+  통과 종목 D+2: <b>{np.mean(scanner_pass):+.2f}%</b> (승률 {wr_pass:.1f}%)<br>
+  전체 기준선:   <b>{np.mean(base_all):+.2f}%</b> (승률 {wr_base:.1f}%)<br>
+  리프트: <b>{lift:+.2f}%p</b> | t={t:.2f} | p={p:.4f}<br><br>
+  <b>통과 종목수: {len(scanner_pass):,}개 / 전체 {len(base_all):,}개 ({len(scanner_pass)/len(base_all)*100:.1f}%)</b>
+</div>""", unsafe_allow_html=True)
+
+                # 점수 구간별 성과
+                st.markdown("##### 점수 구간별 D+2 성과")
+                score_rows = []
+                def get_score(row):
+                    s = 0
+                    if row["s1_strong"]: s+=25
+                    elif row["s1"]:      s+=12
+                    if row["s2_strong"]: s+=20
+                    elif row["s2"]:      s+=10
+                    if row["s3"]:        s+=25
+                    if row["s4"]:        s+=12
+                    if row["s5"]:        s+=8
+                    return s
+
+                bt_df["score"] = bt_df.apply(get_score, axis=1)
+                for lo_s, hi_s, label in [(0,38,"<38(미통과)"),(38,50,"38~49"),(50,65,"50~64"),(65,200,"65+")]:
+                    sub = bt_df.loc[(bt_df["score"]>=lo_s)&(bt_df["score"]<hi_s), "d2"].dropna().tolist()
+                    if not sub: continue
+                    avg=np.mean(sub); wr=sum(1 for g in sub if g>0)/len(sub)*100
+                    ag=np.mean([g for g in sub if g>0]) if any(g>0 for g in sub) else 0
+                    al=np.mean([g for g in sub if g<=0]) if any(g<=0 for g in sub) else 0
+                    ev=wr/100*ag+(1-wr/100)*al
+                    score_rows.append({"점수구간":label,"종목수":len(sub),
+                                       "D+2평균":f"{avg:+.2f}%","승률":f"{wr:.1f}%","기대값":f"{ev:+.2f}%"})
+                if score_rows:
+                    st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # ── 시장환경 × 시총구간 × 조합 교차분석 ──
+            st.subheader("🔬 심층 분석: 시장환경 × 시총구간 × 조합")
+            st.caption("어떤 환경에서 어떤 종목에 어떤 신호가 먹히는지")
+
+            # 코스피 지수 로딩 (시장환경 구분용)
+            @st.cache_data(ttl=3600, show_spinner=False)
+            def load_kospi_index(start):
+                try:
+                    df_idx = fdr.DataReader("KS11", start=start)
+                    if df_idx is not None and len(df_idx) > 0:
+                        df_idx.columns = [c.lower() for c in df_idx.columns]
+                        df_idx["ret5"] = df_idx["close"].pct_change(5) * 100
+                        return df_idx
+                except: pass
+                return None
+
+            # 종목 시총 정보
+            @st.cache_data(ttl=86400, show_spinner=False)
+            def load_marcap_map():
+                try:
+                    listing = fdr.StockListing("KRX")
+                    return dict(zip(listing["Code"], listing["Marcap"]))
+                except: return {}
+
+            with st.spinner("시장환경/시총 데이터 로딩..."):
+                df_idx   = load_kospi_index(bt_start)
+                marcap_m = load_marcap_map()
+
+            if df_idx is not None and not bt_df.empty:
+                # 날짜 인덱스 맞추기
+                idx_ret = df_idx["ret5"].to_dict()
+
+                def get_market_env(date):
+                    try:
+                        ret = idx_ret.get(pd.Timestamp(date), None)
+                        if ret is None:
+                            # 가장 가까운 날짜
+                            dts = sorted(idx_ret.keys())
+                            ts  = pd.Timestamp(date)
+                            closest = min(dts, key=lambda x: abs(x-ts))
+                            ret = idx_ret[closest]
+                        if ret >  2: return "상승장(+2%↑)"
+                        if ret < -2: return "하락장(-2%↓)"
+                        return "횡보장"
+                    except: return "횡보장"
+
+                def get_marcap_tier(code):
+                    m = marcap_m.get(str(code), 0)
+                    if m >= 1e12:   return "대형(1조+)"
+                    if m >= 1e11:   return "중형(1천억~1조)"
+                    return "소형(~1천억)"
+
+                bt_df["env"]   = bt_df["date"].apply(get_market_env)
+                bt_df["tier"]  = bt_df["code"].apply(get_marcap_tier)
+
+                # 시장환경별 분석
+                st.markdown("##### 📈 시장환경별 신호 성과")
+                env_rows = []
+                for env in ["상승장(+2%↑)", "횡보장", "하락장(-2%↓)"]:
+                    sub = bt_df[bt_df["env"]==env]
+                    if len(sub) < 100: continue
+                    base_d2 = sub["d2"].dropna().tolist()
+                    for sig, label in [("s3","S3정배열"),("s4","S4RSI다이버"),
+                                       ("s1","S1BB수축"),("s2","S2거래량눌림")]:
+                        on  = sub.loc[sub[sig]==True,  "d2"].dropna().tolist()
+                        off = sub.loc[sub[sig]==False, "d2"].dropna().tolist()
+                        if len(on) < 20: continue
+                        lift = np.mean(on) - np.mean(off)
+                        t,p  = sp.ttest_ind(on, off) if len(off)>=5 else (0,1)
+                        wr   = sum(1 for g in on if g>0)/len(on)*100
+                        env_rows.append({
+                            "시장환경":env, "시그널":label, "발화수":len(on),
+                            "D+2평균":f"{np.mean(on):+.2f}%",
+                            "승률":f"{wr:.1f}%",
+                            "리프트":f"{lift:+.2f}%",
+                            "p값":f"{p:.3f}",
+                            "판정":"✅" if p<0.05 and lift>0 else ("❌" if p<0.05 and lift<0 else "⚠️"),
+                        })
+                if env_rows:
+                    st.dataframe(pd.DataFrame(env_rows), use_container_width=True, hide_index=True)
+
+                # 시총구간별 분석
+                st.markdown("##### 🏢 시총구간별 신호 성과")
+                tier_rows = []
+                for tier in ["대형(1조+)", "중형(1천억~1조)", "소형(~1천억)"]:
+                    sub = bt_df[bt_df["tier"]==tier]
+                    if len(sub) < 50: continue
+                    for sig, label in [("s3","S3정배열"),("s4","S4RSI다이버"),
+                                       ("s1","S1BB수축"),("s2","S2거래량눌림")]:
+                        on  = sub.loc[sub[sig]==True,  "d2"].dropna().tolist()
+                        off = sub.loc[sub[sig]==False, "d2"].dropna().tolist()
+                        if len(on) < 20: continue
+                        lift = np.mean(on) - np.mean(off)
+                        t,p  = sp.ttest_ind(on, off) if len(off)>=5 else (0,1)
+                        wr   = sum(1 for g in on if g>0)/len(on)*100
+                        tier_rows.append({
+                            "시총구간":tier, "시그널":label, "발화수":len(on),
+                            "D+2평균":f"{np.mean(on):+.2f}%",
+                            "승률":f"{wr:.1f}%",
+                            "리프트":f"{lift:+.2f}%",
+                            "p값":f"{p:.3f}",
+                            "판정":"✅" if p<0.05 and lift>0 else ("❌" if p<0.05 and lift<0 else "⚠️"),
+                        })
+                if tier_rows:
+                    st.dataframe(pd.DataFrame(tier_rows), use_container_width=True, hide_index=True)
+
+                # 교차분석: 시장환경 × 시총 × S3+S4 조합
+                st.markdown("##### 🔗 교차분석: 시장환경 × 시총 × S3+S4 조합")
+                cross_rows = []
+                for env in ["상승장(+2%↑)", "횡보장", "하락장(-2%↓)"]:
+                    for tier in ["대형(1조+)", "중형(1천억~1조)", "소형(~1천억)"]:
+                        sub = bt_df[(bt_df["env"]==env) & (bt_df["tier"]==tier)]
+                        if len(sub) < 30: continue
+                        base = sub["d2"].dropna().tolist()
+                        # S3+S4 조합
+                        combo = sub.loc[(sub["s3"]==True)&(sub["s4"]==True), "d2"].dropna().tolist()
+                        # S3만
+                        s3only = sub.loc[(sub["s3"]==True)&(sub["s4"]==False), "d2"].dropna().tolist()
+                        for label, lst in [("S3+S4조합",combo),("S3단독",s3only)]:
+                            if len(lst) < 5: continue
+                            lift = np.mean(lst) - np.mean(base)
+                            t,p  = sp.ttest_ind(lst, base) if len(base)>=5 else (0,1)
+                            cross_rows.append({
+                                "시장환경":env, "시총":tier, "조합":label,
+                                "발화수":len(lst),
+                                "기준선":f"{np.mean(base):+.2f}%",
+                                "조합D+2":f"{np.mean(lst):+.2f}%",
+                                "리프트":f"{lift:+.2f}%",
+                                "p값":f"{p:.3f}",
+                                "판정":"✅" if p<0.05 and lift>0 else ("❌" if p<0.05 and lift<0 else "⚠️"),
+                            })
+                if cross_rows:
+                    cross_df = pd.DataFrame(cross_rows)
+                    # 유의미한 것 상단 정렬
+                    cross_df["_lift_num"] = cross_df["리프트"].str.replace("%","").astype(float)
+                    cross_df = cross_df.sort_values("_lift_num", ascending=False).drop("_lift_num",axis=1)
+                    st.dataframe(cross_df, use_container_width=True, hide_index=True)
+
+                    # 최적 조건 요약
+                    best = cross_df.iloc[0] if len(cross_df)>0 else None
+                    if best is not None:
+                        st.info(f"📌 가장 좋은 조건: **{best['시장환경']}** × **{best['시총']}** × **{best['조합']}** → D+2 리프트 {best['리프트']}")
+            else:
+                st.warning("코스피 지수 데이터 로딩 실패 — 시장환경 분석 불가")
+
+            st.divider()
+
+            # ── 방향 A: 모멘텀 기반 신호 검증 ──
+            st.subheader("🚀 방향 A: 모멘텀 기반 신호 검증")
+            st.caption("이미 오르고 있는 종목 중 추가 상승 가능한 것 — 현재 스캐너와 반대 방향")
+
+            def momentum_pass(row):
+                """모멘텀 기반 통과 조건"""
+                # S1: BB 수축 없음 (모멘텀 있어야)
+                no_squeeze = not row["s1_strong"]
+                # S2: 거래량 감소 없음 (거래량 있어야)
+                no_vol_dry = not row["s2_strong"]
+                # S3: 정배열 (상승 추세)
+                uptrend = row["s3"]
+                # S4: RSI 다이버전스 (반등 신호)
+                rsi_ok = row["s4"]
+                # 기본: 정배열 + 거래량 있음 + RSI 다이버전스
+                return uptrend and no_vol_dry and rsi_ok
+
+            def momentum_pass_v2(row):
+                """모멘텀 v2: 정배열 + S5 양봉전환 (단순)"""
+                return row["s3"] and row["s5"] and not row["s2_strong"]
+
+            def momentum_pass_v3(row):
+                """모멘텀 v3: S3 + S4 조합"""
+                return row["s3"] and row["s4"]
+
+            mom_results = []
+            for label, fn in [
+                ("정배열+RSI다이버전스+거래량있음", momentum_pass),
+                ("정배열+양봉전환(거래량눌림제외)", momentum_pass_v2),
+                ("정배열+RSI다이버전스(단순)", momentum_pass_v3),
+            ]:
+                mask = bt_df.apply(fn, axis=1)
+                subset = bt_df.loc[mask, "d2"].dropna().tolist()
+                if len(subset) < 10: continue
+                avg=np.mean(subset); wr=sum(1 for g in subset if g>0)/len(subset)*100
+                ag=np.mean([g for g in subset if g>0]) if any(g>0 for g in subset) else 0
+                al=np.mean([g for g in subset if g<=0]) if any(g<=0 for g in subset) else 0
+                ev=wr/100*ag+(1-wr/100)*al
+                lift=avg-np.mean(base_all)
+                from scipy import stats as sp3
+                t,p=sp3.ttest_ind(subset, base_all)
+                mom_results.append({
+                    "조건":label,"종목수":len(subset),
+                    "D+2평균":f"{avg:+.2f}%","승률":f"{wr:.1f}%",
+                    "기대값":f"{ev:+.2f}%","리프트":f"{lift:+.2f}%",
+                    "p값":f"{p:.4f}",
+                    "판정":"✅유의미" if p<0.05 and lift>0 else ("❌역효과" if p<0.05 and lift<0 else "⚠️무의미"),
+                })
+            if mom_results:
+                st.dataframe(pd.DataFrame(mom_results), use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # ── 방향 B: 보유기간 연장 검증 (D+5, D+10) ──
+            st.subheader("📅 방향 B: 보유기간별 성과 (D+1~D+10)")
+            st.caption("현재 신호 체계가 더 긴 보유기간에서 유효한지 검증")
+
+            # D+5, D+10 수익률 계산
+            bt_loaded_map = {}
+            for code in loaded_codes:
+                df_tmp = load_bt_ohlcv(code, bt_start)
+                if df_tmp is not None:
+                    bt_loaded_map[code] = df_tmp
+
+            # 기존 bt_df에 D+5, D+10 추가
+            @st.cache_data(ttl=3600, show_spinner=False)
+            def calc_extended_returns(codes_tuple, start):
+                rows_ext = []
+                for code in codes_tuple:
+                    df_tmp = load_bt_ohlcv(code, start)
+                    if df_tmp is None or len(df_tmp) < 80: continue
+                    try:
+                        flags = calc_signal_flags(df_tmp)
+                        cl_tmp = df_tmp["close"].astype(float)
+                        d = {}
+                        for n in [1,2,3,5,7,10]:
+                            d[f"d{n}"] = cl_tmp.pct_change(n).shift(-n) * 100
+                        for idx in range(60, len(df_tmp)-11):
+                            row = {"code":code}
+                            for n in [1,2,3,5,7,10]:
+                                row[f"d{n}"] = _safe_float(d[f"d{n}"].iloc[idx])
+                            for sig in ["s1","s1_strong","s2","s2_strong","s3","s4","s5","change"]:
+                                row[sig] = bool(flags[sig].iloc[idx])
+                            rows_ext.append(row)
+                    except: pass
+                return pd.DataFrame(rows_ext)
+
+            with st.spinner("D+1~D+10 수익률 계산 중..."):
+                bt_ext = calc_extended_returns(tuple(loaded_codes), bt_start)
+
+            if not bt_ext.empty:
+                # 현재 스캐너 통과 조건 적용
+                bt_ext["scanner"] = bt_ext.apply(full_scanner_pass, axis=1)
+
+                hold_rows = []
+                for n in [1,2,3,5,7,10]:
+                    col = f"d{n}"
+                    if col not in bt_ext.columns: continue
+                    all_d  = bt_ext[col].dropna().tolist()
+                    pass_d = bt_ext.loc[bt_ext["scanner"]==True,  col].dropna().tolist()
+                    fail_d = bt_ext.loc[bt_ext["scanner"]==False, col].dropna().tolist()
+                    if not pass_d: continue
+                    from scipy import stats as sp4
+                    t,p = sp4.ttest_ind(pass_d, fail_d)
+                    lift = np.mean(pass_d) - np.mean(all_d)
+                    wr_pass = sum(1 for g in pass_d if g>0)/len(pass_d)*100
+                    wr_all  = sum(1 for g in all_d  if g>0)/len(all_d)*100
+                    hold_rows.append({
+                        "보유기간": f"D+{n}",
+                        "전체평균":  f"{np.mean(all_d):+.2f}%",
+                        "통과평균":  f"{np.mean(pass_d):+.2f}%",
+                        "전체승률":  f"{wr_all:.1f}%",
+                        "통과승률":  f"{wr_pass:.1f}%",
+                        "리프트":    f"{lift:+.2f}%",
+                        "p값":       f"{p:.4f}",
+                        "판정":      "✅유의미" if p<0.05 and lift>0 else ("❌역효과" if p<0.05 and lift<0 else "⚠️무의미"),
+                    })
+
+                if hold_rows:
+                    st.dataframe(pd.DataFrame(hold_rows), use_container_width=True, hide_index=True)
+
+                    # 모멘텀 전략도 같은 기간으로
+                    st.markdown("##### 모멘텀 전략 보유기간별 비교")
+                    bt_ext["momentum"] = bt_ext.apply(momentum_pass_v3, axis=1)
+                    mom_hold = []
+                    for n in [1,2,3,5,7,10]:
+                        col=f"d{n}"
+                        if col not in bt_ext.columns: continue
+                        all_d  = bt_ext[col].dropna().tolist()
+                        mom_d  = bt_ext.loc[bt_ext["momentum"]==True, col].dropna().tolist()
+                        cur_d  = bt_ext.loc[bt_ext["scanner"]==True,  col].dropna().tolist()
+                        if not mom_d: continue
+                        from scipy import stats as sp5
+                        t,p=sp5.ttest_ind(mom_d, all_d)
+                        lift=np.mean(mom_d)-np.mean(all_d)
+                        wr=sum(1 for g in mom_d if g>0)/len(mom_d)*100
+                        mom_hold.append({
+                            "보유기간":f"D+{n}",
+                            "기준선":f"{np.mean(all_d):+.2f}%",
+                            "현재스캐너":f"{np.mean(cur_d):+.2f}%" if cur_d else "-",
+                            "모멘텀전략":f"{np.mean(mom_d):+.2f}%",
+                            "모멘텀승률":f"{wr:.1f}%",
+                            "모멘텀리프트":f"{lift:+.2f}%",
+                            "p값":f"{p:.4f}",
+                            "판정":"✅" if p<0.05 and lift>0 else ("❌" if p<0.05 and lift<0 else "⚠️"),
+                        })
+                    if mom_hold:
+                        st.dataframe(pd.DataFrame(mom_hold), use_container_width=True, hide_index=True)
+
+                    # 최종 수정 방향 판정
+                    st.subheader("🏁 최종 수정 방향 판정")
+                    best_cur  = max([float(r["리프트"].replace("%","")) for r in hold_rows], default=-999)
+                    best_mom  = max([float(r["모멘텀리프트"].replace("%","")) for r in mom_hold], default=-999) if mom_hold else -999
+                    best_n_cur = next((r["보유기간"] for r in hold_rows if float(r["리프트"].replace("%",""))==best_cur), "?")
+                    best_n_mom = next((r["판정"] for r in mom_hold if float(r["모멘텀리프트"].replace("%",""))==best_mom), "?") if mom_hold else "?"
+
+                    if best_cur > 0.1 and best_cur > best_mom:
+                        direction = f"✅ 방향B 채택: 현재 로직 유지 + 보유기간 {best_n_cur}로 연장 (리프트 {best_cur:+.2f}%)"
+                        color = "#10b981"
+                    elif best_mom > 0.1 and best_mom > best_cur:
+                        direction = f"✅ 방향A 채택: 모멘텀 기반 신호로 전환 (리프트 {best_mom:+.2f}%)"
+                        color = "#3b82f6"
+                    elif best_cur > 0.1 and best_mom > 0.1:
+                        direction = f"✅ A+B 병행: 두 전략 모두 유효 — 시장 국면에 따라 전환"
+                        color = "#f59e0b"
+                    else:
+                        direction = "⚠️ 두 방향 모두 유의미한 개선 없음 — 신호 체계 전면 재검토 필요"
+                        color = "#ef4444"
+
+                    st.markdown(f"""
+<div style="background:#1e293b;padding:16px;border-radius:10px;border-left:5px solid {color};">
+  <b style="font-size:16px;">{direction}</b>
+</div>""", unsafe_allow_html=True)
+
+            st.divider()
+
+            # ── 핵심: 코드 수정 필요 여부 자동 판단 ──
+            st.subheader("🤖 코드 수정 필요 여부 자동 판단")
+            st.caption("백테스트 결과 기반 — 지금 코드 그대로 써도 되는지 알려줘요")
+
+            # 현재 가중치
+            cur_w = load_weights()
+
+            # 판단 기준
+            # 1. 스캐너 통과 종목 리프트가 기준선 대비 유의미하게 낮으면 → 수정 필요
+            # 2. 개별 신호 방향이 현재 가중치와 크게 다르면 → 수정 필요
+            # 3. 둘 다 괜찮으면 → 유지
+
+            needs_update = []
+            ok_items = []
+
+            # 스캐너 전체 통과 성과 재계산
+            def _full_pass(row):
+                sh = sum([row["s1"], row["s2"], row["s3"]])
+                th_ = sum([row["s4"], row["s5"]])
+                s = 0
+                if row.get("s1_strong",False): s+=cur_w["s1_strong"]
+                elif row["s1"]: s+=cur_w["s1_weak"]
+                if row.get("s2_strong",False): s+=cur_w["s2_strong"]
+                elif row["s2"]: s+=cur_w["s2_weak"]
+                if row["s3"]: s+=cur_w["s3_strong"]
+                if row["s4"]: s+=cur_w["s4"]; th_+=1
+                if row["s5"]: s+=cur_w["s5"]; th_+=1
+                core = row["s3"] or row["s4"]
+                return core and (sh>=1) and (s>=cur_w["min_pass_score"])
+
+            bt_df["_pass"] = bt_df.apply(_full_pass, axis=1)
+            pass_d2 = bt_df.loc[bt_df["_pass"]==True,  "d2"].dropna().tolist()
+            all_d2  = bt_df["d2"].dropna().tolist()
+
+            from scipy import stats as sp_j
+            scanner_lift = np.mean(pass_d2) - np.mean(all_d2) if pass_d2 else -999
+            scanner_p    = sp_j.ttest_ind(pass_d2, all_d2)[1] if len(pass_d2)>10 else 1.0
+
+            # 판단 1: 스캐너 전체 성과
+            if scanner_p < 0.05 and scanner_lift < -0.1:
+                needs_update.append({
+                    "항목": "스캐너 전체 통과 성과",
+                    "현재": f"리프트 {scanner_lift:+.2f}%p (p={scanner_p:.3f})",
+                    "문제": "통과 종목이 기준선보다 유의미하게 낮음",
+                    "권고": "pass 조건 또는 핵심 신호 재검토"
+                })
+            elif scanner_p < 0.05 and scanner_lift > 0.1:
+                ok_items.append(f"스캐너 전체 성과 ✅ 기준선 대비 +{scanner_lift:.2f}%p (p={scanner_p:.3f})")
+            else:
+                ok_items.append(f"스캐너 전체 성과 ⚠️ 유의미한 차이 없음 (리프트 {scanner_lift:+.2f}%p)")
+
+            # 판단 2: 개별 신호 방향 vs 현재 가중치
+            sig_map = {
+                "s1": ("S1 BB수축",  cur_w["s1_strong"], 15),
+                "s2": ("S2 거래량눌림", cur_w["s2_strong"], 12),
+                "s3": ("S3 정배열",  cur_w["s3_strong"], 20),
+                "s4": ("S4 RSI다이버전스", cur_w["s4"], 8),
+                "s5": ("S5 양봉전환", cur_w["s5"], 4),
+            }
+            for sig, (label, cur_score, threshold) in sig_map.items():
+                on  = bt_df.loc[bt_df[sig]==True,  "d2"].dropna().tolist()
+                off = bt_df.loc[bt_df[sig]==False, "d2"].dropna().tolist()
+                if len(on) < 20: continue
+                lift = np.mean(on) - np.mean(off)
+                t,p  = sp_j.ttest_ind(on, off) if len(off)>=5 else (0,1)
+
+                # 현재 점수가 높은데 리프트가 음수 → 과대평가
+                if p < 0.05 and lift < -0.05 and cur_score >= threshold:
+                    needs_update.append({
+                        "항목": label,
+                        "현재": f"점수 {cur_score}점 / 리프트 {lift:+.2f}% (p={p:.3f})",
+                        "문제": f"점수 높은데 실제 음수 리프트",
+                        "권고": f"점수 {int(cur_score*0.7)}점으로 하향 검토"
+                    })
+                # 현재 점수가 낮은데 리프트가 양수 → 과소평가
+                elif p < 0.05 and lift > 0.05 and cur_score < threshold:
+                    needs_update.append({
+                        "항목": label,
+                        "현재": f"점수 {cur_score}점 / 리프트 {lift:+.2f}% (p={p:.3f})",
+                        "문제": "점수 낮은데 실제 양수 리프트",
+                        "권고": f"점수 {int(cur_score*1.3)}점으로 상향 검토"
+                    })
+                else:
+                    direction = "양수✅" if lift>0 else "음수⚠️"
+                    ok_items.append(f"{label}: 리프트 {lift:+.2f}% ({direction}), 현재 점수 {cur_score}점 적정")
+
+            # 결과 출력
+            if needs_update:
+                st.markdown(f"""
+<div style="background:#1e293b;padding:16px;border-radius:10px;
+            border-left:5px solid #ef4444;margin-bottom:12px;">
+  <b style="font-size:16px;color:#ef4444;">⚠️ 코드 수정 권고 — {len(needs_update)}개 항목</b>
+</div>""", unsafe_allow_html=True)
+                for item in needs_update:
+                    with st.expander(f"🔧 {item['항목']} — {item['문제']}"):
+                        st.markdown(f"**현재 상태:** {item['현재']}")
+                        st.markdown(f"**문제:** {item['문제']}")
+                        st.markdown(f"**권고:** {item['권고']}")
+            else:
+                st.markdown(f"""
+<div style="background:#1e293b;padding:16px;border-radius:10px;
+            border-left:5px solid #10b981;margin-bottom:12px;">
+  <b style="font-size:16px;color:#10b981;">✅ 현재 코드 유지 — 수정 불필요</b><br>
+  <span style="color:#94a3b8;font-size:13px;">모든 신호 방향이 현재 가중치와 일치합니다</span>
+</div>""", unsafe_allow_html=True)
+
+            if ok_items:
+                with st.expander("✅ 정상 항목 보기"):
+                    for x in ok_items:
+                        st.markdown(f"- {x}")
+
+            # 백테스트 결과 저장 (복붙용 + 기록용)
+            st.divider()
+            st.subheader("💾 백테스트 결과 저장")
+            st.caption("저장하면 다음에 Claude에게 붙여넣기만 하면 돼요")
+
+            import json as json_bt
+            bt_summary = {
+                "실행일시": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "종목수": len(loaded_codes),
+                "봉수": len(bt_df),
+                "시작일": bt_start,
+                "스캐너_리프트": round(scanner_lift, 4),
+                "스캐너_p값": round(scanner_p, 4),
+                "수정필요": len(needs_update) > 0,
+                "수정항목수": len(needs_update),
+                "신호별_결과": {},
+                "현재_가중치": {k:v for k,v in cur_w.items() if not k.startswith("_")},
+                "수정_권고": needs_update,
+            }
+            for sig, (label, cur_score, _) in sig_map.items():
+                on  = bt_df.loc[bt_df[sig]==True, "d2"].dropna().tolist()
+                off = bt_df.loc[bt_df[sig]==False,"d2"].dropna().tolist()
+                if not on: continue
+                lift = np.mean(on)-np.mean(off)
+                t,p  = sp_j.ttest_ind(on,off) if len(off)>=5 else (0,1)
+                bt_summary["신호별_결과"][label] = {
+                    "발화수": len(on), "리프트": round(lift,4), "p값": round(p,4)
+                }
+
+            bt_json_str = json_bt.dumps(bt_summary, ensure_ascii=False, indent=2)
+
+            # 저장 버튼
+            save_col1, save_col2 = st.columns(2)
+            if save_col1.button("💾 로컬 저장 (backtest_history.json)"):
+                hist_file = "backtest_history.json"
+                history = []
+                if os.path.exists(hist_file):
+                    try:
+                        with open(hist_file,"r",encoding="utf-8") as f:
+                            history = json.load(f)
+                    except: pass
+                history.append(bt_summary)
+                history = history[-10:]  # 최근 10회만 보관
+                with open(hist_file,"w",encoding="utf-8") as f:
+                    json.dump(history, f, ensure_ascii=False, indent=2)
+                st.success(f"✅ backtest_history.json 저장 완료 (총 {len(history)}회 기록)")
+
+            # Claude에게 붙여넣기용
+            st.markdown("**📋 Claude에게 붙여넣기용 (복사해서 대화창에 붙여넣으세요)**")
+            st.code(bt_json_str, language="json")
+
+            st.divider()
+
+            # ── 점수 재설계 권고 (기존 유지) ──
+            st.subheader("💡 실제 데이터 기반 점수 재설계 권고")
+            st.caption("리프트 크고 p<0.05인 시그널은 점수 상향, 그 반대는 하향 권고")
+            reco_cols = st.columns(2)
+            with reco_cols[0]:
+                st.markdown("**현재 점수 체계**")
+                for row in results_table:
+                    st.markdown(f"- {row['시그널']}: **{row['현재점수']}점** (리프트 {row['리프트']}, p={row['p값']})")
+            with reco_cols[1]:
+                st.markdown("**재설계 권고**")
+                for row in results_table:
+                    try:
+                        lift = float(row["리프트"].replace("%",""))
+                        p    = float(row["p값"])
+                        score_str = row["현재점수"]
+                        if p<0.05 and lift>1.5:   change_txt="⬆️ 상향 권장"
+                        elif p<0.05 and lift>0:   change_txt="➡️ 유지"
+                        elif p>0.1 or lift<=0:    change_txt="⬇️ 하향 권장"
+                        else:                     change_txt="➡️ 유지"
+                        st.markdown(f"- {row['시그널']}: {score_str}점 → **{change_txt}**")
+                    except: pass
