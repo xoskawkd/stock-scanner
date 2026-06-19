@@ -297,13 +297,13 @@ def _yf_prepost_price(ticker: str) -> tuple:
                         pre_start = now_et.replace(hour=4,  minute=0,  second=0, microsecond=0)
                         aft_end   = now_et.replace(hour=20, minute=0,  second=0, microsecond=0)
                         if reg_open <= now_et <= reg_close:
-                            session = "정규장"
+                            session = "🏛️ 정규장"
                         elif pre_start <= now_et < reg_open:
                             session = "🌅 프리마켓"
                         elif reg_close < now_et <= aft_end:
                             session = "🌙 애프터마켓"
                         else:
-                            session = "장외마감"
+                            session = "🌙 애프터마켓(연장)"
                     else:
                         session = "장외"
                 except: session = "장외"
@@ -393,6 +393,193 @@ def get_market_status():
         return val, txt, f"{usd:,.2f}"
     except:
         return "50", "중립", "1,350.00"
+
+# ============================================================
+# 5-B. KRX 투자자별 수급 데이터
+# ============================================================
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_krx_investor_data(code: str, date_str: str = "") -> dict:
+    """
+    KRX 투자자별 매매동향 조회
+    반환: {외국인순매수, 기관순매수, 개인순매수, 연기금순매수, 날짜}
+    """
+    if not KRX_API_KEY:
+        return {"ok": False, "reason": "KRX키없음"}
+
+    # 날짜 없으면 오늘/어제
+    if not date_str:
+        d = datetime.now()
+        for _ in range(5):
+            date_str = d.strftime("%Y%m%d")
+            try:
+                res = requests.get(
+                    "http://data-dbg.krx.co.kr/svc/apis/sto/invst_bydd_trd",
+                    params={"basDd": date_str, "isuCd": code},
+                    headers={"AUTH_KEY": KRX_API_KEY},
+                    timeout=6,
+                ).json()
+                rows = res.get("OutBlock_1", [])
+                if rows:
+                    break
+            except:
+                rows = []
+            d -= timedelta(days=1)
+    else:
+        try:
+            res = requests.get(
+                "http://data-dbg.krx.co.kr/svc/apis/sto/invst_bydd_trd",
+                params={"basDd": date_str, "isuCd": code},
+                headers={"AUTH_KEY": KRX_API_KEY},
+                timeout=6,
+            ).json()
+            rows = res.get("OutBlock_1", [])
+        except:
+            return {"ok": False, "reason": "API오류"}
+
+    if not rows:
+        return {"ok": False, "reason": "데이터없음"}
+
+    result = {"ok": True, "date": date_str,
+              "외국인": 0, "기관": 0, "개인": 0, "연기금": 0,
+              "외국인비율": 0.0, "기관비율": 0.0}
+    total_vol = 0
+
+    for row in rows:
+        inv  = row.get("INVST_NM", "")
+        net  = 0
+        try: net = int(str(row.get("NETBUY_TRDVAL", "0")).replace(",", "").replace("-", "").strip())
+            # 부호 처리
+        except: pass
+        try:
+            net_signed = int(str(row.get("NETBUY_TRDVAL", "0")).replace(",", ""))
+        except: net_signed = 0
+
+        if "외국인" in inv:   result["외국인"] = net_signed
+        elif "기관계" in inv: result["기관"]   = net_signed
+        elif "개인" in inv:   result["개인"]   = net_signed
+        elif "연기금" in inv: result["연기금"] = net_signed
+
+        # 전체 거래대금 합산 (비율 계산용)
+        try:
+            buy = int(str(row.get("BUY_TRDVAL", "0")).replace(",", ""))
+            total_vol += buy
+        except: pass
+
+    # 비율 계산
+    if total_vol > 0:
+        result["외국인비율"] = result["외국인"] / total_vol * 100
+        result["기관비율"]   = result["기관"]   / total_vol * 100
+
+    return result
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_krx_investor_trend(code: str, days: int = 5) -> list:
+    """
+    최근 N일 수급 트렌드
+    반환: [{date, 외국인, 기관, 개인}, ...]
+    """
+    if not KRX_API_KEY:
+        return []
+
+    trend = []
+    d = datetime.now()
+    count = 0
+    while count < days * 2 and len(trend) < days:
+        date_str = d.strftime("%Y%m%d")
+        data = get_krx_investor_data(code, date_str)
+        if data.get("ok"):
+            trend.append(data)
+            count += 1
+        d -= timedelta(days=1)
+        count += 1
+
+    return trend[:days]
+
+
+def calc_supply_signal(code: str) -> dict:
+    """
+    수급 신호 종합 계산
+    반환: {판단, 색상, 외국인연속, 기관전환, 상세}
+    """
+    trend = get_krx_investor_trend(code, days=5)
+    if not trend:
+        return {"ok": False, "reason": "수급데이터없음"}
+
+    today = trend[0] if trend else {}
+    fore_today  = today.get("외국인", 0)
+    inst_today  = today.get("기관",   0)
+    fore_ratio  = today.get("외국인비율", 0)
+    inst_ratio  = today.get("기관비율",  0)
+
+    # 외국인 연속 순매수 일수
+    fore_streak = 0
+    for t in trend:
+        if t.get("외국인", 0) > 0: fore_streak += 1
+        else: break
+
+    # 기관 오늘 전환 (어제 매도 → 오늘 매수)
+    inst_reversal = False
+    if len(trend) >= 2:
+        inst_reversal = (trend[0].get("기관", 0) > 0 and
+                         trend[1].get("기관", 0) <= 0)
+
+    # 연기금 순매수
+    pension_buy = today.get("연기금", 0) > 0
+
+    # 종합 판단
+    signals = []
+    score = 0
+
+    if fore_today > 0:
+        signals.append(f"외국인 순매수 ({fore_ratio:+.1f}%)")
+        score += 2
+        if fore_streak >= 3:
+            signals.append(f"외국인 {fore_streak}일 연속 순매수 ★")
+            score += 3
+    elif fore_today < 0:
+        signals.append(f"외국인 순매도 ({fore_ratio:+.1f}%)")
+        score -= 2
+
+    if inst_today > 0:
+        signals.append(f"기관 순매수")
+        score += 2
+        if inst_reversal:
+            signals.append("기관 매도→매수 전환 ★")
+            score += 2
+    elif inst_today < 0:
+        signals.append(f"기관 순매도")
+        score -= 1
+
+    if pension_buy:
+        signals.append("연기금 순매수")
+        score += 1
+
+    if score >= 5:
+        verdict = "🔥 강한 매수세"; color = "#10b981"
+    elif score >= 3:
+        verdict = "🟢 매수세 우위"; color = "#10b981"
+    elif score >= 1:
+        verdict = "🟡 중립"; color = "#f59e0b"
+    elif score <= -2:
+        verdict = "🔴 매도세 우위"; color = "#ef4444"
+    else:
+        verdict = "⚪ 수급 중립"; color = "#64748b"
+
+    return {
+        "ok": True,
+        "verdict": verdict,
+        "color": color,
+        "score": score,
+        "signals": signals,
+        "fore_streak": fore_streak,
+        "fore_today": fore_today,
+        "inst_today": inst_today,
+        "fore_ratio": fore_ratio,
+        "inst_ratio": inst_ratio,
+        "date": today.get("date", ""),
+    }
+
 
 # ============================================================
 # 6. 공통 유틸
@@ -1020,10 +1207,17 @@ def get_portfolio_data(name: str) -> dict:
         src   = yf_src if yf_src else "실패"
 
     # 장외가 유효성 확인 (정규장가 대비 ±30% 이내만 신뢰)
+    # 장외가 표시 조건:
+    # 1. prepost_price 유효
+    # 2. 정규장가 대비 ±30% 이내
+    # 3. 실패/장외마감 아님
+    # 4. 정규장 중이어도 가격 차이 0.1% 이상이면 표시 (프리/애프터 반영)
+    prepost_diff_raw = (prepost_price - price) / price * 100 if prepost_price > 0 and price > 0 else 0
     has_prepost = (prepost_price > 0 and price > 0 and
                    0.70 <= prepost_price/price <= 1.30 and
-                   session not in ["실패", "장외마감", "정규장"])
-    prepost_diff = (prepost_price - price) / price * 100 if has_prepost and price > 0 else 0
+                   session not in ["실패", "장외마감"] and
+                   abs(prepost_diff_raw) >= 0.1)  # 가격 차이 0.1% 이상일 때만
+    prepost_diff = prepost_diff_raw if has_prepost else 0
 
     df = load_ohlcv_us(name)
     if df is not None:
