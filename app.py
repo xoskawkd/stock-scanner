@@ -38,8 +38,8 @@ KR_SCAN_N  = 300  # 코스피 상위
 KQ_SCAN_N  = 200  # 코스닥 상위
 
 THRESHOLDS = {
-    "KR": {"min_vol":500_000,"max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.98,"min_pass_score":38},
-    "US": {"min_vol":500_000,"max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.98,"min_pass_score":38},
+    "KR": {"min_vol":30_000, "max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.95,"min_pass_score":38},
+    "US": {"min_vol":100_000,"max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.95,"min_pass_score":38},
 }
 
 # 가중치
@@ -281,7 +281,8 @@ def us_prepost(ticker: str) -> tuple:
         elif c<now<=aft: sess="🌙애프터마켓"
         else: return 0,""
         diff = (pp_p-reg_p)/reg_p*100 if reg_p>0 else 0
-        if abs(diff) < 0.1: return 0,""
+        # 정규장 외 시간에는 무조건 표시, 정규장 중엔 0.05% 이상 차이날때만
+        if sess == "🏛️정규장" and abs(diff) < 0.05: return 0,""
         return pp_p, f"{sess} {diff:+.1f}%"
     except: return 0,""
 
@@ -517,8 +518,8 @@ def quant_predict(df, market="KR"):
         OUT["score"]=int(score)
 
         # 통과 게이트
-        # S3 AND S4 → 너무 적음 → S3 OR S4 + 점수 높임
-        core = (s3 and s4) or (s3 and score >= 45) or (s4 and score >= 45)
+        # S3(정배열눌림목) 또는 S4(RSI다이버전스) 하나 이상 + 점수
+        core = s3 or s4
         OUT["pass"]=(not rejected) and core and (score>=W["min_pass_score"])
 
         # 등급
@@ -671,7 +672,8 @@ def portfolio_data(name: str) -> dict:
         return {"label":f"{name} ({src})","curr":ur(p),"score":0,"grade":"-","rsi":50,
                 "currency":"USD","stop":ur(p*0.93),"target":ur(p*1.08),
                 "buy_min":ur(p*0.97),"buy_max":ur(p*1.02),
-                "source":src,"ok":True,"signals":[],"prepost":pp,"prepost_label":pp_label}
+                "source":src,"ok":True,"signals":[],
+                "prepost":pp if pp>0 else 0,"prepost_label":pp_label}
     return FAIL
 
 # ============================================================
