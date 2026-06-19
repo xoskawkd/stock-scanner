@@ -6,3 +6,4 @@ scipy
 yfinance
 pyupbit
 finance-datareader
+pykrx
