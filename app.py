@@ -370,18 +370,18 @@ def load_krx_listing():
     try:
         from pykrx import stock as pykrx_stock
         today = datetime.now().strftime("%Y%m%d")
-        tickers = pykrx_stock.get_market_ticker_list(today, market="KOSPI")
-        if tickers:
-            rows = []
+        rows = []
+        for market in ["KOSPI", "KOSDAQ"]:
+            tickers = pykrx_stock.get_market_ticker_list(today, market=market)
             for code in tickers:
                 try:
                     name   = pykrx_stock.get_market_ticker_name(code)
                     marcap = pykrx_stock.get_market_cap(today, today, code)
                     cap    = int(marcap["시가총액"].iloc[0]) if not marcap.empty else 0
-                    rows.append({"Code": code, "Name": name, "Marcap": cap, "Market": "KOSPI"})
+                    rows.append({"Code": code, "Name": name, "Marcap": cap, "Market": market})
                 except: pass
-            if rows:
-                return pd.DataFrame(rows)
+        if rows:
+            return pd.DataFrame(rows)
     except: pass
 
     # 2. fdr 시도
@@ -419,9 +419,26 @@ def load_krx_listing():
         ("011000","한화",3e12),("003570","SNT홀딩스",2e12),
         ("001040","CJ",2e12),("097950","CJ제일제당",3e12),
     ]
-    rows = [{"Code": c, "Name": n, "Marcap": m, "Market": "KOSPI"}
-            for c, n, m in fallback]
-    return pd.DataFrame(rows)
+    kospi_rows = [{"Code": c, "Name": n, "Marcap": m, "Market": "KOSPI"}
+                  for c, n, m in fallback]
+
+    # 코스닥 fallback
+    kosdaq_fallback = [
+        ("247540","에코프로비엠",8e12),("086520","에코프로",6e12),
+        ("373220","LG에너지솔루션",60e12),("196170","알테오젠",3e12),
+        ("091990","셀트리온헬스케어",3e12),("145020","휴젤",2e12),
+        ("112040","위메이드",1e12),("263750","펄어비스",1e12),
+        ("036570","엔씨소프트",3e12),("251270","넷마블",2e12),
+        ("357780","솔브레인",2e12),("054040","한국가구",5e11),
+        ("042700","한미반도체",8e12),("039030","이오테크닉스",1e12),
+        ("109610","씨젠",1e12),("214150","클래시스",1e12),
+        ("277810","레인보우로보틱스",1e12),("348370","엔켐",1e12),
+        ("119860","진원생명과학",5e11),("140610","예스티",5e11),
+    ]
+    kosdaq_rows = [{"Code": c, "Name": n, "Marcap": m, "Market": "KOSDAQ"}
+                   for c, n, m in kosdaq_fallback]
+
+    return pd.DataFrame(kospi_rows + kosdaq_rows)
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_ohlcv_kr(code: str) -> pd.DataFrame | None:
@@ -1223,7 +1240,24 @@ def summarize_skips(skips: list) -> dict:
 @st.cache_data(ttl=300, show_spinner=False)
 def scan_kr() -> tuple:
     listing = load_krx_listing()
-    targets = listing[listing["Marcap"] > 3e11].nlargest(KR_SCAN_TOP_N, "Marcap")
+
+    # 코스피 시총 상위 300
+    if "Market" in listing.columns:
+        kospi = listing[listing["Market"].str.contains("KOSPI", na=False)]
+        kosdaq = listing[listing["Market"].str.contains("KOSDAQ", na=False)]
+    else:
+        kospi  = listing
+        kosdaq = pd.DataFrame()
+
+    kospi_top  = kospi[kospi["Marcap"] > 3e11].nlargest(KR_SCAN_TOP_N, "Marcap")
+
+    # 코스닥 시총 상위 200 (시총 500억 이상)
+    kosdaq_top = pd.DataFrame()
+    if not kosdaq.empty:
+        kosdaq_top = kosdaq[kosdaq["Marcap"] > 5e10].nlargest(200, "Marcap")
+
+    # 합치기
+    targets = pd.concat([kospi_top, kosdaq_top]).drop_duplicates(subset=["Code"])
     codes   = list(zip(targets["Code"].tolist(), targets["Name"].tolist()))
 
     get_krx_daily_snapshot()
@@ -1262,7 +1296,7 @@ def scan_kr() -> tuple:
     with ThreadPoolExecutor(max_workers=30) as ex:
         raw = list(ex.map(_fetch, codes))
     skips = [r for r in raw if r.get("_skip")]
-    top3  = sorted([r for r in raw if not r.get("_skip")], key=lambda x: x["점수"], reverse=True)[:3]
+    top3  = sorted([r for r in raw if not r.get("_skip")], key=lambda x: x["점수"], reverse=True)[:5]
     return top3, skips
 
 
@@ -2097,7 +2131,7 @@ def render_cards(placeholder, title: str, data: list, currency: str):
             return
         cols = st.columns(len(data))
         for i, item in enumerate(data):
-            medal = "🥇🥈🥉"[i]
+            medal = ["🥇","🥈","🥉","4️⃣","5️⃣"][i] if i < 5 else "▶"
             is_kr = currency == "KRW"
             sym   = "₩" if is_kr else ("$" if currency == "USD" else "")
             fmt   = (lambda v: f"{sym}{int(v):,}") if is_kr else (lambda v: f"{sym}{v:,.2f}")
