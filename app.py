@@ -30,6 +30,8 @@ KIS_APP_SECRET = "Pvmawb5cs8oIDi6KEgMbqx+115iKoUjKdMMj2DmcmdjyPmMtordm2EEfUoA+q1
 KIS_IS_REAL    = True
 KIS_BASE_URL   = "https://openapi.koreainvestment.com:9443" if KIS_IS_REAL else "https://openapivts.koreainvestment.com:29443"
 _KIS_TOKEN     = {"token": "", "expires": None}
+import threading
+_KIS_LOCK = threading.Lock()
 
 # ============================================================
 # 설정
@@ -38,8 +40,8 @@ KR_SCAN_N  = 300  # 코스피 상위
 KQ_SCAN_N  = 200  # 코스닥 상위
 
 THRESHOLDS = {
-    "KR": {"min_vol":30_000, "max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.95,"min_pass_score":38},
-    "US": {"min_vol":100_000,"max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.95,"min_pass_score":38},
+    "KR": {"min_vol":30_000, "max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.95,"min_pass_score":28},
+    "US": {"min_vol":100_000,"max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.95,"min_pass_score":28},
 }
 
 # 가중치
@@ -47,7 +49,7 @@ DEFAULT_W = {
     "s1_strong":12,"s1_weak":6,"s2_strong":9,"s2_weak":5,
     "s2t_strong":5,"s2t_weak":3,"s3_strong":17,"s3_weak":10,
     "s4":12,"s5":3,"rsi_good":5,"rsi_oversold":3,"rsi_extreme":2,
-    "min_pass_score":38,
+    "min_pass_score":28,
 }
 
 def load_weights():
@@ -83,18 +85,29 @@ def kis_token() -> str:
     global _KIS_TOKEN
     if not KIS_APP_KEY or not KIS_APP_SECRET: return ""
     now = datetime.now()
+    # 캐시 확인 (Lock 없이 먼저 — 대부분 여기서 끝남)
     if _KIS_TOKEN["token"] and _KIS_TOKEN["expires"] and now < _KIS_TOKEN["expires"]:
         return _KIS_TOKEN["token"]
-    try:
-        r = requests.post(f"{KIS_BASE_URL}/oauth2/tokenP",
-            json={"grant_type":"client_credentials","appkey":KIS_APP_KEY,"appsecret":KIS_APP_SECRET},
-            timeout=5).json()
-        t = r.get("access_token","")
-        if t:
-            _KIS_TOKEN["token"] = t
-            _KIS_TOKEN["expires"] = now + timedelta(hours=23)
-        return t
-    except: return ""
+    # 발급 필요 시 Lock으로 race condition 방지
+    with _KIS_LOCK:
+        # Lock 진입 후 다시 확인 (다른 스레드가 먼저 발급했을 수 있음)
+        if _KIS_TOKEN["token"] and _KIS_TOKEN["expires"] and now < _KIS_TOKEN["expires"]:
+            return _KIS_TOKEN["token"]
+        for attempt in range(3):  # 최대 3회 재시도
+            try:
+                r = requests.post(f"{KIS_BASE_URL}/oauth2/tokenP",
+                    json={"grant_type":"client_credentials",
+                          "appkey":KIS_APP_KEY,"appsecret":KIS_APP_SECRET},
+                    timeout=5).json()
+                t = r.get("access_token","")
+                if t:
+                    _KIS_TOKEN["token"] = t
+                    _KIS_TOKEN["expires"] = datetime.now() + timedelta(hours=23)
+                    return t
+            except:
+                if attempt == 2: return ""
+                import time; time.sleep(0.5)
+    return ""
 
 def kis_headers(tr_id):
     t = kis_token()
@@ -162,10 +175,11 @@ def kis_investor_trend(code: str, days=5) -> list:
         for row in r.get("output",[])[:days]:
             try:
                 trend.append({
-                    "date": row.get("stck_bsop_date",""),
+                    "date":   row.get("stck_bsop_date",""),
                     "외국인": int(row.get("frgn_ntby_qty",0) or 0),
                     "기관":   int(row.get("orgn_ntby_qty",0) or 0),
                     "개인":   int(row.get("prsn_ntby_qty",0) or 0),
+                    "연기금": int(row.get("pnsn_ntby_qty",0) or 0),
                 })
             except: pass
         return trend
@@ -227,21 +241,40 @@ def kr_price(code: str) -> tuple:
                         if p > 0: return p, "KRX"
                 d -= timedelta(days=1)
         except: pass
-    # yfinance fallback
+    # yfinance fallback — KIS listing으로 시장 구분
     try:
-        sfx = ".KS" if code[:2] in ["00","01","02","03","04","05","06"] else ".KQ"
-        t = yf.Ticker(f"{code}{sfx}")
+        # listing에서 Market 확인 후 suffix 결정
+        _sfx = ".KQ"  # 기본 코스닥
+        try:
+            _lst = krx_listing()
+            _row = _lst[_lst["Code"]==code]
+            if not _row.empty:
+                mkt = str(_row["Market"].values[0])
+                _sfx = ".KS" if "KOSPI" in mkt else ".KQ"
+        except:
+            # listing 실패시 코드 패턴으로 추정 (불완전)
+            _sfx = ".KS" if code[:2] in ["00","01","02","03","04","05","06"] else ".KQ"
+        t = yf.Ticker(f"{code}{_sfx}")
         p = float(getattr(t.fast_info,"last_price",0) or 0)
         if p > 0: return p, "yfinance"
     except: pass
     return 0.0, "실패"
+
+# 미국 주요 휴장일 (고정 + 변동 간략 처리)
+_US_HOLIDAYS_2025 = {(1,1),(1,20),(2,17),(4,18),(5,26),(6,19),(7,4),(9,1),(11,27),(12,25)}
+_US_HOLIDAYS_2026 = {(1,1),(1,19),(2,16),(4,3),(5,25),(6,19),(7,4),(9,7),(11,26),(12,25)}
 
 def is_us_open():
     if not ZoneInfo: return True
     try:
         now = datetime.now(ZoneInfo("America/New_York"))
         if now.weekday() >= 5: return False
-        return now.replace(hour=9,minute=30,second=0) <= now <= now.replace(hour=16,minute=0,second=0)
+        # 휴장일 체크
+        holidays = _US_HOLIDAYS_2026 if now.year == 2026 else _US_HOLIDAYS_2025
+        if (now.month, now.day) in holidays: return False
+        open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+        close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+        return open_t <= now <= close_t
     except: return True
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -299,6 +332,14 @@ def ohlcv_kr(code):
         df = fdr.DataReader(code, start="2024-01-01")
         if df is not None and len(df)>=60:
             df.columns=[c.lower() for c in df.columns]
+            # 마지막 봉이 너무 오래됐으면 stale 데이터
+            last_dt = df.index[-1]
+            try:
+                last_dt = pd.Timestamp(last_dt).tz_localize(None)
+                days_old = (datetime.now() - last_dt.to_pydatetime()).days
+                if days_old > 10:  # 10일 이상 오래된 데이터
+                    return None
+            except: pass
             return df
     except: pass
     return None
@@ -411,9 +452,13 @@ def quant_predict(df, market="KR"):
 
         rejected=False
         avg_vol=_sf(vo.rolling(20).mean().iloc[-1])
-        if avg_vol<th["min_vol"]:
+        # 거래정지/상장폐지 감지 — 최근 5일 거래량 합계 0
+        recent_vol = _sf(vo.iloc[-5:].sum())
+        if recent_vol == 0:
+            OUT["signals"].append("❌ 거래정지/상장폐지 의심"); rejected=True
+        elif avg_vol<th["min_vol"]:
             OUT["signals"].append("❌ 유동성 부족"); rejected=True
-        ma20=_sf(cl.rolling(20).mean().iloc[-1])
+        ma20=_sf(_ma20_s.iloc[-1])  # _ma20_s 재사용 (중복 계산 제거)
         if ma20>0 and cur>ma20*th["max_ma20_dev"]:
             OUT["signals"].append("❌ 이미 급등"); rejected=True
         p5=_sf(cl.iloc[-6]) if len(cl)>=6 else cur
@@ -435,12 +480,18 @@ def quant_predict(df, market="KR"):
         score=0; setup=0; strong=0; trigger=0
 
         # S1 BB수축
-        bbw=(cl.rolling(20).std()*2)/cl.rolling(20).mean().replace(0,np.nan)
+        _ma20_s = cl.rolling(20).mean().replace(0, np.nan)  # 재사용
+        _std20_s = cl.rolling(20).std()
+        bbw=(_std20_s*2)/_ma20_s
         bw=_sf(bbw.iloc[-1]); bwavg=_sf(bbw.rolling(20).mean().iloc[-1])
         s1=False
         if bwavg>0 and bw>0:
-            if bw<bwavg*0.80: s1=True;setup+=1;strong+=1;score+=W["s1_strong"]; OUT["signals"].append("✅ [S1] BB강수축")
-            elif bw<bwavg*0.92: s1=True;setup+=1;score+=W["s1_weak"]; OUT["signals"].append("🔶 [S1] BB수축")
+            # percentile 기반 squeeze (60봉 중 하위 20%/10%)
+            bbw_60 = bbw.iloc[-60:].dropna()
+            pct20 = bbw_60.quantile(0.20) if len(bbw_60)>=20 else bwavg*0.85
+            pct10 = bbw_60.quantile(0.10) if len(bbw_60)>=20 else bwavg*0.75
+            if bw<=pct10: s1=True;setup+=1;strong+=1;score+=W["s1_strong"]; OUT["signals"].append(f"✅ [S1] BB강수축 (하위10%)")
+            elif bw<=pct20: s1=True;setup+=1;score+=W["s1_weak"]; OUT["signals"].append(f"🔶 [S1] BB수축 (하위20%)")
             else: OUT["signals"].append("⬜ [S1] BB수축없음")
         OUT["s1"]=s1
 
@@ -450,7 +501,7 @@ def quant_predict(df, market="KR"):
         if vm20>0:
             if vm5<vm20*0.65: s2=True;setup+=1;strong+=1;score+=W["s2_strong"]; OUT["signals"].append(f"✅ [S2] 거래량강눌림 ({vm5/vm20*100:.0f}%)")
             elif vm5<vm20*0.80: s2=True;setup+=1;score+=W["s2_weak"]; OUT["signals"].append(f"🔶 [S2] 거래량눌림 ({vm5/vm20*100:.0f}%)")
-            else: OUT["signals"].append(f"⬜ [S2] 거래량눌림없음 ({vm5/vm20*100:.0f}%)")
+            else: OUT["signals"].append(f"⬜ [S2] 거래량눌림없음 ({vm5/vm20*100:.0f}%)" if vm20>0 else "⬜ [S2] 거래량데이터없음")
         if vm5>0:
             if vol_now>vm5*2.0: trigger+=1;score+=W["s2t_strong"]; OUT["signals"].append(f"➕ [S2T] 거래량폭발")
             elif vol_now>vm5*1.5: trigger+=1;score+=W["s2t_weak"]; OUT["signals"].append(f"➕ [S2T] 거래량증가")
@@ -462,20 +513,41 @@ def quant_predict(df, market="KR"):
         near=ma20>0 and abs(cur-ma20)/ma20<=0.05; s3=False
         if aligned and near: s3=True;setup+=1;strong+=1;score+=W["s3_strong"]; OUT["signals"].append("✅ [S3] 정배열+눌림목 ★")
         elif mid_up and near: s3=True;setup+=1;score+=W["s3_weak"]; OUT["signals"].append("🔶 [S3] 중기상승+눌림목")
-        else: OUT["signals"].append(f"⬜ [S3] 눌림목없음 (이격 {abs(cur-ma20)/ma20*100:.1f}%)")
+        else: OUT["signals"].append(f"⬜ [S3] 눌림목없음 (이격 {abs(cur-ma20)/ma20*100:.1f}%)" if ma20>0 else "⬜ [S3] MA20없음")
         OUT["s3"]=s3
 
         # S4 RSI다이버전스
         s4=False
         try:
-            if len(cl)>=20:
-                pw=cl.iloc[-20:]; rw=rsi_s.iloc[-20:]
-                i1=pw.iloc[:10].idxmin(); i2=pw.iloc[10:].idxmin()
-                p1=_sf(pw.loc[i1]); p2=_sf(pw.loc[i2])
-                r1=_sf(rw.loc[i1],50); r2=_sf(rw.loc[i2],50)
-                s4=(p2<p1) and (r2>r1+3)
+            if len(cl)>=30:
+                # 개선된 RSI Divergence: 최근 30봉에서 가격 저점 vs RSI 저점 비교
+                # 전반(0~14) / 후반(15~29) 각각 실제 저점 찾기
+                pw=cl.iloc[-30:].reset_index(drop=True)
+                rw=rsi_s.iloc[-30:].reset_index(drop=True)
+                # 전반 저점
+                p1_idx = pw.iloc[:15].idxmin()
+                p1 = pw.iloc[p1_idx]
+                r1 = _sf(rw.iloc[p1_idx], 50.0)
+                # 후반 저점
+                p2_idx = pw.iloc[15:].idxmin() + 15
+                p2 = pw.iloc[p2_idx]
+                r2 = _sf(rw.iloc[p2_idx], 50.0)
+                # 조건: 가격 저점 낮아짐 + RSI 저점 높아짐 + 격차 5 이상 (3→5 강화)
+                # 추가: 후반 RSI가 과매도 구간(50 이하)이어야 의미있음
+                s4 = (p2 < p1 * 0.999) and (r2 > r1 + 5) and (r2 < 60)
+                if s4: trigger+=1;score+=W["s4"]; OUT["signals"].append(f"✅ [S4] RSI다이버전스 (가격↓{p1:.0f}→{p2:.0f} RSI↑{r1:.0f}→{r2:.0f})")
+                else: OUT["signals"].append("⬜ [S4] 다이버전스없음")
+            elif len(cl)>=20:
+                pw=cl.iloc[-20:].reset_index(drop=True)
+                rw=rsi_s.iloc[-20:].reset_index(drop=True)
+                p1_idx=pw.iloc[:10].idxmin(); p2_idx=pw.iloc[10:].idxmin()+10
+                p1=pw.iloc[p1_idx]; p2=pw.iloc[p2_idx]
+                r1=_sf(rw.iloc[p1_idx],50); r2=_sf(rw.iloc[p2_idx],50)
+                s4=(p2<p1*0.999) and (r2>r1+5) and (r2<60)
                 if s4: trigger+=1;score+=W["s4"]; OUT["signals"].append("✅ [S4] RSI다이버전스 ★")
                 else: OUT["signals"].append("⬜ [S4] 다이버전스없음")
+            else:
+                OUT["signals"].append("⬜ [S4] 데이터부족")
         except: OUT["signals"].append("⬜ [S4] 계산실패")
         OUT["s4"]=s4
 
@@ -527,10 +599,11 @@ def quant_predict(df, market="KR"):
         OUT["pass"]=(not rejected) and core and (score>=W["min_pass_score"])
 
         # 등급
-        if score>=65 and strong>=1 and trigger>=1: g="A+"
-        elif score>=55 and setup>=1 and trigger>=1: g="A"
-        elif score>=45 and setup>=1: g="B+"
-        elif score>=38 and setup>=1: g="B"
+        # 최대 score=63 기준 재조정
+        if score>=55 and strong>=1 and trigger>=1: g="A+"
+        elif score>=45 and setup>=1 and trigger>=1: g="A"
+        elif score>=35 and setup>=1: g="B+"
+        elif score>=28 and setup>=1: g="B"
         else: g="C"
         OUT["grade"]=g
 
@@ -563,13 +636,15 @@ def scan_kr():
         if p<=0: p=r["current"]
         tgt = int(r["target"]) if r["target"]>p*1.03 and r["target"]<=p*1.15 else int(p*1.08)
         stp = int(r["stop"])   if r["stop"]>p*0.85  and r["stop"]<p*0.98  else int(p*0.93)
+        bmin = int(r["buy_min"]) if r["buy_min"]>p*0.90 and r["buy_min"]<p else int(p*0.97)
+        bmax = int(r["buy_max"]) if r["buy_max"]>p and r["buy_max"]<p*1.05 else int(p*1.02)
         return {"_skip":False,"종목":name,"코드":code,"등급":r["grade"],"점수":r["score"],
                 "현재가":int(p),"RSI":round(r["rsi"],1),
-                "매수구간":f"₩{int(p*0.97):,}~₩{int(p*1.02):,}",
+                "매수구간":f"₩{bmin:,}~₩{bmax:,}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
                 "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"]]}
 
-    with ThreadPoolExecutor(max_workers=30) as ex:
+    with ThreadPoolExecutor(max_workers=15) as ex:
         raw=list(ex.map(_fetch,codes))
     skips=[r for r in raw if r.get("_skip")]
     top5=sorted([r for r in raw if not r.get("_skip")],key=lambda x:x["점수"],reverse=True)[:5]
@@ -578,7 +653,7 @@ def scan_kr():
 @st.cache_data(ttl=300, show_spinner=False)
 def scan_us():
     rt = {}
-    with ThreadPoolExecutor(max_workers=20) as ex:
+    with ThreadPoolExecutor(max_workers=10) as ex:
         futs={t:ex.submit(us_price,t) for t in US_LIST}
         for t,f in futs.items():
             try: rt[t]=f.result()
@@ -603,7 +678,7 @@ def scan_us():
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
                 "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"]]}
 
-    with ThreadPoolExecutor(max_workers=40) as ex:
+    with ThreadPoolExecutor(max_workers=15) as ex:
         raw=list(ex.map(_fetch,US_LIST))
     skips=[r for r in raw if r.get("_skip")]
     top5=sorted([r for r in raw if not r.get("_skip")],key=lambda x:x["점수"],reverse=True)[:5]
@@ -632,10 +707,7 @@ def portfolio_data(name: str) -> dict:
     if name.isdigit() and len(name)==6:
         p, src = kr_price(name)
         df = ohlcv_kr(name)
-        stock_name = get_stock_name(name)
-        # 종목명이 코드와 같으면 KIS/listing 재시도
-        if stock_name == name:
-            stock_name = get_stock_name(name)
+        stock_name = get_stock_name(name)  # KIS → listing 순서로 1회만 호출
         label = f"{stock_name} ({name})" if stock_name and stock_name != name else name
 
         if df is not None:
@@ -801,7 +873,7 @@ for i, p in enumerate(st.session_state.portfolio):
         elif abs(gap_pct)<5: gv="🟡 소폭 갭"; gc2="#f59e0b"; gd=f"갭 {gap_pct:+.1f}% — 눌림 기다려"
         else: gv="🔴 갭 과다"; gc2="#ef4444"; gd=f"갭 {gap_pct:+.1f}% — 추격 위험"
 
-        signal_ok = s3_on and s4_on
+        signal_ok = s3_on or s4_on  # quant_predict core와 동일 조건
 
         # 수급
         sup_html=""
