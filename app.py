@@ -365,7 +365,63 @@ def get_us_price_batch(tickers: tuple) -> dict:
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_krx_listing():
-    return fdr.StockListing("KRX")
+    """KRX 종목 리스트 — pykrx → fdr → 하드코딩 fallback"""
+    # 1. pykrx 시도
+    try:
+        from pykrx import stock as pykrx_stock
+        today = datetime.now().strftime("%Y%m%d")
+        tickers = pykrx_stock.get_market_ticker_list(today, market="KOSPI")
+        if tickers:
+            rows = []
+            for code in tickers:
+                try:
+                    name   = pykrx_stock.get_market_ticker_name(code)
+                    marcap = pykrx_stock.get_market_cap(today, today, code)
+                    cap    = int(marcap["시가총액"].iloc[0]) if not marcap.empty else 0
+                    rows.append({"Code": code, "Name": name, "Marcap": cap, "Market": "KOSPI"})
+                except: pass
+            if rows:
+                return pd.DataFrame(rows)
+    except: pass
+
+    # 2. fdr 시도
+    try:
+        df = fdr.StockListing("KRX")
+        if df is not None and len(df) > 0:
+            return df
+    except: pass
+
+    # 3. 하드코딩 fallback (코스피 시총 상위 50개)
+    fallback = [
+        ("005930","삼성전자",400e12),("000660","SK하이닉스",120e12),
+        ("035420","NAVER",30e12),("005380","현대차",40e12),
+        ("051910","LG화학",20e12),("035720","카카오",15e12),
+        ("000270","기아",30e12),("028260","삼성물산",15e12),
+        ("012330","현대모비스",15e12),("066570","LG전자",12e12),
+        ("003550","LG",10e12),("017670","SK텔레콤",10e12),
+        ("030200","KT",8e12),("086790","하나금융지주",10e12),
+        ("105560","KB금융",15e12),("055550","신한지주",12e12),
+        ("032830","삼성생명",10e12),("018260","삼성에스디에스",8e12),
+        ("009150","삼성전기",7e12),("011170","롯데케미칼",5e12),
+        ("034730","SK",8e12),("096770","SK이노베이션",7e12),
+        ("010130","고려아연",8e12),("042660","한화오션",6e12),
+        ("003490","대한항공",5e12),("011780","금호석유",4e12),
+        ("024110","기업은행",5e12),("000100","유한양행",4e12),
+        ("068270","셀트리온",10e12),("207940","삼성바이오로직스",50e12),
+        ("006400","삼성SDI",15e12),("373220","LG에너지솔루션",60e12),
+        ("000810","삼성화재",8e12),("032640","LG유플러스",4e12),
+        ("047810","한국항공우주",3e12),("064350","현대로템",4e12),
+        ("009830","한화솔루션",4e12),("001450","현대해상",3e12),
+        ("138040","메리츠금융지주",8e12),("316140","우리금융지주",6e12),
+        ("010950","S-Oil",5e12),("267250","HD현대",4e12),
+        ("042700","한미반도체",8e12),("000990","DB하이텍",3e12),
+        ("329180","HD현대중공업",8e12),("010140","삼성중공업",4e12),
+        ("011000","한화",3e12),("003570","SNT홀딩스",2e12),
+        ("001040","CJ",2e12),("097950","CJ제일제당",3e12),
+    ]
+    rows = [{"Code": c, "Name": n, "Marcap": m, "Market": "KOSPI"}
+            for c, n, m in fallback]
+    return pd.DataFrame(rows)
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_ohlcv_kr(code: str) -> pd.DataFrame | None:
@@ -2087,16 +2143,18 @@ with st.expander("⚙️ 백테스트 설정", expanded=True):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_kospi200_codes(top_n=200) -> list:
-    """KRX 상장 종목에서 시총 상위 N개 코드 자동 로딩"""
+    """코스피 시총 상위 N개 코드 — load_krx_listing 재사용"""
     try:
-        listing = fdr.StockListing("KRX")
-        kospi = listing[listing["Market"].str.contains("KOSPI", na=False)]
+        listing = load_krx_listing()
+        if "Market" in listing.columns:
+            kospi = listing[listing["Market"].str.contains("KOSPI", na=False)]
+        else:
+            kospi = listing
         kospi = kospi[kospi["Marcap"] > 0].nlargest(top_n, "Marcap")
         return kospi["Code"].tolist()
     except Exception as e:
-        st.warning(f"코스피 종목 로딩 실패: {e}")
-        return ["005930","000660","035420","005380","051910",
-                "035720","000270","028260","012330","066570"]
+        listing = load_krx_listing()
+        return listing["Code"].tolist()[:top_n]
 
 if bt_run:
     if bt_universe == "코스피200 전체(자동)":
