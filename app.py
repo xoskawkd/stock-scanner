@@ -34,8 +34,18 @@ except Exception:
 # ============================================================
 # ★ API 키 설정
 # ============================================================
-KRX_API_KEY     = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # ← data.krx.co.kr AUTH_KEY
+KRX_API_KEY     = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # ← data.krx.co.kr AUTH_KEY (KIS 실패 시 fallback)
 FINNHUB_API_KEY = "e196a49253d0408cadf883e01f6b78d9"   # ← Finnhub 키 (없으면 yfinance)
+
+# 한국투자증권 (KIS) Open API
+KIS_APP_KEY    = "PSmEd1aPpxC4GtQ5k23MW8iI4IdvwKRhnXiF"    # ← 한국투자증권 앱키
+KIS_APP_SECRET = "Pvmawb5cs8oIDi6KEgMbqx+115iKoUjKdMMj2DmcmdjyPmMtordm2EEfUoA+q15+23cUg2/7piYXimu+O42ZCS/tpJ2YpNAraf8W6TRV2cuwAgToJEWs8xBNHJeqFob6JUiVFhLbSGObuh1Z9ziXISrXBIF61+l/ZWoULdaIqAdYcjV2EIA="    # ← 한국투자증권 앱시크릿
+KIS_ACCOUNT_NO = ""    # ← 계좌번호 (XXXXXXXXXX-XX, 시세조회는 불필요)
+KIS_IS_REAL    = True  # ← True: 실전, False: 모의투자
+KIS_BASE_URL   = "https://openapi.koreainvestment.com:9443" if KIS_IS_REAL else "https://openapivts.koreainvestment.com:29443"
+
+# KIS 토큰 (앱 시작 시 자동 발급)
+_KIS_TOKEN = {"access_token": "", "expires": None}
 
 # ============================================================
 # ★ 스캔/필터 튜닝값
@@ -171,7 +181,14 @@ def get_krx_price(code: str) -> tuple:
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_kr_price_with_fallback(code: str) -> tuple:
-    """KRX → yfinance → OHLCV 안전망 (OHLCV는 최최후 수단)"""
+    """KIS → KRX → yfinance → OHLCV 안전망"""
+    # KIS 우선 (가장 빠르고 정확)
+    if KIS_APP_KEY and KIS_APP_SECRET:
+        price, src = kis_get_price(code)
+        if price > 0:
+            return price, 0.0, src
+
+    # KRX fallback
     price, vol, src = get_krx_price(code)
     if price > 0:
         return price, vol, src
@@ -395,7 +412,150 @@ def get_market_status():
         return "50", "중립", "1,350.00"
 
 # ============================================================
-# 5-B. KRX 투자자별 수급 데이터
+# 5-B. 한국투자증권 (KIS) API
+# ============================================================
+def kis_get_token() -> str:
+    """KIS 접근토큰 발급 (1일 유효, 캐시)"""
+    global _KIS_TOKEN
+    if not KIS_APP_KEY or not KIS_APP_SECRET:
+        return ""
+    now = datetime.now()
+    if _KIS_TOKEN["access_token"] and _KIS_TOKEN["expires"] and now < _KIS_TOKEN["expires"]:
+        return _KIS_TOKEN["access_token"]
+    try:
+        res = requests.post(
+            f"{KIS_BASE_URL}/oauth2/tokenP",
+            json={"grant_type": "client_credentials",
+                  "appkey": KIS_APP_KEY,
+                  "appsecret": KIS_APP_SECRET},
+            timeout=5,
+        ).json()
+        token = res.get("access_token", "")
+        if token:
+            _KIS_TOKEN["access_token"] = token
+            _KIS_TOKEN["expires"] = now + timedelta(hours=23)
+        return token
+    except:
+        return ""
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def kis_get_price(code: str) -> tuple:
+    """KIS 현재가 조회 (국내 주식)"""
+    token = kis_get_token()
+    if not token:
+        return 0.0, "KIS토큰없음"
+    try:
+        res = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
+            params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": code},
+            headers={
+                "authorization": f"Bearer {token}",
+                "appkey": KIS_APP_KEY,
+                "appsecret": KIS_APP_SECRET,
+                "tr_id": "FHKST01010100",
+            },
+            timeout=5,
+        ).json()
+        output = res.get("output", {})
+        price  = float(output.get("stck_prpr", 0) or 0)
+        return price, "KIS(실시간)"
+    except:
+        return 0.0, "KIS실패"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def kis_get_investor(code: str) -> dict:
+    """
+    KIS 투자자별 매매동향 (외국인/기관/개인)
+    """
+    token = kis_get_token()
+    if not token:
+        return {"ok": False, "reason": "KIS토큰없음"}
+    try:
+        res = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor",
+            params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": code},
+            headers={
+                "authorization": f"Bearer {token}",
+                "appkey": KIS_APP_KEY,
+                "appsecret": KIS_APP_SECRET,
+                "tr_id": "FHKST01010900",
+            },
+            timeout=5,
+        ).json()
+        output = res.get("output", [])
+        if not output:
+            return {"ok": False, "reason": "KIS데이터없음"}
+
+        result = {"ok": True, "외국인": 0, "기관": 0, "개인": 0, "연기금": 0,
+                  "외국인비율": 0.0, "기관비율": 0.0}
+        total = 0
+        for row in output:
+            inv  = row.get("invst_nm", "")
+            try: net = int(row.get("netbuy_qty", 0) or 0)
+            except: net = 0
+            try: buy = int(row.get("buy_qty", 0) or 0)
+            except: buy = 0
+            total += buy
+
+            if "외국인" in inv:   result["외국인"] = net
+            elif "기관계" in inv: result["기관"]   = net
+            elif "개인" in inv:   result["개인"]   = net
+            elif "연기금" in inv: result["연기금"] = net
+
+        if total > 0:
+            result["외국인비율"] = result["외국인"] / total * 100
+            result["기관비율"]   = result["기관"]   / total * 100
+        return result
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def kis_get_investor_trend(code: str, days: int = 5) -> list:
+    """KIS 최근 N일 수급 트렌드"""
+    token = kis_get_token()
+    if not token:
+        return []
+    try:
+        end_dt   = datetime.now().strftime("%Y%m%d")
+        start_dt = (datetime.now() - timedelta(days=days*2)).strftime("%Y%m%d")
+        res = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-investor",
+            params={
+                "fid_cond_mrkt_div_code": "J",
+                "fid_input_iscd": code,
+                "fid_begin_dt": start_dt,
+                "fid_end_dt": end_dt,
+            },
+            headers={
+                "authorization": f"Bearer {token}",
+                "appkey": KIS_APP_KEY,
+                "appsecret": KIS_APP_SECRET,
+                "tr_id": "FHKST01010600",
+            },
+            timeout=5,
+        ).json()
+        rows = res.get("output", [])
+        trend = []
+        for row in rows[:days]:
+            try:
+                trend.append({
+                    "ok": True,
+                    "date": row.get("stck_bsop_date", ""),
+                    "외국인": int(row.get("frgn_ntby_qty", 0) or 0),
+                    "기관":   int(row.get("orgn_ntby_qty", 0) or 0),
+                    "개인":   int(row.get("prsn_ntby_qty", 0) or 0),
+                })
+            except: pass
+        return trend
+    except:
+        return []
+
+
+# ============================================================
+# 5-C. KRX 투자자별 수급 데이터 (KIS 실패 시 fallback)
 # ============================================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_krx_investor_data(code: str, date_str: str = "") -> dict:
@@ -499,10 +659,17 @@ def get_krx_investor_trend(code: str, days: int = 5) -> list:
 
 def calc_supply_signal(code: str) -> dict:
     """
-    수급 신호 종합 계산
+    수급 신호 종합 계산 — KIS 우선, KRX fallback
     반환: {판단, 색상, 외국인연속, 기관전환, 상세}
     """
-    trend = get_krx_investor_trend(code, days=5)
+    # KIS 우선
+    if KIS_APP_KEY and KIS_APP_SECRET:
+        trend = kis_get_investor_trend(code, days=5)
+        if not trend:
+            trend = get_krx_investor_trend(code, days=5)
+    else:
+        trend = get_krx_investor_trend(code, days=5)
+
     if not trend:
         return {"ok": False, "reason": "수급데이터없음"}
 
@@ -1323,7 +1490,8 @@ st.sidebar.metric("환율 (USD/KRW)", f"{exchange} 원")
 st.sidebar.metric("🇺🇸 미국 정규장", "OPEN" if is_us_market_open() else "CLOSED")
 
 with st.sidebar.expander("🔑 API 상태", expanded=True):
-    st.write("KRX:", "✅ 연결됨 (장마감 후 확정종가)" if KRX_API_KEY else "❌ 키 없음 (yfinance 대체)")
+    st.write("KIS:", "✅ 연결됨 (실시간)" if KIS_APP_KEY else "❌ 키 없음")
+    st.write("KRX:", "✅ fallback" if KRX_API_KEY else "❌ 키 없음")
     st.write("Finnhub:", "✅ 연결됨" if FINNHUB_API_KEY else "❌ 키 없음 (yfinance 대체)")
 
 st.title("🚀 Tae's Quant 폭등 예측 스캐너")
@@ -1365,28 +1533,68 @@ if col_btn1.button("🚨 전체 초기화"):
     save_portfolio([])
     st.rerun()
 
-with st.form(key="portfolio_form", clear_on_submit=True):
-    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-    n_in = c1.text_input("종목코드 / 티커 / 코인",
-                         placeholder="국내: 005930  해외: AAPL  코인: BTC")
-    b_in = c2.number_input("내 평단가", min_value=0.0, step=0.01, format="%.4f")
-    d_in = c3.text_input("매수일자", placeholder="2024-01-15")
-    if c4.form_submit_button("➕ 추가"):
-        if n_in and b_in > 0:
-            st.session_state.my_portfolio.append({
-                "name": n_in.strip().upper(),
-                "buy":  float(b_in),
-                "date": d_in.strip() if d_in.strip() else "",
-            })
-            save_portfolio(st.session_state.my_portfolio)
-            st.rerun()
-        else:
-            st.warning("종목명과 평단가를 입력하세요.")
+# 탭 분리: 관심종목 / 보유종목
+tab_watch, tab_hold = st.tabs(["👀 관심종목 (매수 전)", "💰 보유종목 (평단 입력)"])
+
+with tab_watch:
+    st.caption("스캐너 추천 종목을 등록하면 다음날 매수 여부를 자동 판단해드려요")
+    with st.form(key="watch_form", clear_on_submit=True):
+        w1, w2, w3 = st.columns([2, 2, 1])
+        wn_in = w1.text_input("종목코드", placeholder="005930 / AAPL / BTC")
+        wm_in = w2.text_input("메모", placeholder="스캐너 추천, 관심 이유 등")
+        if w3.form_submit_button("👀 관심 추가"):
+            if wn_in:
+                # 중복 체크
+                exists = any(p["name"] == wn_in.strip().upper() for p in st.session_state.my_portfolio)
+                if not exists:
+                    st.session_state.my_portfolio.append({
+                        "name": wn_in.strip().upper(),
+                        "buy":  0.0,
+                        "date": "",
+                        "type": "watch",
+                        "memo": wm_in.strip(),
+                    })
+                    save_portfolio(st.session_state.my_portfolio)
+                    st.rerun()
+                else:
+                    st.warning("이미 등록된 종목이에요.")
+
+with tab_hold:
+    with st.form(key="portfolio_form", clear_on_submit=True):
+        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+        n_in = c1.text_input("종목코드 / 티커 / 코인",
+                             placeholder="국내: 005930  해외: AAPL  코인: BTC")
+        b_in = c2.number_input("내 평단가", min_value=0.0, step=0.01, format="%.4f")
+        d_in = c3.text_input("매수일자", placeholder="2024-01-15")
+        if c4.form_submit_button("➕ 추가"):
+            if n_in and b_in > 0:
+                # 관심종목 → 보유종목으로 업그레이드
+                for p in st.session_state.my_portfolio:
+                    if p["name"] == n_in.strip().upper() and p.get("type") == "watch":
+                        p["buy"]  = float(b_in)
+                        p["date"] = d_in.strip() if d_in.strip() else ""
+                        p["type"] = "hold"
+                        save_portfolio(st.session_state.my_portfolio)
+                        st.rerun()
+                        break
+                else:
+                    st.session_state.my_portfolio.append({
+                        "name": n_in.strip().upper(),
+                        "buy":  float(b_in),
+                        "date": d_in.strip() if d_in.strip() else "",
+                        "type": "hold",
+                        "memo": "",
+                    })
+                    save_portfolio(st.session_state.my_portfolio)
+                    st.rerun()
+            else:
+                st.warning("종목명과 평단가를 입력하세요.")
 
 if st.session_state.my_portfolio:
     to_remove = None
     for i, p in enumerate(st.session_state.my_portfolio):
         name, buy = p["name"], p["buy"]
+        ptype = p.get("type", "hold")  # watch or hold
         d = get_portfolio_data(name)
 
         if not d["ok"] or d["curr"] <= 0:
@@ -1398,6 +1606,159 @@ if st.session_state.my_portfolio:
         curr   = d["curr"]
         profit = (curr - buy) / buy * 100 if buy > 0 else 0
         is_kr  = d["currency"] == "KRW"
+
+        # ── 관심종목 카드 (별도 렌더링) ──
+        if ptype == "watch":
+            grade_color = {"A+": "#f59e0b", "A": "#10b981", "B+": "#3b82f6",
+                           "B": "#94a3b8", "C": "#64748b"}.get(d["grade"], "#64748b")
+
+            def _usd_fmt_w(v):
+                if v <= 0: return "$0"
+                if v < 1:  return f"${v:,.4f}"
+                elif v < 10: return f"${v:,.3f}"
+                else: return f"${v:,.2f}"
+            fmt_w = (lambda v: f"₩{int(v):,}") if is_kr else _usd_fmt_w
+
+            # 전일 종가 (갭 계산용)
+            prev_close = 0.0
+            try:
+                if is_kr:
+                    df_tmp = load_ohlcv_kr(name)
+                    if df_tmp is not None and len(df_tmp) >= 2:
+                        prev_close = float(df_tmp["close"].iloc[-2])
+                else:
+                    df_tmp = load_ohlcv_us(name)
+                    if df_tmp is not None and len(df_tmp) >= 2:
+                        prev_close = float(df_tmp["close"].iloc[-2])
+            except: pass
+
+            gap_pct = (curr - prev_close) / prev_close * 100 if prev_close > 0 else 0
+
+            # 갭 판단
+            if abs(gap_pct) < 3:
+                gap_verdict = "🟢 갭 양호"; gap_color = "#10b981"
+                gap_detail  = f"갭 {gap_pct:+.1f}% — 매수 검토 가능"
+            elif abs(gap_pct) < 5:
+                gap_verdict = "🟡 소폭 갭"; gap_color = "#f59e0b"
+                gap_detail  = f"갭 {gap_pct:+.1f}% — 눌림 기다려야"
+            else:
+                gap_verdict = "🔴 갭 과다"; gap_color = "#ef4444"
+                gap_detail  = f"갭 {gap_pct:+.1f}% — 추격매수 위험"
+
+            # 신호 유지 여부
+            sigs_w = d.get("signals", [])
+            s3_alive = any("S3" in s and "✅" in s for s in sigs_w)
+            s4_alive = any("S4" in s and "✅" in s for s in sigs_w)
+            signal_ok = s3_alive and s4_alive
+
+            # 수급 (국내만)
+            supply_html = ""
+            if is_kr and KRX_API_KEY:
+                sup = calc_supply_signal(name)
+                if sup.get("ok"):
+                    sup_sigs = " / ".join(sup.get("signals", [])[:3])
+                    supply_html = f"""
+  <div style="background:#1a2744;border:1px solid #3b82f6;border-radius:6px;
+              padding:8px 12px;margin-bottom:8px;">
+    <span style="color:#3b82f6;font-size:11px;font-weight:bold;">수급</span>
+    <span style="color:{sup['color']};font-size:12px;font-weight:bold;margin-left:8px;">
+      {sup['verdict']}
+    </span><br>
+    <span style="color:#94a3b8;font-size:10px;">{sup_sigs}</span>
+  </div>"""
+
+            # 종합 매수 판단
+            buy_score = 0
+            if abs(gap_pct) < 3: buy_score += 2
+            elif abs(gap_pct) < 5: buy_score += 1
+            if signal_ok: buy_score += 2
+            if is_kr and KRX_API_KEY:
+                sup = calc_supply_signal(name)
+                if sup.get("ok") and sup.get("score", 0) >= 3: buy_score += 2
+
+            if buy_score >= 5:
+                buy_verdict = "🟢 매수 적극 고려"; buy_color = "#10b981"
+            elif buy_score >= 3:
+                buy_verdict = "🟡 조건부 매수 (눌림 확인)"; buy_color = "#f59e0b"
+            else:
+                buy_verdict = "🔴 매수 보류"; buy_color = "#ef4444"
+
+            memo_str = p.get("memo", "")
+
+            st.markdown(f"""
+<div style="background:#1e293b;padding:16px;border-radius:12px;
+            border-left:6px solid {grade_color};margin-bottom:12px;
+            border-top:2px solid #334155;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+    <h3 style="margin:0;">👀 {d['label']}
+      <span style="font-size:11px;background:#334155;color:#94a3b8;
+                   padding:2px 6px;border-radius:4px;margin-left:8px;">관심종목</span>
+    </h3>
+    <span style="background:{grade_color};color:#000;font-size:11px;font-weight:bold;
+                 padding:2px 6px;border-radius:4px;">{d['grade']} {d['score']}점</span>
+  </div>
+  {f'<div style="font-size:11px;color:#64748b;margin-bottom:8px;">📝 {memo_str}</div>' if memo_str else ''}
+
+  <div style="background:#0f172a;padding:10px;border-radius:8px;margin-bottom:8px;">
+    <div style="display:flex;justify-content:space-between;">
+      <span style="color:#94a3b8;font-size:11px;">현재가</span>
+      <span style="font-weight:bold;">{fmt_w(curr)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:4px;">
+      <span style="color:#94a3b8;font-size:11px;">전일 대비 갭</span>
+      <span style="color:{'#10b981' if gap_pct>=0 else '#ef4444'};font-weight:bold;">
+        {gap_pct:+.1f}%
+      </span>
+    </div>
+  </div>
+
+  <div style="background:#0f172a;padding:10px 14px;border-radius:8px;margin-bottom:8px;">
+    <div style="display:flex;justify-content:space-between;">
+      <span style="font-size:12px;font-weight:bold;color:{gap_color};">{gap_verdict}</span>
+      <span style="font-size:11px;color:#94a3b8;">{gap_detail}</span>
+    </div>
+  </div>
+
+  <div style="background:#0f172a;padding:10px 14px;border-radius:8px;margin-bottom:8px;">
+    <div style="display:flex;justify-content:space-between;">
+      <span style="font-size:12px;color:#94a3b8;">신호 유지</span>
+      <span style="font-size:12px;font-weight:bold;">
+        {'✅ S3+S4 유지' if signal_ok else ('⚠️ S3만' if s3_alive else '❌ 신호 소멸')}
+      </span>
+    </div>
+  </div>
+
+  {supply_html}
+
+  <div style="background:#0f172a;padding:12px 14px;border-radius:8px;margin-bottom:8px;
+              border-left:3px solid {buy_color};">
+    <span style="font-size:14px;font-weight:bold;color:{buy_color};">{buy_verdict}</span>
+  </div>
+
+  <div style="display:flex;gap:8px;margin-top:8px;">
+    <div style="font-size:10px;color:#475569;">📡 {d['source']}</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+            col_buy, col_del = st.columns([2, 1])
+            if col_buy.button(f"➕ 매수 확정 (평단 입력)", key=f"buy_{i}"):
+                st.session_state[f"buy_confirm_{i}"] = True
+            if st.session_state.get(f"buy_confirm_{i}"):
+                buy_price = st.number_input(f"평단가 입력 ({name})",
+                                           min_value=0.0, step=0.01,
+                                           format="%.4f", key=f"buy_price_{i}")
+                buy_date  = st.text_input("매수일자", value=datetime.now().strftime("%Y-%m-%d"),
+                                         key=f"buy_date_{i}")
+                if st.button("✅ 확정", key=f"buy_ok_{i}"):
+                    p["buy"]  = float(buy_price)
+                    p["date"] = buy_date
+                    p["type"] = "hold"
+                    st.session_state[f"buy_confirm_{i}"] = False
+                    save_portfolio(st.session_state.my_portfolio)
+                    st.rerun()
+            if col_del.button("🗑️ 삭제", key=f"del_w_{i}"):
+                to_remove = i
+            continue  # 관심종목은 여기서 끝
 
         def _usd_fmt(v: float) -> str:
             if v <= 0:   return "$0"
