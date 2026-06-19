@@ -101,8 +101,10 @@ def kis_headers(tr_id):
     if not t: return None
     return {"authorization":f"Bearer {t}","appkey":KIS_APP_KEY,"appsecret":KIS_APP_SECRET,"tr_id":tr_id}
 
-@st.cache_data(ttl=30, show_spinner=False)
 def kis_price(code: str) -> tuple:
+    """KIS 실시간 현재가 (캐시 없음 — 항상 최신)"""
+    if not KIS_APP_KEY or not KIS_APP_SECRET:
+        return 0.0, ""
     h = kis_headers("FHKST01010100")
     if not h: return 0.0, ""
     try:
@@ -110,7 +112,8 @@ def kis_price(code: str) -> tuple:
             params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code},
             headers=h, timeout=4).json()
         p = float(r.get("output",{}).get("stck_prpr",0) or 0)
-        return p, "KIS"
+        if p > 0: return p, "KIS"
+        return 0.0, ""
     except: return 0.0, ""
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -203,12 +206,11 @@ def supply_signal(code: str) -> dict:
 # ============================================================
 @st.cache_data(ttl=30, show_spinner=False)
 def kr_price(code: str) -> tuple:
-    # KIS 우선 (실시간)
+    # 1순위: KIS 실시간
     if KIS_APP_KEY and KIS_APP_SECRET:
         p, src = kis_price(code)
         if p > 0: return p, src
-    # KRX fallback
-    # KRX fallback
+    # 2순위: KRX
     if KRX_API_KEY:
         try:
             d = datetime.now()
@@ -263,6 +265,7 @@ def us_price(ticker: str) -> tuple:
     return 0.0,"실패"
 
 def us_prepost(ticker: str) -> tuple:
+    """장외가 조회 — 캐시 없음 (실시간)"""
     try:
         t = yf.Ticker(ticker)
         reg = t.history(period="1d",interval="1m",prepost=False)
@@ -279,10 +282,11 @@ def us_prepost(ticker: str) -> tuple:
         if o<=now<=c: sess="🏛️정규장"
         elif pre<=now<o: sess="🌅프리마켓"
         elif c<now<=aft: sess="🌙애프터마켓"
-        else: return 0,""
+        else: sess="🌙애프터마켓"  # 자정 이후도 애프터마켓으로 표시
         diff = (pp_p-reg_p)/reg_p*100 if reg_p>0 else 0
-        # 정규장 외 시간에는 무조건 표시, 정규장 중엔 0.05% 이상 차이날때만
+        # 정규장 중엔 차이 없으면 표시 안함
         if sess == "🏛️정규장" and abs(diff) < 0.05: return 0,""
+        # 그 외엔 항상 표시
         return pp_p, f"{sess} {diff:+.1f}%"
     except: return 0,""
 
@@ -690,9 +694,19 @@ if "my_portfolio" in st.session_state:
 # 사이드바
 st.sidebar.title("🛡️ Tae Scanner v9")
 with st.sidebar.expander("🔑 API 상태"):
-    st.write("KIS:",  "✅" if KIS_APP_KEY  else "❌")
+    kis_ok = bool(KIS_APP_KEY and KIS_APP_SECRET)
+    kis_token_ok = bool(_KIS_TOKEN.get("token",""))
+    st.write("KIS키:", "✅" if kis_ok else "❌ 키없음")
+    if kis_ok:
+        st.write("KIS토큰:", "✅발급됨" if kis_token_ok else "❌미발급(첫요청시자동)")
     st.write("KRX:",  "✅" if KRX_API_KEY  else "❌ (fallback)")
     st.write("Finnhub:", "✅" if FINNHUB_API_KEY else "❌")
+    # 미국장 시간대 표시
+    if ZoneInfo:
+        try:
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+            st.write(f"🇺🇸 ET: {now_et.strftime('%H:%M')} ({'장중' if is_us_open() else '장외'})")
+        except: pass
 
 try:
     fg = requests.get("https://api.alternative.me/fng/?limit=1",timeout=3).json()
