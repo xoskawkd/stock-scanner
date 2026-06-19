@@ -49,7 +49,7 @@ DEFAULT_W = {
     "s1_strong":12,"s1_weak":6,"s2_strong":9,"s2_weak":5,
     "s2t_strong":5,"s2t_weak":3,"s3_strong":17,"s3_weak":10,
     "s4":12,"s5":3,"rsi_good":5,"rsi_oversold":3,"rsi_extreme":2,
-    "min_pass_score":28,
+    "min_pass_score":20,
 }
 
 def load_weights():
@@ -184,6 +184,51 @@ def kis_investor_trend(code: str, days=5) -> list:
             except: pass
         return trend
     except: return []
+
+def supply_score(code: str) -> int:
+    """
+    수급 점수 계산 — scan_kr 정렬용
+    외국인/기관 순매수 규모와 연속성 반영
+    반환: 0~30점
+    """
+    if not KIS_APP_KEY or not KIS_APP_SECRET:
+        return 0
+    trend = kis_investor_trend(code, 5)
+    if not trend: return 0
+
+    score = 0
+    today = trend[0]
+    fore = today.get("외국인", 0)
+    inst = today.get("기관", 0)
+
+    # 외국인 순매수 연속일
+    fore_streak = sum(1 for t in trend if t.get("외국인", 0) > 0)
+    inst_streak = sum(1 for t in trend if t.get("기관", 0) > 0)
+
+    # 외국인
+    if fore > 0:
+        score += 5
+        if fore_streak >= 3: score += 8   # 3일+ 연속
+        elif fore_streak >= 2: score += 4
+    elif fore < 0:
+        score -= 5
+
+    # 기관
+    if inst > 0:
+        score += 5
+        if inst_streak >= 2: score += 4
+        # 기관 전환 매수 (어제 매도 → 오늘 매수)
+        if len(trend) >= 2 and trend[1].get("기관", 0) <= 0:
+            score += 3
+    elif inst < 0:
+        score -= 3
+
+    # 외국인 + 기관 동시 매수
+    if fore > 0 and inst > 0:
+        score += 5
+
+    return max(0, min(score, 30))
+
 
 def supply_signal(code: str) -> dict:
     trend = kis_investor_trend(code, 5)
@@ -642,12 +687,35 @@ def scan_kr():
                 "현재가":int(p),"RSI":round(r["rsi"],1),
                 "매수구간":f"₩{bmin:,}~₩{bmax:,}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
-                "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"]]}
+                "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"]],
+                "수급점수":0,"종합점수":r["score"]}
 
     with ThreadPoolExecutor(max_workers=15) as ex:
         raw=list(ex.map(_fetch,codes))
     skips=[r for r in raw if r.get("_skip")]
-    top5=sorted([r for r in raw if not r.get("_skip")],key=lambda x:x["점수"],reverse=True)[:5]
+    passed=[r for r in raw if not r.get("_skip")]
+
+    # 수급 점수 추가 (KIS 있을 때만)
+    if KIS_APP_KEY and KIS_APP_SECRET and passed:
+        def _add_supply(r):
+            try:
+                sup = supply_score(r["코드"])
+                r["수급점수"] = sup
+                r["종합점수"] = r["점수"] + sup
+            except:
+                r["수급점수"] = 0
+                r["종합점수"] = r["점수"]
+            return r
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            passed = list(ex.map(_add_supply, passed))
+        # 종합점수(차트+수급)로 정렬
+        top5 = sorted(passed, key=lambda x: x["종합점수"], reverse=True)[:5]
+    else:
+        for r in passed:
+            r["수급점수"] = 0
+            r["종합점수"] = r["점수"]
+        top5 = sorted(passed, key=lambda x: x["점수"], reverse=True)[:5]
+
     return top5, skips
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -676,7 +744,8 @@ def scan_us():
                 "현재가":round(p,2),"RSI":round(r["rsi"],1),
                 "매수구간":f"{uf(p*0.97)}~{uf(p*1.02)}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
-                "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"]]}
+                "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"]],
+                "수급점수":0,"종합점수":r["score"]}
 
     with ThreadPoolExecutor(max_workers=15) as ex:
         raw=list(ex.map(_fetch,US_LIST))
@@ -1093,7 +1162,7 @@ def render(title, data, currency):
   </div>
   <div style="margin-bottom:6px;">{badges}</div>
   <div style="font-size:12px;line-height:1.8;">
-    🎯 <b>{item['점수']}점</b> | RSI <b>{item['RSI']}</b><br>
+    🎯 차트 <b>{item['점수']}점</b>{f" + 수급 <b style='color:#10b981'>{item['수급점수']}점</b> = <b style='color:#f59e0b'>{item['종합점수']}점</b>" if item.get('수급점수',0)>0 else ""} | RSI <b>{item['RSI']}</b><br>
     💰 <b>{fmt2(item['현재가'])}</b> <span style="font-size:10px;color:#64748b;">({item.get('source','')})</span><br>
     🟢 {item['매수구간']}<br>
     📈 <span style="color:#3b82f6;">{fmt2(item['목표가'])}</span>
