@@ -203,9 +203,11 @@ def supply_signal(code: str) -> dict:
 # ============================================================
 @st.cache_data(ttl=30, show_spinner=False)
 def kr_price(code: str) -> tuple:
-    # KIS 우선
-    p, src = kis_price(code)
-    if p > 0: return p, src
+    # KIS 우선 (실시간)
+    if KIS_APP_KEY and KIS_APP_SECRET:
+        p, src = kis_price(code)
+        if p > 0: return p, src
+    # KRX fallback
     # KRX fallback
     if KRX_API_KEY:
         try:
@@ -515,7 +517,8 @@ def quant_predict(df, market="KR"):
         OUT["score"]=int(score)
 
         # 통과 게이트
-        core=s3 and s4
+        # S3 AND S4 → 너무 적음 → S3 OR S4 + 점수 높임
+        core = (s3 and s4) or (s3 and score >= 45) or (s4 and score >= 45)
         OUT["pass"]=(not rejected) and core and (score>=W["min_pass_score"])
 
         # 등급
@@ -625,11 +628,15 @@ def portfolio_data(name: str) -> dict:
         p, src = kr_price(name)
         df = ohlcv_kr(name)
         stock_name = get_stock_name(name)
-        label = f"{stock_name} ({name})" if stock_name != name else name
+        # 종목명이 코드와 같으면 KIS/listing 재시도
+        if stock_name == name:
+            stock_name = get_stock_name(name)
+        label = f"{stock_name} ({name})" if stock_name and stock_name != name else name
 
         if df is not None:
             r = quant_predict(df,"KR")
             curr = p if p>0 else r["current"]
+            if curr <= 0: return FAIL
             tgt = int(r["target"]) if r["target"]>curr*1.03 and r["target"]<=curr*1.15 else int(curr*1.08)
             stp = int(r["stop"])   if r["stop"]>curr*0.85  and r["stop"]<curr*0.98  else int(curr*0.93)
             return {"label":label,"curr":curr,"score":r["score"],"grade":r["grade"],
@@ -673,6 +680,10 @@ def portfolio_data(name: str) -> dict:
 st.set_page_config(page_title="Tae Scanner v9", layout="wide")
 if "portfolio" not in st.session_state:
     st.session_state.portfolio = load_portfolio()
+if "my_portfolio" in st.session_state:
+    # 구버전 마이그레이션
+    st.session_state.portfolio = st.session_state.my_portfolio
+    del st.session_state["my_portfolio"]
 
 # 사이드바
 st.sidebar.title("🛡️ Tae Scanner v9")
@@ -742,7 +753,7 @@ with tab_hold:
 
 # 포트폴리오 카드
 to_remove = None
-for i, p in enumerate(st.session_state.my_portfolio if "my_portfolio" in st.session_state else st.session_state.portfolio):
+for i, p in enumerate(st.session_state.portfolio):
     name = p["name"]; buy = p.get("buy",0); ptype = p.get("type","hold")
     d = portfolio_data(name)
     if not d["ok"] or d["curr"]<=0:
@@ -867,12 +878,18 @@ for i, p in enumerate(st.session_state.my_portfolio if "my_portfolio" in st.sess
     hold_str = f"{hold_days}일째" if hold_days>0 else ("날짜미입력" if not p.get("date") else "오늘")
     pc = "#10b981" if profit>=0 else "#ef4444"
 
-    # 장외가 (해외)
+    # 장외가 (해외) — 장외가격 + 장외기준 수익률
     pp_html=""
     if not is_kr and d.get("prepost",0)>0:
         pp=d["prepost"]; pl=d.get("prepost_label","")
         pp_profit=(pp-buy)/buy*100 if buy>0 and pp>0 else 0
-        pp_html=f'<div style="background:#1a2744;padding:8px;border-radius:6px;margin:6px 0;font-size:12px;"><span style="color:#3b82f6;font-weight:bold;">{pl}</span> <span style="color:#94a3b8;margin-left:8px;">수익률 {pp_profit:+.1f}%</span></div>'
+        pp_reg_profit=(curr-buy)/buy*100 if buy>0 and curr>0 else 0
+        pp_color="#10b981" if pp_profit>=0 else "#ef4444"
+        pp_html=f'''<div style="background:#1a2744;border:1px solid #3b82f6;padding:8px;border-radius:6px;margin:6px 0;">
+  <span style="color:#3b82f6;font-size:11px;font-weight:bold;">{pl}</span>
+  <span style="color:{pp_color};font-size:13px;font-weight:bold;margin-left:8px;">{uf(pp)}</span>
+  <span style="color:{pp_color};font-size:12px;margin-left:6px;">({pp_profit:+.1f}%)</span>
+</div>'''
 
     # 수급 (국내)
     sup_html2=""
@@ -935,15 +952,12 @@ for i, p in enumerate(st.session_state.my_portfolio if "my_portfolio" in st.sess
     if st.button("🗑️ 삭제", key=f"del_{i}"): to_remove=i
 
 if to_remove is not None:
-    port_key = "my_portfolio" if "my_portfolio" in st.session_state else "portfolio"
-    st.session_state[port_key].pop(to_remove)
-    save_portfolio(st.session_state[port_key])
+    st.session_state.portfolio.pop(to_remove)
+    save_portfolio(st.session_state.portfolio)
     st.rerun()
 
-# 전체 삭제
 if st.button("🚨 전체 초기화"):
-    port_key = "my_portfolio" if "my_portfolio" in st.session_state else "portfolio"
-    st.session_state[port_key]=[]
+    st.session_state.portfolio=[]
     save_portfolio([])
     st.rerun()
 
