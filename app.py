@@ -256,12 +256,12 @@ def _yf_fresh_price(ticker: str) -> tuple:
                 if not last_close.empty:
                     p = float(last_close.iloc[-1])
                     if p > 0:
-                        return p, "yfinance(1분봉)"
+                        return p, "yfinance"
         except: pass
         try:
             p = getattr(t.fast_info, "last_price", 0)
             if p and float(p) > 0:
-                return float(p), "yfinance(실시간)"
+                return float(p), "yfinance"
         except: pass
         try:
             df_day = t.history(period="5d", interval="1d")
@@ -275,7 +275,7 @@ def _yf_fresh_price(ticker: str) -> tuple:
                     except: days_old = 0
                     if days_old > 3:
                         return None, f"yfinance(일봉{days_old}일전·stale차단)"
-                    return float(last_close.iloc[-1]), "yfinance(일봉종가)"
+                    return float(last_close.iloc[-1]), "yfinance"
         except: pass
     except: pass
     return None, "실패"
@@ -340,7 +340,7 @@ def get_us_price(ticker: str) -> tuple:
     c, pc = q["c"], q["pc"]
 
     if market_open and c > 0:
-        return c, "Finnhub(정규장)"
+        return c, "Finnhub"
     if not market_open and pc > 0:
         return pc, "Finnhub(전일정규장종가)"
     if c > 0:
@@ -515,7 +515,7 @@ def kis_get_price(code: str) -> tuple:
         ).json()
         output = res.get("output", {})
         price  = float(output.get("stck_prpr", 0) or 0)
-        return price, "KIS(실시간)"
+        return price, "KIS"
     except:
         return 0.0, "KIS실패"
 
@@ -1366,9 +1366,33 @@ def get_portfolio_data(name: str) -> dict:
         if df is not None:
             r = quant_predict(df, "KR")
             curr = price if price > 0 else 0.0
-            listing = load_krx_listing()
-            row     = listing[listing["Code"] == name]
-            label   = row["Name"].values[0] if not row.empty else name
+            # 종목명 조회 — KIS → listing → 코드 그대로
+            label = name
+            try:
+                if KIS_APP_KEY:
+                    token = kis_get_token()
+                    if token:
+                        res_name = requests.get(
+                            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/search-stock-info",
+                            params={"PRDT_TYPE_CD": "300", "PDNO": name},
+                            headers={
+                                "authorization": f"Bearer {token}",
+                                "appkey": KIS_APP_KEY,
+                                "appsecret": KIS_APP_SECRET,
+                                "tr_id": "CTPF1002R",
+                            },
+                            timeout=3,
+                        ).json()
+                        kis_name = res_name.get("output", {}).get("prdt_abrv_name", "")
+                        if kis_name: label = kis_name
+            except: pass
+            if label == name:
+                try:
+                    listing = load_krx_listing()
+                    row = listing[listing["Code"] == name]
+                    if not row.empty:
+                        label = row["Name"].values[0]
+                except: pass
 
             # ★ 매수구간 항상 실시간 curr 기준으로만 계산 (OHLCV MA 기준 사용 안 함)
             buy_min = int(curr * 0.97) if curr > 0 else 0
@@ -1377,8 +1401,10 @@ def get_portfolio_data(name: str) -> dict:
             tgt = int(r["target"]) if r.get("target",0) > curr > 0 else int(curr * 1.08) if curr > 0 else 0
             stp = int(r["stop"])   if r.get("stop",0)   > 0        else int(curr * 0.93) if curr > 0 else 0
 
+            # 종목명이 코드랑 같으면 괄호 없이 코드만
+            display_label = f"{label} ({name})" if label != name else name
             return {
-                "label":    f"{name} ({label})",
+                "label":    display_label,
                 "curr":     curr,
                 "score":    r["score"],
                 "grade":    r["grade"],
@@ -1417,9 +1443,9 @@ def get_portfolio_data(name: str) -> dict:
 
     # 정규장가 결정
     if market_open and fh_c > 0:
-        price, src = fh_c, "Finnhub(정규장)"
+        price, src = fh_c, "Finnhub"
     elif not market_open and fh_pc > 0:
-        price, src = fh_pc, "Finnhub(전일종가)"
+        price, src = fh_pc, "Finnhub(종가)"
     elif fh_c > 0:
         price, src = fh_c, "Finnhub"
     elif regular_price > 0:
