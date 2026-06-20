@@ -29,7 +29,7 @@ KIS_APP_KEY    = "PSmEd1aPpxC4GtQ5k23MW8iI4IdvwKRhnXiF"
 KIS_APP_SECRET = "Pvmawb5cs8oIDi6KEgMbqx+115iKoUjKdMMj2DmcmdjyPmMtordm2EEfUoA+q15+23cUg2/7piYXimu+O42ZCS/tpJ2YpNAraf8W6TRV2cuwAgToJEWs8xBNHJeqFob6JUiVFhLbSGObuh1Z9ziXISrXBIF61+l/ZWoULdaIqAdYcjV2EIA="
 KIS_IS_REAL    = True
 KIS_BASE_URL   = "https://openapi.koreainvestment.com:9443" if KIS_IS_REAL else "https://openapivts.koreainvestment.com:29443"
-DART_API_KEY   = "281ef91c6b82789444a144b78042d6df2f20314a"   # ← DART OpenAPI 키 (https://opendart.fss.or.kr 무료 발급)
+DART_API_KEY   = ""   # ← DART OpenAPI 키 (https://opendart.fss.or.kr 무료 발급)
 _KIS_TOKEN     = {"token": "", "expires": None}
 _KIS_NAME_CACHE = {}  # {code: name} — KIS 가격 조회 시 종목명 함께 저장
 import threading
@@ -181,22 +181,41 @@ def kis_price(code: str) -> tuple:
             return 0.0, ""
     return 0.0, ""
 
-@st.cache_data(ttl=86400, show_spinner=False)  # 종목명은 하루 캐시
+@st.cache_data(ttl=86400, show_spinner=False)
 def kis_name(code: str) -> str:
+    """
+    KIS 종목명 조회
+    1. inquire-price (현재가) 응답의 hts_kor_isnm — 가장 신뢰
+    2. search-stock-info 응답 필드들
+    """
     if not KIS_APP_KEY or not KIS_APP_SECRET: return ""
-    h = kis_headers("CTPF1002R")
-    if not h: return ""
+    # 방법 1: inquire-price에서 hts_kor_isnm 추출 (가장 정확)
     try:
-        r = requests.get(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/search-stock-info",
-            params={"PRDT_TYPE_CD":"300","PDNO":code},
-            headers=h, timeout=3).json()
-        out = r.get("output", {})
-        # 여러 필드 시도 (종목마다 채워진 필드가 다름)
-        name = (out.get("prdt_abrv_name","") or
-                out.get("prdt_name","") or
-                out.get("hts_kor_isnm","") or "")
-        return name.strip()
-    except: return ""
+        h = kis_headers("FHKST01010100")
+        if h:
+            r = requests.get(
+                f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
+                params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code},
+                headers=h, timeout=3).json()
+            out = r.get("output", {})
+            n = out.get("hts_kor_isnm","").strip()
+            if n: return n
+    except: pass
+    # 방법 2: search-stock-info
+    try:
+        h2 = kis_headers("CTPF1002R")
+        if h2:
+            r2 = requests.get(
+                f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/search-stock-info",
+                params={"PRDT_TYPE_CD":"300","PDNO":code},
+                headers=h2, timeout=3).json()
+            out2 = r2.get("output", {})
+            n2 = (out2.get("prdt_abrv_name","") or
+                  out2.get("prdt_name","") or
+                  out2.get("hts_kor_isnm","") or "")
+            if n2: return n2.strip()
+    except: pass
+    return ""
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def kis_investor(code: str) -> dict:
@@ -1081,8 +1100,19 @@ def portfolio_data(name: str) -> dict:
     if name.isdigit() and len(name)==6:
         p, src = kr_price(name)
         df = ohlcv_kr(name)
-        # kr_price 조회 시 _KIS_NAME_CACHE에 이름 저장됨 → 바로 사용
-        stock_name = _KIS_NAME_CACHE.get(name) or get_stock_name(name)
+        # 종목명: kis_name 직접 호출 (ttl=86400 캐시, 빠름)
+        stock_name = ""
+        if KIS_APP_KEY:
+            stock_name = kis_name(name)  # KIS search-stock-info
+        if not stock_name:
+            stock_name = _KIS_NAME_CACHE.get(name, "")
+        if not stock_name:
+            try:
+                lst = krx_listing()
+                row = lst[lst["Code"]==name]
+                if not row.empty:
+                    stock_name = str(row["Name"].values[0])
+            except: pass
         label = f"{stock_name} ({name})" if stock_name and stock_name != name else name
 
         if df is not None:
