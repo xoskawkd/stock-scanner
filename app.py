@@ -29,6 +29,7 @@ KIS_APP_KEY    = "PSmEd1aPpxC4GtQ5k23MW8iI4IdvwKRhnXiF"
 KIS_APP_SECRET = "Pvmawb5cs8oIDi6KEgMbqx+115iKoUjKdMMj2DmcmdjyPmMtordm2EEfUoA+q15+23cUg2/7piYXimu+O42ZCS/tpJ2YpNAraf8W6TRV2cuwAgToJEWs8xBNHJeqFob6JUiVFhLbSGObuh1Z9ziXISrXBIF61+l/ZWoULdaIqAdYcjV2EIA="
 KIS_IS_REAL    = True
 KIS_BASE_URL   = "https://openapi.koreainvestment.com:9443" if KIS_IS_REAL else "https://openapivts.koreainvestment.com:29443"
+DART_API_KEY   = "281ef91c6b82789444a144b78042d6df2f20314a"   # ← DART OpenAPI 키 (https://opendart.fss.or.kr 무료 발급)
 _KIS_TOKEN     = {"token": "", "expires": None}
 import threading
 _KIS_LOCK = threading.Lock()
@@ -40,8 +41,8 @@ KR_SCAN_N  = 300  # 코스피 상위
 KQ_SCAN_N  = 200  # 코스닥 상위
 
 THRESHOLDS = {
-    "KR": {"min_vol":30_000, "max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.95,"min_pass_score":28},
-    "US": {"min_vol":100_000,"max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.95,"min_pass_score":28},
+    "KR": {"min_vol":30_000, "max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.95},
+    "US": {"min_vol":100_000,"max_rsi":83,"max_gain5":0.18,"max_ma20_dev":1.18,"max_hi60":0.95},
 }
 
 # 가중치
@@ -49,7 +50,7 @@ DEFAULT_W = {
     "s1_strong":12,"s1_weak":6,"s2_strong":9,"s2_weak":5,
     "s2t_strong":5,"s2t_weak":3,"s3_strong":17,"s3_weak":10,
     "s4":12,"s5":3,"rsi_good":5,"rsi_oversold":3,"rsi_extreme":2,
-    "min_pass_score":20,
+    "min_pass_score":12,
 }
 
 def load_weights():
@@ -188,8 +189,8 @@ def kis_investor_trend(code: str, days=5) -> list:
 def supply_score(code: str) -> int:
     """
     수급 점수 계산 — scan_kr 정렬용
-    외국인/기관 순매수 규모와 연속성 반영
-    반환: 0~30점
+    수급 강도(거래대금 대비 비율) + 연속성 반영
+    반환: 0~40점
     """
     if not KIS_APP_KEY or not KIS_APP_SECRET:
         return 0
@@ -198,22 +199,37 @@ def supply_score(code: str) -> int:
 
     score = 0
     today = trend[0]
-    fore = today.get("외국인", 0)
-    inst = today.get("기관", 0)
+    fore = today.get("외국인", 0)      # 외국인 순매수 수량
+    inst = today.get("기관", 0)        # 기관 순매수 수량
+    pension = today.get("연기금", 0)   # 연기금 순매수 수량
 
-    # 외국인 순매수 연속일
+    # 연속성 계산
     fore_streak = sum(1 for t in trend if t.get("외국인", 0) > 0)
     inst_streak = sum(1 for t in trend if t.get("기관", 0) > 0)
 
-    # 외국인
+    # 수급 강도 — 거래대금 대비 비율 (KIS investor에서 금액도 가져오면 정확)
+    # 수량 기반으로 상대적 강도 추정
+    # 외국인 순매수가 기관보다 3배 이상이면 강한 매수세
+    # fore_ratio: 외국인 순매수가 전체 순매수(양수만) 중 얼마나 차지하는지
+    # 외국인 매수 100, 기관 매도 -100 → 분모=100(외국인만), fore_ratio=1.0
+    pos_total = max(fore, 0) + max(inst, 0)
+    fore_ratio = fore / pos_total if pos_total > 0 and fore > 0 else 0
+
+    # ── 외국인 ──
     if fore > 0:
         score += 5
-        if fore_streak >= 3: score += 8   # 3일+ 연속
+        # 강도 보너스 (전체 순매수 중 외국인 비중)
+        if fore_ratio >= 0.7: score += 5   # 외국인이 70%+ 주도
+        elif fore_ratio >= 0.5: score += 3
+        # 연속성 보너스
+        if fore_streak >= 3: score += 8
         elif fore_streak >= 2: score += 4
     elif fore < 0:
         score -= 5
+        if fore_streak == 0:  # 5일 연속 매도
+            score -= 3
 
-    # 기관
+    # ── 기관 ──
     if inst > 0:
         score += 5
         if inst_streak >= 2: score += 4
@@ -223,11 +239,18 @@ def supply_score(code: str) -> int:
     elif inst < 0:
         score -= 3
 
-    # 외국인 + 기관 동시 매수
+    # ── 연기금 (장기 투자자, 신뢰도 높음) ──
+    if pension > 0:
+        score += 3  # 2→3점 (연기금 매수는 강한 신호)
+
+    # ── 외국인 + 기관 동시 매수 (가장 강한 신호) ──
     if fore > 0 and inst > 0:
         score += 5
+        # 외국인+기관+연기금 동시 → 추가 보너스
+        if pension > 0:
+            score += 3
 
-    return max(0, min(score, 30))
+    return max(0, min(score, 40))
 
 
 def supply_signal(code: str) -> dict:
@@ -264,7 +287,7 @@ def supply_signal(code: str) -> dict:
 # 가격 조회
 # ============================================================
 @st.cache_data(ttl=30, show_spinner=False)
-def kr_price(code: str) -> tuple:
+def kr_price(code: str, market_map: dict = None) -> tuple:
     # 1순위: KIS 실시간
     if KIS_APP_KEY and KIS_APP_SECRET:
         p, src = kis_price(code)
@@ -288,16 +311,19 @@ def kr_price(code: str) -> tuple:
         except: pass
     # yfinance fallback — KIS listing으로 시장 구분
     try:
-        # listing에서 Market 확인 후 suffix 결정
+        # market_map으로 suffix 결정 (listing 반복 호출 방지)
         _sfx = ".KQ"  # 기본 코스닥
         try:
-            _lst = krx_listing()
-            _row = _lst[_lst["Code"]==code]
-            if not _row.empty:
-                mkt = str(_row["Market"].values[0])
+            if market_map and code in market_map:
+                mkt = str(market_map[code])
                 _sfx = ".KS" if "KOSPI" in mkt else ".KQ"
+            else:
+                _lst = krx_listing()
+                _row = _lst[_lst["Code"]==code]
+                if not _row.empty:
+                    mkt = str(_row["Market"].values[0])
+                    _sfx = ".KS" if "KOSPI" in mkt else ".KQ"
         except:
-            # listing 실패시 코드 패턴으로 추정 (불완전)
             _sfx = ".KS" if code[:2] in ["00","01","02","03","04","05","06"] else ".KQ"
         t = yf.Ticker(f"{code}{_sfx}")
         p = float(getattr(t.fast_info,"last_price",0) or 0)
@@ -305,9 +331,12 @@ def kr_price(code: str) -> tuple:
     except: pass
     return 0.0, "실패"
 
-# 미국 주요 휴장일 (고정 + 변동 간략 처리)
-_US_HOLIDAYS_2025 = {(1,1),(1,20),(2,17),(4,18),(5,26),(6,19),(7,4),(9,1),(11,27),(12,25)}
-_US_HOLIDAYS_2026 = {(1,1),(1,19),(2,16),(4,3),(5,25),(6,19),(7,4),(9,7),(11,26),(12,25)}
+# 미국 주요 휴장일
+_US_HOLIDAYS = {
+    2025: {(1,1),(1,20),(2,17),(4,18),(5,26),(6,19),(7,4),(9,1),(11,27),(12,25)},
+    2026: {(1,1),(1,19),(2,16),(4,3),(5,25),(6,19),(7,4),(9,7),(11,26),(12,25)},
+    2027: {(1,1),(1,18),(2,15),(4,2),(5,31),(6,19),(7,4),(9,6),(11,25),(12,24)},
+}
 
 def is_us_open():
     if not ZoneInfo: return True
@@ -315,7 +344,7 @@ def is_us_open():
         now = datetime.now(ZoneInfo("America/New_York"))
         if now.weekday() >= 5: return False
         # 휴장일 체크
-        holidays = _US_HOLIDAYS_2026 if now.year == 2026 else _US_HOLIDAYS_2025
+        holidays = _US_HOLIDAYS.get(now.year, set())  # 없는 연도는 빈 set
         if (now.month, now.day) in holidays: return False
         open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
         close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
@@ -448,6 +477,139 @@ def krx_listing():
     ]
     return pd.DataFrame(data, columns=["Code","Name","Marcap","Market"])
 
+# ── 섹터 지수 코드 매핑 (KRX 업종 지수) ──
+SECTOR_INDEX = {
+    "반도체":    "KQ11001",  # 코스닥 IT
+    "전기전자":  "KS11001",
+    "화학":      "KS11003",
+    "철강금속":  "KS11004",
+    "기계":      "KS11005",
+    "조선":      "KS11006",
+    "건설":      "KS11007",
+    "금융":      "KS11009",
+    "증권":      "KS11010",
+    "보험":      "KS11011",
+    "운수장비":  "KS11008",
+    "의약품":    "KS11012",
+    "음식료":    "KS11002",
+}
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_sector_momentum(sector_code: str, days: int = 5) -> float:
+    """
+    섹터 지수 최근 N일 모멘텀 (수익률)
+    양수 = 섹터 상승 중, 음수 = 섹터 하락 중
+    """
+    try:
+        df = fdr.DataReader(sector_code, start=(datetime.now()-timedelta(days=30)).strftime("%Y-%m-%d"))
+        if df is None or len(df) < days+1: return 0.0
+        df.columns = [c.lower() for c in df.columns]
+        cl = df["close"].astype(float)
+        return float((cl.iloc[-1] - cl.iloc[-days]) / cl.iloc[-days] * 100)
+    except: return 0.0
+
+@st.cache_data(ttl=86400, show_spinner=False)  # 업종 정보는 거의 안 바뀜
+def get_stock_sector(code: str) -> str:
+    """종목의 업종 코드 조회 — KIS API"""
+    if not KIS_APP_KEY: return ""
+    try:
+        h = kis_headers("CTPF1002R")
+        if not h: return ""
+        r = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/search-stock-info",
+            params={"PRDT_TYPE_CD":"300","PDNO":code},
+            headers=h, timeout=3).json()
+        return r.get("output",{}).get("bstp_kor_isnm","")  # 업종명
+    except: return ""
+
+def sector_momentum_score(code: str) -> int:
+    """
+    섹터 모멘텀 점수 — 종목이 속한 업종이 상승 중인지
+    반환: -5 ~ +10점
+    """
+    sector_name = get_stock_sector(code)
+    if not sector_name: return 0
+
+    # 업종명에서 섹터 코드 매핑
+    sector_code = ""
+    for name, code_s in SECTOR_INDEX.items():
+        if name in sector_name:
+            sector_code = code_s
+            break
+    if not sector_code: return 0
+
+    momentum = get_sector_momentum(sector_code, days=5)
+    if momentum >= 3:   return 10  # 섹터 5일 +3% 이상 강세
+    elif momentum >= 1: return 6   # 섹터 완만한 상승
+    elif momentum >= 0: return 3   # 보합
+    elif momentum >= -2: return 0  # 약한 하락
+    else: return -5                # 섹터 급락 — 감점
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_dart_disclosures(code: str, days: int = 3) -> list:
+    """
+    DART 최근 N일 주요 공시 조회
+    수주, 자사주, 실적, 유상증자 등 주가 영향 공시 필터링
+    """
+    if not DART_API_KEY: return []
+    try:
+        end_dt   = datetime.now().strftime("%Y%m%d")
+        start_dt = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+        r = requests.get(
+            "https://opendart.fss.or.kr/api/list.json",
+            params={
+                "crtfc_key": DART_API_KEY,
+                "corp_code": "",        # 전체
+                "stock_code": code,     # 종목코드로 필터
+                "bgn_de": start_dt,
+                "end_de": end_dt,
+                "page_count": 20,
+            }, timeout=5).json()
+
+        if r.get("status") != "000": return []
+
+        # 주가 긍정 공시 키워드
+        POS_KEYWORDS = ["수주","계약","자사주","실적","흑자","배당","공급","MOU","협약","인수"]
+        # 주가 부정 공시 키워드
+        NEG_KEYWORDS = ["유상증자","전환사채","신주인수권","감사의견","횡령","소송"]
+
+        result = []
+        for item in r.get("list", []):
+            title = item.get("report_nm", "")
+            pos = any(k in title for k in POS_KEYWORDS)
+            neg = any(k in title for k in NEG_KEYWORDS)
+            if pos or neg:
+                result.append({
+                    "date":  item.get("rcept_dt", ""),
+                    "title": title,
+                    "type":  "positive" if pos and not neg else "negative",
+                })
+        return result
+    except: return []
+
+
+def dart_score(code: str) -> tuple:
+    """
+    DART 공시 점수 + 공시 요약
+    반환: (점수, 공시목록)
+    """
+    disclosures = get_dart_disclosures(code, days=3)
+    if not disclosures: return 0, []
+
+    score = 0
+    for d in disclosures:
+        if d["type"] == "positive":
+            score += 5
+            # 수주/계약은 추가 가산
+            if any(k in d["title"] for k in ["수주","계약","공급"]):
+                score += 3
+        else:
+            score -= 8  # 유상증자 등은 강한 감점
+
+    return max(-20, min(score, 15)), disclosures
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def us_tickers():
     tickers=[]
@@ -485,7 +647,7 @@ def _sf(v, d=0.0):
 def quant_predict(df, market="KR"):
     OUT={"score":0,"grade":"C","signals":[],"pass":False,
          "buy_min":0.0,"buy_max":0.0,"target":0.0,"stop":0.0,
-         "rsi":50.0,"current":0.0,"s1":False,"s2":False,"s3":False,"s4":False,"s5":False}
+         "rsi":50.0,"current":0.0,"s1":False,"s2":False,"s3":False,"s4":False,"s5":False,"s6":False}
     th=THRESHOLDS.get(market,THRESHOLDS["KR"])
     try:
         if df is None or len(df)<60: return OUT
@@ -503,7 +665,13 @@ def quant_predict(df, market="KR"):
             OUT["signals"].append("❌ 거래정지/상장폐지 의심"); rejected=True
         elif avg_vol<th["min_vol"]:
             OUT["signals"].append("❌ 유동성 부족"); rejected=True
-        ma20=_sf(_ma20_s.iloc[-1])  # _ma20_s 재사용 (중복 계산 제거)
+        # MA 계산 (rejected 체크보다 먼저)
+        _ma20_s  = cl.rolling(20).mean().replace(0, np.nan)
+        _std20_s = cl.rolling(20).std()
+        ma20 = _sf(_ma20_s.iloc[-1])
+        ma5  = _sf(cl.rolling(5).mean().iloc[-1])
+        ma60 = _sf(cl.rolling(60).mean().iloc[-1])
+
         if ma20>0 and cur>ma20*th["max_ma20_dev"]:
             OUT["signals"].append("❌ 이미 급등"); rejected=True
         p5=_sf(cl.iloc[-6]) if len(cl)>=6 else cur
@@ -512,11 +680,10 @@ def quant_predict(df, market="KR"):
         hi60=_sf(cl.rolling(60).max().iloc[-1])
         if hi60>0 and cur>=hi60*th["max_hi60"]:
             OUT["signals"].append("❌ 60일 고점권"); rejected=True
-
-        ma5 =_sf(cl.rolling(5).mean().iloc[-1])
-        ma60=_sf(cl.rolling(60).mean().iloc[-1])
-        delta=cl.diff(); gain=delta.clip(lower=0).rolling(14).mean()
-        loss=(-delta.clip(upper=0)).rolling(14).mean()
+        delta=cl.diff()
+        # Wilder RSI (EMA alpha=1/14) — 단순 rolling mean보다 정확
+        gain=delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+        loss=(-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
         rsi_s=100-100/(1+gain/loss.replace(0,np.nan))
         rsi=_sf(rsi_s.iloc[-1],50.0); OUT["rsi"]=rsi
         if rsi>th["max_rsi"]:
@@ -524,9 +691,7 @@ def quant_predict(df, market="KR"):
 
         score=0; setup=0; strong=0; trigger=0
 
-        # S1 BB수축
-        _ma20_s = cl.rolling(20).mean().replace(0, np.nan)  # 재사용
-        _std20_s = cl.rolling(20).std()
+        # S1 BB수축 (_ma20_s, _std20_s 위에서 이미 계산됨)
         bbw=(_std20_s*2)/_ma20_s
         bw=_sf(bbw.iloc[-1]); bwavg=_sf(bbw.rolling(20).mean().iloc[-1])
         s1=False
@@ -555,7 +720,7 @@ def quant_predict(df, market="KR"):
         # S3 정배열+눌림목
         aligned=ma5>0 and ma20>0 and ma60>0 and ma5>ma20>ma60
         mid_up=ma20>0 and ma60>0 and ma20>ma60
-        near=ma20>0 and abs(cur-ma20)/ma20<=0.05; s3=False
+        near=ma20>0 and abs(cur-ma20)/ma20<=0.04; s3=False  # MA20 ±4% (3%는 과도, 5%는 과대)
         if aligned and near: s3=True;setup+=1;strong+=1;score+=W["s3_strong"]; OUT["signals"].append("✅ [S3] 정배열+눌림목 ★")
         elif mid_up and near: s3=True;setup+=1;score+=W["s3_weak"]; OUT["signals"].append("🔶 [S3] 중기상승+눌림목")
         else: OUT["signals"].append(f"⬜ [S3] 눌림목없음 (이격 {abs(cur-ma20)/ma20*100:.1f}%)" if ma20>0 else "⬜ [S3] MA20없음")
@@ -564,23 +729,32 @@ def quant_predict(df, market="KR"):
         # S4 RSI다이버전스
         s4=False
         try:
-            if len(cl)>=30:
-                # 개선된 RSI Divergence: 최근 30봉에서 가격 저점 vs RSI 저점 비교
-                # 전반(0~14) / 후반(15~29) 각각 실제 저점 찾기
+            if len(cl)>=60:
+                # RSI Divergence: 최근 60봉(3개월) — 30봉은 너무 짧음
+                # 전반(0~29) / 후반(30~59) 각각 실제 저점 찾기
+                pw=cl.iloc[-60:].reset_index(drop=True)
+                rw=rsi_s.iloc[-60:].reset_index(drop=True)
+                p1_idx = pw.iloc[:30].idxmin()
+                p1 = pw.iloc[p1_idx]
+                r1 = _sf(rw.iloc[p1_idx], 50.0)
+                p2_idx = pw.iloc[30:].idxmin() + 30
+                p2 = pw.iloc[p2_idx]
+                r2 = _sf(rw.iloc[p2_idx], 50.0)
+                # 최소 2% 가격 저점 하락 + RSI 5 이상 격차 + RSI 60 미만
+                s4 = (p2 < p1 * 0.98) and (r2 > r1 + 5) and (r2 < 60)
+                if s4: trigger+=1;score+=W["s4"]; OUT["signals"].append(f"✅ [S4] RSI다이버전스 60봉 (가격↓{p1:.0f}→{p2:.0f} RSI↑{r1:.0f}→{r2:.0f})")
+                else: OUT["signals"].append("⬜ [S4] 다이버전스없음")
+            elif len(cl)>=30:
                 pw=cl.iloc[-30:].reset_index(drop=True)
                 rw=rsi_s.iloc[-30:].reset_index(drop=True)
-                # 전반 저점
                 p1_idx = pw.iloc[:15].idxmin()
                 p1 = pw.iloc[p1_idx]
                 r1 = _sf(rw.iloc[p1_idx], 50.0)
-                # 후반 저점
                 p2_idx = pw.iloc[15:].idxmin() + 15
                 p2 = pw.iloc[p2_idx]
                 r2 = _sf(rw.iloc[p2_idx], 50.0)
-                # 조건: 가격 저점 낮아짐 + RSI 저점 높아짐 + 격차 5 이상 (3→5 강화)
-                # 추가: 후반 RSI가 과매도 구간(50 이하)이어야 의미있음
-                s4 = (p2 < p1 * 0.999) and (r2 > r1 + 5) and (r2 < 60)
-                if s4: trigger+=1;score+=W["s4"]; OUT["signals"].append(f"✅ [S4] RSI다이버전스 (가격↓{p1:.0f}→{p2:.0f} RSI↑{r1:.0f}→{r2:.0f})")
+                s4 = (p2 < p1 * 0.98) and (r2 > r1 + 5) and (r2 < 60)
+                if s4: trigger+=1;score+=W["s4"]; OUT["signals"].append(f"✅ [S4] RSI다이버전스 30봉")
                 else: OUT["signals"].append("⬜ [S4] 다이버전스없음")
             elif len(cl)>=20:
                 pw=cl.iloc[-20:].reset_index(drop=True)
@@ -588,7 +762,7 @@ def quant_predict(df, market="KR"):
                 p1_idx=pw.iloc[:10].idxmin(); p2_idx=pw.iloc[10:].idxmin()+10
                 p1=pw.iloc[p1_idx]; p2=pw.iloc[p2_idx]
                 r1=_sf(rw.iloc[p1_idx],50); r2=_sf(rw.iloc[p2_idx],50)
-                s4=(p2<p1*0.999) and (r2>r1+5) and (r2<60)
+                s4=(p2<p1*0.98) and (r2>r1+5) and (r2<60)
                 if s4: trigger+=1;score+=W["s4"]; OUT["signals"].append("✅ [S4] RSI다이버전스 ★")
                 else: OUT["signals"].append("⬜ [S4] 다이버전스없음")
             else:
@@ -614,6 +788,34 @@ def quant_predict(df, market="KR"):
         except: OUT["signals"].append("⬜ [S5] 캔들실패")
         OUT["s5"]=s5
 
+        # ── [S6] 거래량 폭발 후 눌림 — 가산점 전용 ──
+        s6 = False
+        try:
+            vm20_s6 = vo.rolling(20).mean()
+            burst_day = -1; burst_price = 0.0
+            for k in range(3, 16):
+                vm_k = _sf(vm20_s6.iloc[-k])
+                if vm_k > 0 and _sf(vo.iloc[-k]) > vm_k * 1.5:
+                    burst_day = k
+                    burst_price = _sf(cl.iloc[-k])
+                    break
+            if burst_day >= 3 and burst_price > 0:
+                # 폭발일 이후 눌림 확인 (최소 2일치 필요)
+                vol_after = [_sf(vo.iloc[-j]) for j in range(1, burst_day)]
+                vm_now    = _sf(vm20_s6.iloc[-1])
+                vol_dried = len(vol_after) >= 2 and np.mean(vol_after) < vm_now * 0.85
+                price_ok  = cur >= burst_price * 0.92
+                if vol_dried and price_ok:
+                    s6 = True
+                    if s3:
+                        score += 8
+                        OUT["signals"].append(f"✅ [S6] 거래량폭발+정배열 ★ ({burst_day}일전)")
+                    else:
+                        score += 4
+                        OUT["signals"].append(f"🔶 [S6] 거래량폭발후눌림 ({burst_day}일전)")
+        except: pass
+        OUT["s6"] = s6
+
         # RSI 보너스
         if 40<=rsi<=55: score+=W["rsi_good"]; OUT["signals"].append(f"✅ RSI 매수구간 ({rsi:.0f})")
         elif 30<=rsi<40: score+=W["rsi_oversold"]; OUT["signals"].append(f"🔶 RSI 과매도 ({rsi:.0f})")
@@ -626,7 +828,7 @@ def quant_predict(df, market="KR"):
             tr=pd.concat([hi-lo,(hi-cl.shift()).abs(),(lo-cl.shift()).abs()],axis=1).max(axis=1)
             atr=_sf(tr.rolling(14).mean().iloc[-1])
             if atr>0:
-                std20=_sf(cl.rolling(20).std().iloc[-1])
+                std20=_sf(_std20_s.iloc[-1])  # 중복 계산 제거 (_std20_s 재사용)
                 bb_top=ma20+std20*2 if ma20>0 and std20>0 else 0
                 t_atr=cur+atr*2; t_bb=bb_top if bb_top>cur else cur+atr*2
                 _tgt=min(t_atr,t_bb)
@@ -662,12 +864,14 @@ def quant_predict(df, market="KR"):
 @st.cache_data(ttl=300, show_spinner=False)
 def scan_kr():
     listing = krx_listing()
-    kospi = listing[listing["Market"].str.contains("KOSPI",na=False)] if "Market" in listing.columns else listing
-    kosdaq = listing[listing["Market"].str.contains("KOSDAQ",na=False)] if "Market" in listing.columns else pd.DataFrame()
+    kospi  = listing[listing["Market"].str.contains("KOSPI", na=False)]  if "Market" in listing.columns else listing
+    kosdaq = listing[listing["Market"].str.contains("KOSDAQ",na=False)]  if "Market" in listing.columns else pd.DataFrame()
     kp = kospi[kospi["Marcap"]>3e11].nlargest(KR_SCAN_N,"Marcap")
     kq = kosdaq[kosdaq["Marcap"]>5e10].nlargest(KQ_SCAN_N,"Marcap") if not kosdaq.empty else pd.DataFrame()
     targets = pd.concat([kp,kq]).drop_duplicates("Code")
-    codes = list(zip(targets["Code"],targets["Name"]))
+    codes   = list(zip(targets["Code"],targets["Name"]))
+    # ② market_map 미리 생성 — kr_price listing 반복 검색 방지
+    market_map = dict(zip(listing["Code"], listing.get("Market", pd.Series()))) if "Market" in listing.columns else {}
 
     def _fetch(item):
         code,name = item
@@ -677,7 +881,7 @@ def scan_kr():
         if not r["pass"]:
             why=next((s for s in r["signals"] if "❌" in s),"조건미충족")
             return {"_skip":True,"why":why}
-        p, src = kr_price(code)
+        p, src = kr_price(code, market_map)
         if p<=0: p=r["current"]
         tgt = int(r["target"]) if r["target"]>p*1.03 and r["target"]<=p*1.15 else int(p*1.08)
         stp = int(r["stop"])   if r["stop"]>p*0.85  and r["stop"]<p*0.98  else int(p*0.93)
@@ -688,9 +892,9 @@ def scan_kr():
                 "매수구간":f"₩{bmin:,}~₩{bmax:,}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
                 "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"]],
-                "수급점수":0,"종합점수":r["score"]}
+                "수급점수":0,"섹터점수":0,"공시점수":0,"공시목록":[],"종합점수":r["score"],"섹터강세":False}
 
-    with ThreadPoolExecutor(max_workers=15) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         raw=list(ex.map(_fetch,codes))
     skips=[r for r in raw if r.get("_skip")]
     passed=[r for r in raw if not r.get("_skip")]
@@ -699,12 +903,20 @@ def scan_kr():
     if KIS_APP_KEY and KIS_APP_SECRET and passed:
         def _add_supply(r):
             try:
-                sup = supply_score(r["코드"])
+                sup  = supply_score(r["코드"])
+                sec  = sector_momentum_score(r["코드"])
+                dart_s, dart_list = dart_score(r["코드"]) if DART_API_KEY else (0, [])
                 r["수급점수"] = sup
-                r["종합점수"] = r["점수"] + sup
+                r["섹터점수"] = sec
+                r["공시점수"] = dart_s
+                r["공시목록"] = dart_list[:2]  # 최대 2개만
+                r["종합점수"] = r["점수"] + sup + sec + dart_s
+                r["섹터강세"] = sec >= 6
             except:
-                r["수급점수"] = 0
+                r["수급점수"] = 0; r["섹터점수"] = 0
+                r["공시점수"] = 0; r["공시목록"] = []
                 r["종합점수"] = r["점수"]
+                r["섹터강세"] = False
             return r
         with ThreadPoolExecutor(max_workers=5) as ex:
             passed = list(ex.map(_add_supply, passed))
@@ -721,7 +933,7 @@ def scan_kr():
 @st.cache_data(ttl=300, show_spinner=False)
 def scan_us():
     rt = {}
-    with ThreadPoolExecutor(max_workers=10) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         futs={t:ex.submit(us_price,t) for t in US_LIST}
         for t,f in futs.items():
             try: rt[t]=f.result()
@@ -745,9 +957,9 @@ def scan_us():
                 "매수구간":f"{uf(p*0.97)}~{uf(p*1.02)}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
                 "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"]],
-                "수급점수":0,"종합점수":r["score"]}
+                "수급점수":0,"섹터점수":0,"공시점수":0,"공시목록":[],"종합점수":r["score"],"섹터강세":False}
 
-    with ThreadPoolExecutor(max_workers=15) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         raw=list(ex.map(_fetch,US_LIST))
     skips=[r for r in raw if r.get("_skip")]
     top5=sorted([r for r in raw if not r.get("_skip")],key=lambda x:x["점수"],reverse=True)[:5]
@@ -842,6 +1054,7 @@ with st.sidebar.expander("🔑 API 상태"):
         st.write("KIS토큰:", "✅발급됨" if kis_token_ok else "❌미발급(첫요청시자동)")
     st.write("KRX:",  "✅" if KRX_API_KEY  else "❌ (fallback)")
     st.write("Finnhub:", "✅" if FINNHUB_API_KEY else "❌")
+    st.write("DART:",    "✅" if DART_API_KEY    else "❌ (공시 비활성)")
     # 미국장 시간대 표시
     if ZoneInfo:
         try:
@@ -858,10 +1071,27 @@ except: pass
 st.sidebar.metric("🇺🇸 미국장", "OPEN" if is_us_open() else "CLOSED")
 
 # 재스캔
-col_scan, _ = st.sidebar.columns([1,1])
-if col_scan.button("🔄 재스캔"):
+# 버튼 3개: 추천 재스캔 / 관심종목 재스캔 / 전체 캐시 초기화
+if st.sidebar.button("🔄 추천 재스캔", use_container_width=True, type="primary"):
     scan_kr.clear(); scan_us.clear()
     ohlcv_kr.clear(); ohlcv_us.clear()
+    st.rerun()
+
+if st.sidebar.button("👀 관심종목 재평가", use_container_width=True):
+    # ohlcv 캐시만 날림 (portfolio_data는 원래 캐시 없음)
+    ohlcv_kr.clear(); ohlcv_us.clear()
+    kis_investor.clear()
+    kis_investor_trend.clear()
+    st.session_state["watch_refresh"] = True
+    st.rerun()
+
+if st.sidebar.button("🗑️ 전체 캐시 초기화", use_container_width=True):
+    # 포트폴리오 데이터 제외 모든 캐시 초기화
+    scan_kr.clear(); scan_us.clear()
+    ohlcv_kr.clear(); ohlcv_us.clear()
+    krx_listing.clear(); us_tickers.clear()
+    kis_price.clear(); kis_investor.clear()
+    kis_investor_trend.clear(); kis_name.clear()
     st.rerun()
 
 st.title("🚀 Tae Scanner v9")
@@ -1162,7 +1392,9 @@ def render(title, data, currency):
   </div>
   <div style="margin-bottom:6px;">{badges}</div>
   <div style="font-size:12px;line-height:1.8;">
-    🎯 차트 <b>{item['점수']}점</b>{f" + 수급 <b style='color:#10b981'>{item['수급점수']}점</b> = <b style='color:#f59e0b'>{item['종합점수']}점</b>" if item.get('수급점수',0)>0 else ""} | RSI <b>{item['RSI']}</b><br>
+    🎯 차트 <b>{item['점수']}점</b>{f" + 수급<b style='color:#10b981'>{item.get('수급점수',0)}</b>" if item.get('수급점수',0)>0 else ""}{f" + 섹터<b style='color:#a78bfa'>{item.get('섹터점수',0)}</b>" if item.get('섹터점수',0)>0 else ""}{f" + 공시<b style='color:#f59e0b'>{item.get('공시점수',0)}</b>" if item.get('공시점수',0)!=0 else ""} = <b style='color:#f59e0b'>{item.get('종합점수', item['점수'])}점</b> | RSI <b>{item['RSI']}</b><br>
+    {f"📢 {item['공시목록'][0]['title'][:20]}..." if item.get('공시목록') else ""}<br>
+    {"🔥 섹터강세" if item.get('섹터강세') else ""}
     💰 <b>{fmt2(item['현재가'])}</b> <span style="font-size:10px;color:#64748b;">({item.get('source','')})</span><br>
     🟢 {item['매수구간']}<br>
     📈 <span style="color:#3b82f6;">{fmt2(item['목표가'])}</span>
