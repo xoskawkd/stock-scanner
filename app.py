@@ -949,7 +949,9 @@ def scan_kr():
         stp = int(r["stop"])   if r["stop"]>p*0.85  and r["stop"]<p*0.98  else int(p*0.93)
         bmin = int(r["buy_min"]) if r["buy_min"]>p*0.90 and r["buy_min"]<p else int(p*0.97)
         bmax = int(r["buy_max"]) if r["buy_max"]>p and r["buy_max"]<p*1.05 else int(p*1.02)
-        return {"_skip":False,"종목":name,"코드":code,"등급":r["grade"],"점수":r["score"],
+        # 종목명: 캐시 → listing → 코드 그대로
+        display_name = _KIS_NAME_CACHE.get(code) or name
+        return {"_skip":False,"종목":display_name,"코드":code,"등급":r["grade"],"점수":r["score"],
                 "현재가":int(p),"RSI":round(r["rsi"],1),
                 "매수구간":f"₩{bmin:,}~₩{bmax:,}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
@@ -961,14 +963,18 @@ def scan_kr():
     skips=[r for r in raw if r.get("_skip")]
     passed=[r for r in raw if not r.get("_skip")]
 
-    # pass된 종목 KIS 가격 재조회 (ThreadPool 밖 — 토큰 안정적)
+    # pass된 종목 KIS 가격+종목명 재조회 (ThreadPool 밖 — 토큰 안정적)
     if KIS_APP_KEY and KIS_APP_SECRET:
         for item in passed:
             try:
                 p_kis, src_kis = kis_price(item["코드"])
                 if p_kis > 0:
                     item["현재가"] = int(p_kis)
-                    item["source"] = "KIS"
+                    item["source"] = src_kis
+                # 종목명 캐시에서 업데이트
+                cached_name = _KIS_NAME_CACHE.get(item["코드"])
+                if cached_name and cached_name != item["코드"]:
+                    item["종목"] = cached_name
             except: pass
 
     # 수급 점수 추가 (KIS 있을 때만)
@@ -1075,7 +1081,8 @@ def portfolio_data(name: str) -> dict:
     if name.isdigit() and len(name)==6:
         p, src = kr_price(name)
         df = ohlcv_kr(name)
-        stock_name = get_stock_name(name)  # KIS → listing 순서로 1회만 호출
+        # kr_price 조회 시 _KIS_NAME_CACHE에 이름 저장됨 → 바로 사용
+        stock_name = _KIS_NAME_CACHE.get(name) or get_stock_name(name)
         label = f"{stock_name} ({name})" if stock_name and stock_name != name else name
 
         if df is not None:
@@ -1458,7 +1465,6 @@ def render(title, data, currency):
     if not data:
         st.info("조건 충족 종목 없음")
         return
-    cols=st.columns(min(len(data),3))
     medals=["🥇","🥈","🥉","4️⃣","5️⃣"]
     for i,item in enumerate(data):
         gc={"A+":"#f59e0b","A":"#10b981","B+":"#3b82f6","B":"#94a3b8","C":"#64748b"}.get(item.get("등급","C"),"#64748b")
@@ -1470,7 +1476,7 @@ def render(title, data, currency):
             f"<span style='background:{'#10b981' if ok else '#1e293b'};color:{'#fff' if ok else '#475569'};font-size:9px;padding:2px 4px;border-radius:3px;'>{lbl}</span>"
             for ok,lbl in zip(flags,S_LABELS))
         sigs_html="".join(f"<li style='font-size:11px;margin:2px 0;'>{s}</li>" for s in item.get("signals",[]))
-        with cols[i%3]:
+        if True:  # 1열 세로 나열 (폰 최적화)
             # 점수 표시 조립
             score_parts = f"차트 <b>{item['점수']}점</b>"
             if item.get('수급점수',0) > 0:
