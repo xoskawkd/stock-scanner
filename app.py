@@ -29,7 +29,7 @@ KIS_APP_KEY    = "PSmEd1aPpxC4GtQ5k23MW8iI4IdvwKRhnXiF"
 KIS_APP_SECRET = "Pvmawb5cs8oIDi6KEgMbqx+115iKoUjKdMMj2DmcmdjyPmMtordm2EEfUoA+q15+23cUg2/7piYXimu+O42ZCS/tpJ2YpNAraf8W6TRV2cuwAgToJEWs8xBNHJeqFob6JUiVFhLbSGObuh1Z9ziXISrXBIF61+l/ZWoULdaIqAdYcjV2EIA="
 KIS_IS_REAL    = True
 KIS_BASE_URL   = "https://openapi.koreainvestment.com:9443" if KIS_IS_REAL else "https://openapivts.koreainvestment.com:29443"
-DART_API_KEY   = "281ef91c6b82789444a144b78042d6df2f20314a"   # ← DART OpenAPI 키 (https://opendart.fss.or.kr 무료 발급)
+DART_API_KEY   = ""   # ← DART OpenAPI 키 (https://opendart.fss.or.kr 무료 발급)
 _KIS_TOKEN     = {"token": "", "expires": None}
 import threading
 _KIS_LOCK = threading.Lock()
@@ -116,19 +116,34 @@ def kis_headers(tr_id):
     return {"authorization":f"Bearer {t}","appkey":KIS_APP_KEY,"appsecret":KIS_APP_SECRET,"tr_id":tr_id}
 
 def kis_price(code: str) -> tuple:
-    """KIS 실시간 현재가 (캐시 없음 — 항상 최신)"""
+    """KIS 실시간 현재가 — 토큰 만료 시 1회 재시도"""
     if not KIS_APP_KEY or not KIS_APP_SECRET:
         return 0.0, ""
-    h = kis_headers("FHKST01010100")
-    if not h: return 0.0, ""
-    try:
-        r = requests.get(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
-            params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code},
-            headers=h, timeout=4).json()
-        p = float(r.get("output",{}).get("stck_prpr",0) or 0)
-        if p > 0: return p, "KIS"
-        return 0.0, ""
-    except: return 0.0, ""
+    for attempt in range(2):  # 최대 2회 (토큰 만료 대비)
+        h = kis_headers("FHKST01010100")
+        if not h: return 0.0, ""
+        try:
+            r = requests.get(
+                f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
+                params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code},
+                headers=h, timeout=4).json()
+            # 토큰 만료 오류 코드 체크
+            rt_cd = r.get("rt_cd","")
+            if rt_cd == "1" and attempt == 0:
+                # 토큰 강제 초기화 후 재시도
+                with _KIS_LOCK:
+                    _KIS_TOKEN["token"] = ""
+                    _KIS_TOKEN["expires"] = None
+                continue
+            output = r.get("output", {})
+            p = float(output.get("stck_prpr", 0) or 0)
+            if p > 0: return p, "KIS"
+            # output 있지만 가격 0 → 장외시간 또는 종목 오류
+            msg = r.get("msg1", "")
+            return 0.0, f"KIS실패({msg[:10]})" if msg else ""
+        except Exception as e:
+            return 0.0, ""
+    return 0.0, ""
 
 @st.cache_data(ttl=30, show_spinner=False)
 def kis_name(code: str) -> str:
@@ -872,6 +887,11 @@ def scan_kr():
     codes   = list(zip(targets["Code"],targets["Name"]))
     # ② market_map 미리 생성 — kr_price listing 반복 검색 방지
     market_map = dict(zip(listing["Code"], listing.get("Market", pd.Series()))) if "Market" in listing.columns else {}
+    # KIS 토큰 미리 발급 (ThreadPool 진입 전) — 스레드들이 캐시 토큰 재사용
+    if KIS_APP_KEY and KIS_APP_SECRET:
+        _pre_token = kis_token()
+        if not _pre_token:
+            st.sidebar.warning("⚠️ KIS 토큰 발급 실패 — yfinance로 대체됩니다")
 
     def _fetch(item):
         code,name = item
@@ -898,6 +918,16 @@ def scan_kr():
         raw=list(ex.map(_fetch,codes))
     skips=[r for r in raw if r.get("_skip")]
     passed=[r for r in raw if not r.get("_skip")]
+
+    # pass된 종목 KIS 가격 재조회 (ThreadPool 밖 — 토큰 안정적)
+    if KIS_APP_KEY and KIS_APP_SECRET:
+        for item in passed:
+            try:
+                p_kis, src_kis = kis_price(item["코드"])
+                if p_kis > 0:
+                    item["현재가"] = int(p_kis)
+                    item["source"] = "KIS"
+            except: pass
 
     # 수급 점수 추가 (KIS 있을 때만)
     if KIS_APP_KEY and KIS_APP_SECRET and passed:
