@@ -31,6 +31,7 @@ KIS_IS_REAL    = True
 KIS_BASE_URL   = "https://openapi.koreainvestment.com:9443" if KIS_IS_REAL else "https://openapivts.koreainvestment.com:29443"
 DART_API_KEY   = "281ef91c6b82789444a144b78042d6df2f20314a"   # ← DART OpenAPI 키 (https://opendart.fss.or.kr 무료 발급)
 _KIS_TOKEN     = {"token": "", "expires": None}
+_KIS_NAME_CACHE = {}  # {code: name} — KIS 가격 조회 시 종목명 함께 저장
 import threading
 _KIS_LOCK = threading.Lock()
 
@@ -137,6 +138,9 @@ def kis_close_price(code: str) -> tuple:
         rows = r.get("output2", []) or r.get("output1", [])
         if rows:
             p = float(str(rows[0].get("stck_clpr", 0) or 0).replace(",",""))
+            kor_name = rows[0].get("hts_kor_isnm","").strip()
+            if kor_name and code not in _KIS_NAME_CACHE:
+                _KIS_NAME_CACHE[code] = kor_name
             if p > 0: return p, "KIS(종가)"
         return 0.0, ""
     except: return 0.0, ""
@@ -164,6 +168,10 @@ def kis_price(code: str) -> tuple:
                 continue
             output = r.get("output", {})
             p = float(output.get("stck_prpr", 0) or 0)
+            # 종목명 함께 저장 (listing 없어도 이름 표시 가능)
+            kor_name = output.get("hts_kor_isnm","").strip()
+            if kor_name and code not in _KIS_NAME_CACHE:
+                _KIS_NAME_CACHE[code] = kor_name
             if p > 0: return p, "KIS"
             # 장 마감 후 → 종가 API로 전환
             p_close, src_close = kis_close_price(code)
@@ -1033,15 +1041,30 @@ def scan_us():
 # 포트폴리오 데이터
 # ============================================================
 def get_stock_name(code: str) -> str:
-    """종목명 조회 — KIS → listing"""
+    """종목명 조회 — 캐시 → KIS API → listing 순서"""
+    # 1. 가격 조회 시 저장된 캐시 (가장 빠름)
+    if code in _KIS_NAME_CACHE:
+        return _KIS_NAME_CACHE[code]
+    # 2. KIS search-stock-info API
     if KIS_APP_KEY:
         n = kis_name(code)
-        if n: return n
+        if n:
+            _KIS_NAME_CACHE[code] = n
+            return n
+    # 3. krx_listing (pykrx/fdr/하드코딩)
     try:
         listing = krx_listing()
         row = listing[listing["Code"]==code]
-        if not row.empty: return row["Name"].values[0]
+        if not row.empty:
+            n = row["Name"].values[0]
+            _KIS_NAME_CACHE[code] = n
+            return n
     except: pass
+    # 4. 가격 조회하면서 이름 가져오기 (마지막 수단)
+    if KIS_APP_KEY:
+        p, _ = kis_price(code)
+        if code in _KIS_NAME_CACHE:
+            return _KIS_NAME_CACHE[code]
     return code
 
 def portfolio_data(name: str) -> dict:
