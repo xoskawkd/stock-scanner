@@ -1384,6 +1384,25 @@ def render(title, data, currency):
             for ok,lbl in zip(flags,S_LABELS))
         sigs_html="".join(f"<li style='font-size:11px;margin:2px 0;'>{s}</li>" for s in item.get("signals",[]))
         with cols[i%3]:
+            # 점수 표시 조립
+            score_parts = f"차트 <b>{item['점수']}점</b>"
+            if item.get('수급점수',0) > 0:
+                score_parts += f" + 수급 <b style='color:#10b981'>{item['수급점수']}</b>"
+            if item.get('섹터점수',0) > 0:
+                score_parts += f" + 섹터 <b style='color:#a78bfa'>{item['섹터점수']}</b>"
+            if item.get('공시점수',0) != 0:
+                score_parts += f" + 공시 <b style='color:#f59e0b'>{item['공시점수']}</b>"
+            total_score = item.get('종합점수', item['점수'])
+            score_parts += f" = <b style='color:#f59e0b'>{total_score}점</b>"
+
+            # 공시/섹터 뱃지
+            extra_badges = ""
+            if item.get('공시목록'):
+                title_short = item['공시목록'][0]['title'][:18]
+                extra_badges += f"<span style='font-size:10px;color:#f59e0b;'>📢 {title_short}</span> "
+            if item.get('섹터강세'):
+                extra_badges += "<span style='font-size:10px;color:#a78bfa;'>🔥 섹터강세</span>"
+
             st.markdown(f"""
 <div style="background:#1e293b;padding:14px;border-radius:10px;border-left:4px solid {gc};margin-bottom:8px;">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
@@ -1391,10 +1410,9 @@ def render(title, data, currency):
     <span style="background:{gc};color:#000;font-size:11px;padding:2px 6px;border-radius:4px;">{item.get('등급','?')}</span>
   </div>
   <div style="margin-bottom:6px;">{badges}</div>
+  {f'<div style="margin-bottom:4px;">{extra_badges}</div>' if extra_badges else ''}
   <div style="font-size:12px;line-height:1.8;">
-    🎯 차트 <b>{item['점수']}점</b>{f" + 수급<b style='color:#10b981'>{item.get('수급점수',0)}</b>" if item.get('수급점수',0)>0 else ""}{f" + 섹터<b style='color:#a78bfa'>{item.get('섹터점수',0)}</b>" if item.get('섹터점수',0)>0 else ""}{f" + 공시<b style='color:#f59e0b'>{item.get('공시점수',0)}</b>" if item.get('공시점수',0)!=0 else ""} = <b style='color:#f59e0b'>{item.get('종합점수', item['점수'])}점</b> | RSI <b>{item['RSI']}</b><br>
-    {f"📢 {item['공시목록'][0]['title'][:20]}..." if item.get('공시목록') else ""}<br>
-    {"🔥 섹터강세" if item.get('섹터강세') else ""}
+    🎯 {score_parts} | RSI <b>{item['RSI']}</b><br>
     💰 <b>{fmt2(item['현재가'])}</b> <span style="font-size:10px;color:#64748b;">({item.get('source','')})</span><br>
     🟢 {item['매수구간']}<br>
     📈 <span style="color:#3b82f6;">{fmt2(item['목표가'])}</span>
