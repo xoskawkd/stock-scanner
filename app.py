@@ -29,7 +29,7 @@ KIS_APP_KEY    = "PSmEd1aPpxC4GtQ5k23MW8iI4IdvwKRhnXiF"
 KIS_APP_SECRET = "Pvmawb5cs8oIDi6KEgMbqx+115iKoUjKdMMj2DmcmdjyPmMtordm2EEfUoA+q15+23cUg2/7piYXimu+O42ZCS/tpJ2YpNAraf8W6TRV2cuwAgToJEWs8xBNHJeqFob6JUiVFhLbSGObuh1Z9ziXISrXBIF61+l/ZWoULdaIqAdYcjV2EIA="
 KIS_IS_REAL    = True
 KIS_BASE_URL   = "https://openapi.koreainvestment.com:9443" if KIS_IS_REAL else "https://openapivts.koreainvestment.com:29443"
-DART_API_KEY   = ""   # ← DART OpenAPI 키 (https://opendart.fss.or.kr 무료 발급)
+DART_API_KEY   = "281ef91c6b82789444a144b78042d6df2f20314a"   # ← DART OpenAPI 키 (https://opendart.fss.or.kr 무료 발급)
 _KIS_TOKEN     = {"token": "", "expires": None}
 import threading
 _KIS_LOCK = threading.Lock()
@@ -115,11 +115,40 @@ def kis_headers(tr_id):
     if not t: return None
     return {"authorization":f"Bearer {t}","appkey":KIS_APP_KEY,"appsecret":KIS_APP_SECRET,"tr_id":tr_id}
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def kis_close_price(code: str) -> tuple:
+    """KIS 당일 종가 조회 — 장 마감 후 사용"""
+    if not KIS_APP_KEY or not KIS_APP_SECRET: return 0.0, ""
+    h = kis_headers("FHKST03010100")
+    if not h: return 0.0, ""
+    try:
+        today = datetime.now().strftime("%Y%m%d")
+        r = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+            params={
+                "fid_cond_mrkt_div_code": "J",
+                "fid_input_iscd": code,
+                "fid_input_date_1": today,
+                "fid_input_date_2": today,
+                "fid_period_div_code": "D",
+                "fid_org_adj_prc": "0",
+            },
+            headers=h, timeout=4).json()
+        rows = r.get("output2", []) or r.get("output1", [])
+        if rows:
+            p = float(str(rows[0].get("stck_clpr", 0) or 0).replace(",",""))
+            if p > 0: return p, "KIS(종가)"
+        return 0.0, ""
+    except: return 0.0, ""
+
+
 def kis_price(code: str) -> tuple:
-    """KIS 실시간 현재가 — 토큰 만료 시 1회 재시도"""
+    """KIS 현재가 — 장 중 실시간, 장외 종가"""
+def kis_price(code: str) -> tuple:
+    """KIS 현재가 — 장 중 실시간, 장외 종가 자동 전환"""
     if not KIS_APP_KEY or not KIS_APP_SECRET:
         return 0.0, ""
-    for attempt in range(2):  # 최대 2회 (토큰 만료 대비)
+    for attempt in range(2):
         h = kis_headers("FHKST01010100")
         if not h: return 0.0, ""
         try:
@@ -127,10 +156,8 @@ def kis_price(code: str) -> tuple:
                 f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
                 params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code},
                 headers=h, timeout=4).json()
-            # 토큰 만료 오류 코드 체크
             rt_cd = r.get("rt_cd","")
             if rt_cd == "1" and attempt == 0:
-                # 토큰 강제 초기화 후 재시도
                 with _KIS_LOCK:
                     _KIS_TOKEN["token"] = ""
                     _KIS_TOKEN["expires"] = None
@@ -138,22 +165,29 @@ def kis_price(code: str) -> tuple:
             output = r.get("output", {})
             p = float(output.get("stck_prpr", 0) or 0)
             if p > 0: return p, "KIS"
-            # output 있지만 가격 0 → 장외시간 또는 종목 오류
-            msg = r.get("msg1", "")
-            return 0.0, f"KIS실패({msg[:10]})" if msg else ""
-        except Exception as e:
+            # 장 마감 후 → 종가 API로 전환
+            p_close, src_close = kis_close_price(code)
+            if p_close > 0: return p_close, src_close
+            return 0.0, ""
+        except:
             return 0.0, ""
     return 0.0, ""
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)  # 종목명은 하루 캐시
 def kis_name(code: str) -> str:
+    if not KIS_APP_KEY or not KIS_APP_SECRET: return ""
     h = kis_headers("CTPF1002R")
     if not h: return ""
     try:
         r = requests.get(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/search-stock-info",
             params={"PRDT_TYPE_CD":"300","PDNO":code},
             headers=h, timeout=3).json()
-        return r.get("output",{}).get("prdt_abrv_name","")
+        out = r.get("output", {})
+        # 여러 필드 시도 (종목마다 채워진 필드가 다름)
+        name = (out.get("prdt_abrv_name","") or
+                out.get("prdt_name","") or
+                out.get("hts_kor_isnm","") or "")
+        return name.strip()
     except: return ""
 
 @st.cache_data(ttl=1800, show_spinner=False)
