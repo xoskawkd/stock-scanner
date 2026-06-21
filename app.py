@@ -124,8 +124,7 @@ def gist_save(data: list) -> bool:
             gist_id = r.json().get("id", "")
             if gist_id:
                 GITHUB_GIST_ID = gist_id
-                st.sidebar.info(f"✅ Gist 생성됨: {gist_id}
-코드에 GITHUB_GIST_ID 넣어주세요")
+                st.sidebar.info(f"✅ Gist 생성됨: {gist_id} — Streamlit Secrets에 GITHUB_GIST_ID 추가하세요")
         return r.status_code in [200, 201]
     except: return False
 
