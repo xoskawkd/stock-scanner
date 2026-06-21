@@ -21,15 +21,22 @@ except:
     ZoneInfo = None
 
 # ============================================================
-# API 키
+# API 키 — Streamlit Secrets에서 읽기 (코드에 직접 넣지 마세요)
+# share.streamlit.io → 앱 → Settings → Secrets 에서 설정
 # ============================================================
-KRX_API_KEY    = "08810EEE8F724ED7BB7D35A2B79190956C2FFCB7"   # fallback
-FINNHUB_API_KEY= "e196a49253d0408cadf883e01f6b78d9"
-KIS_APP_KEY    = "PSmEd1aPpxC4GtQ5k23MW8iI4IdvwKRhnXiF"
-KIS_APP_SECRET = "Pvmawb5cs8oIDi6KEgMbqx+115iKoUjKdMMj2DmcmdjyPmMtordm2EEfUoA+q15+23cUg2/7piYXimu+O42ZCS/tpJ2YpNAraf8W6TRV2cuwAgToJEWs8xBNHJeqFob6JUiVFhLbSGObuh1Z9ziXISrXBIF61+l/ZWoULdaIqAdYcjV2EIA="
-KIS_IS_REAL    = True
-KIS_BASE_URL   = "https://openapi.koreainvestment.com:9443" if KIS_IS_REAL else "https://openapivts.koreainvestment.com:29443"
-DART_API_KEY   = "281ef91c6b82789444a144b78042d6df2f20314a"   # ← DART OpenAPI 키 (https://opendart.fss.or.kr 무료 발급)
+def _s(key, default=""):
+    try: return st.secrets.get(key, default)
+    except: return default
+
+KRX_API_KEY     = _s("KRX_API_KEY")
+FINNHUB_API_KEY = _s("FINNHUB_API_KEY")
+KIS_APP_KEY     = _s("KIS_APP_KEY")
+KIS_APP_SECRET  = _s("KIS_APP_SECRET")
+KIS_IS_REAL     = True
+KIS_BASE_URL    = "https://openapi.koreainvestment.com:9443"
+DART_API_KEY    = _s("DART_API_KEY")
+GITHUB_TOKEN    = _s("GITHUB_TOKEN")
+GITHUB_GIST_ID  = _s("GITHUB_GIST_ID")
 _KIS_TOKEN     = {"token": "", "expires": None}
 _KIS_NAME_CACHE = {}  # {code: name} — KIS 가격 조회 시 종목명 함께 저장
 import threading
@@ -71,14 +78,80 @@ W = load_weights()
 # ============================================================
 DATA_FILE = "portfolio.json"
 
+def gist_load() -> list:
+    """GitHub Gist에서 포트폴리오 불러오기"""
+    if not GITHUB_TOKEN or not GITHUB_GIST_ID:
+        return []
+    try:
+        r = requests.get(
+            f"https://api.github.com/gists/{GITHUB_GIST_ID}",
+            headers={"Authorization": f"token {GITHUB_TOKEN}",
+                     "Accept": "application/vnd.github.v3+json"},
+            timeout=5).json()
+        files = r.get("files", {})
+        if "portfolio.json" in files:
+            raw = files["portfolio.json"].get("content", "[]")
+            return json.loads(raw)
+    except: pass
+    return []
+
+
+def gist_save(data: list) -> bool:
+    """GitHub Gist에 포트폴리오 저장"""
+    global GITHUB_GIST_ID
+    if not GITHUB_TOKEN:
+        return False
+    payload = {
+        "description": "Tae Scanner Portfolio",
+        "public": False,
+        "files": {"portfolio.json": {"content": json.dumps(data, ensure_ascii=False, indent=2)}}
+    }
+    try:
+        if GITHUB_GIST_ID:
+            # 기존 Gist 업데이트
+            r = requests.patch(
+                f"https://api.github.com/gists/{GITHUB_GIST_ID}",
+                headers={"Authorization": f"token {GITHUB_TOKEN}",
+                         "Accept": "application/vnd.github.v3+json"},
+                json=payload, timeout=5)
+        else:
+            # 새 Gist 생성
+            r = requests.post(
+                "https://api.github.com/gists",
+                headers={"Authorization": f"token {GITHUB_TOKEN}",
+                         "Accept": "application/vnd.github.v3+json"},
+                json=payload, timeout=5)
+            gist_id = r.json().get("id", "")
+            if gist_id:
+                GITHUB_GIST_ID = gist_id
+                st.sidebar.info(f"✅ Gist 생성됨: {gist_id}
+코드에 GITHUB_GIST_ID 넣어주세요")
+        return r.status_code in [200, 201]
+    except: return False
+
+
 def load_portfolio():
+    # 1. GitHub Gist 우선
+    if GITHUB_TOKEN and GITHUB_GIST_ID:
+        data = gist_load()
+        if data:
+            # 로컬에도 백업
+            try: json.dump(data, open(DATA_FILE,"w"), ensure_ascii=False)
+            except: pass
+            return data
+    # 2. 로컬 파일 fallback
     if os.path.exists(DATA_FILE):
         try: return json.load(open(DATA_FILE,"r"))
         except: pass
     return []
 
 def save_portfolio(data):
-    json.dump(data, open(DATA_FILE,"w"), ensure_ascii=False)
+    # 1. 로컬 저장
+    try: json.dump(data, open(DATA_FILE,"w"), ensure_ascii=False)
+    except: pass
+    # 2. GitHub Gist 동기화
+    if GITHUB_TOKEN:
+        gist_save(data)
 
 # ============================================================
 # KIS API
@@ -1207,6 +1280,8 @@ with st.sidebar.expander("🔑 API 상태"):
     st.write("KRX:",  "✅" if KRX_API_KEY  else "❌ (fallback)")
     st.write("Finnhub:", "✅" if FINNHUB_API_KEY else "❌")
     st.write("DART:",    "✅" if DART_API_KEY    else "❌ (공시 비활성)")
+    st.write("GitHub:",  "✅ Gist 연동" if (GITHUB_TOKEN and GITHUB_GIST_ID) else
+                         ("⚠️ Gist ID 없음" if GITHUB_TOKEN else "❌ (포트폴리오 휘발 위험)"))
     # 미국장 시간대 표시
     if ZoneInfo:
         try:
@@ -1557,7 +1632,7 @@ def render(title, data, currency):
             st.markdown(f"""
 <div style="background:#1e293b;padding:14px;border-radius:10px;border-left:4px solid {gc};margin-bottom:8px;">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-    <b>{medals[i]} {item['종목']}</b>
+    <b>{medals[i]} {item['종목']}</b>{f" <span style='font-size:11px;color:#64748b;font-weight:normal;'>({item['코드']})</span>" if item.get('코드') and item['코드'] != item['종목'] else ""}
     <span style="background:{gc};color:#000;font-size:11px;padding:2px 6px;border-radius:4px;">{item.get('등급','?')}</span>
   </div>
   <div style="margin-bottom:6px;">{badges}</div>
