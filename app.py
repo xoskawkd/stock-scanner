@@ -1037,6 +1037,189 @@ def quant_predict(df, market="KR"):
 # ============================================================
 # 스캐너
 # ============================================================
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sector_leaders() -> list:
+    """
+    섹터별 시총 1위 종목 자동 추출
+    pykrx → krx_listing fallback
+    반환: [(code, name, sector), ...]
+    """
+    try:
+        from pykrx import stock as pk
+        today = datetime.now().strftime("%Y%m%d")
+
+        # 전체 종목 시총 데이터
+        df_cap = pk.get_market_cap(today, market="KOSPI")
+        df_cap.index.name = "Code"
+        df_cap = df_cap.reset_index()
+
+        # 업종 분류
+        sectors = {}
+        tickers = pk.get_market_ticker_list(today, market="KOSPI")
+        for code in tickers:
+            try:
+                sector = pk.get_market_sector_classifications(today, code)
+                if not sector.empty:
+                    sec_name = sector.iloc[0].get("업종명","기타")
+                    if sec_name not in sectors:
+                        sectors[sec_name] = []
+                    sectors[sec_name].append(code)
+            except: pass
+
+        # 섹터별 시총 1위
+        leaders = []
+        for sec_name, codes in sectors.items():
+            best_code = None; best_cap = 0
+            for code in codes:
+                row = df_cap[df_cap["Code"]==code]
+                if not row.empty:
+                    cap = float(row["시가총액"].values[0] if "시가총액" in row.columns else 0)
+                    if cap > best_cap:
+                        best_cap = cap
+                        best_code = code
+            if best_code:
+                try:
+                    name = pk.get_market_ticker_name(best_code)
+                except: name = best_code
+                leaders.append((best_code, name, sec_name))
+
+        if leaders:
+            return leaders
+    except: pass
+
+    # fallback: krx_listing 기반 섹터 추정
+    try:
+        listing = krx_listing()
+        if "Market" in listing.columns:
+            kospi = listing[listing["Market"].str.contains("KOSPI", na=False)]
+        else:
+            kospi = listing
+
+        # 종목명 기반 업종 추정 (간략)
+        sector_keywords = {
+            "반도체":   ["전자","하이닉스","반도체","마이크론"],
+            "바이오":   ["바이오","제약","생명","헬스"],
+            "자동차":   ["자동차","현대차","기아","모비스"],
+            "2차전지":  ["에너지솔루션","SDI","에코프로","배터리"],
+            "조선":     ["중공업","조선","해운"],
+            "금융":     ["금융","은행","증권","보험","지주"],
+            "화학":     ["화학","케미칼","솔루션"],
+            "철강":     ["철강","스틸","포스코"],
+            "건설":     ["건설","건영","엔지니어링"],
+            "IT서비스": ["NAVER","카카오","네이버","크래프톤"],
+        }
+
+        used_codes = set()
+        leaders = []
+        for sec_name, keywords in sector_keywords.items():
+            best = None; best_cap = 0
+            for _, row in kospi.iterrows():
+                code = row.get("Code","")
+                name = str(row.get("Name",""))
+                cap  = float(row.get("Marcap", 0))
+                if code in used_codes: continue
+                if any(kw in name for kw in keywords):
+                    if cap > best_cap:
+                        best_cap = cap
+                        best = (code, name, sec_name)
+            if best:
+                leaders.append(best)
+                used_codes.add(best[0])
+
+        return leaders if leaders else []
+    except: return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def scan_kr_sector() -> tuple:
+    """섹터별 대장주 스캔 — 각 섹터 1위 종목에 동일 로직 적용"""
+    leaders = get_sector_leaders()
+    if not leaders:
+        return [], []
+
+    listing  = krx_listing()
+    market_map = dict(zip(listing["Code"], listing.get("Market", pd.Series())))                  if "Market" in listing.columns else {}
+
+    if KIS_APP_KEY and KIS_APP_SECRET:
+        kis_token()  # 토큰 미리 발급
+
+    def _fetch_leader(item):
+        code, name, sector = item
+        df = ohlcv_kr(code)
+        if df is None: return {"_skip": True, "why": "데이터없음", "sector": sector}
+        r = quant_predict(df, "KR")
+        p, src = kr_price(code, market_map)
+        if p <= 0: p = r["current"]
+        if p <= 0: return {"_skip": True, "why": "가격없음", "sector": sector}
+
+        # pass 여부와 관계없이 섹터 대장은 항상 포함
+        display_name = _KIS_NAME_CACHE.get(code) or name
+        bmin = int(r["buy_min"]) if r["buy_min"]>p*0.90 and r["buy_min"]<p else int(p*0.97)
+        bmax = int(r["buy_max"]) if r["buy_max"]>p and r["buy_max"]<p*1.05 else int(p*1.02)
+        tgt  = int(r["target"]) if r["target"]>p*1.03 and r["target"]<=p*1.15 else int(p*1.08)
+        stp  = int(r["stop"])   if r["stop"]>p*0.85   and r["stop"]<p*0.98   else int(p*0.93)
+
+        return {
+            "_skip":   False,
+            "종목":    f"{display_name} ({code})",
+            "코드":    code,
+            "섹터":    sector,
+            "등급":    r["grade"],
+            "점수":    r["score"],
+            "pass":    r["pass"],
+            "현재가":  int(p),
+            "RSI":     round(r["rsi"], 1),
+            "매수구간":f"₩{bmin:,}~₩{bmax:,}",
+            "목표가":  tgt,
+            "손절가":  stp,
+            "signals": r["signals"],
+            "source":  src,
+            "s_flags": [r["s1"],r["s2"],r["s3"],r["s4"],r["s5"],
+                        r.get("s6",False),r.get("s7",False)],
+            "수급점수": 0, "섹터점수": 0, "공시점수": 0,
+            "공시목록": [], "종합점수": r["score"], "섹터강세": False,
+        }
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        raw = list(ex.map(_fetch_leader, leaders))
+
+    # KIS 가격 재조회
+    if KIS_APP_KEY and KIS_APP_SECRET:
+        for item in raw:
+            if not item.get("_skip"):
+                try:
+                    p_kis, src_kis = kis_price(item["코드"])
+                    if p_kis > 0:
+                        item["현재가"] = int(p_kis)
+                        item["source"] = src_kis
+                    cached = _KIS_NAME_CACHE.get(item["코드"])
+                    if cached: item["종목"] = f"{cached} ({item['코드']})"
+                except: pass
+
+    passed = [r for r in raw if not r.get("_skip")]
+    skips  = [r for r in raw if r.get("_skip")]
+
+    # 수급 점수 추가
+    if KIS_APP_KEY and KIS_APP_SECRET and passed:
+        def _add_sup(r):
+            try:
+                sup = supply_score(r["코드"])
+                sec = sector_momentum_score(r["코드"])
+                r["수급점수"]  = sup
+                r["섹터점수"]  = sec
+                r["종합점수"]  = r["점수"] + sup + sec
+                r["섹터강세"]  = sec >= 6
+            except:
+                pass
+            return r
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            passed = list(ex.map(_add_sup, passed))
+
+    # 종합점수 기준 TOP5
+    top5 = sorted(passed, key=lambda x: x["종합점수"], reverse=True)[:5]
+    return top5, skips
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def scan_kr():
     listing = krx_listing()
@@ -1299,7 +1482,7 @@ st.sidebar.metric("🇺🇸 미국장", "OPEN" if is_us_open() else "CLOSED")
 # 재스캔
 # 버튼 3개: 추천 재스캔 / 관심종목 재스캔 / 전체 캐시 초기화
 if st.sidebar.button("🔄 추천 재스캔", use_container_width=True, type="primary"):
-    scan_kr.clear(); scan_us.clear()
+    scan_kr.clear(); scan_us.clear(); scan_kr_sector.clear()
     ohlcv_kr.clear(); ohlcv_us.clear()
     st.rerun()
 
@@ -1648,8 +1831,56 @@ def render(title, data, currency):
   </details>
 </div>""", unsafe_allow_html=True)
 
-render("🔥 국내 폭등 예측 TOP 5", kr_top, "KRW")
-render("🇺🇸 해외 폭등 예측 TOP 5", us_top, "USD")
+# 섹터 대장주 스캔
+with st.spinner("섹터 대장주 스캔 중..."):
+    sector_top, sector_skip = scan_kr_sector()
+
+tab_kr, tab_sector, tab_us = st.tabs(["🔥 국내 TOP5", "🏆 섹터 대장 TOP5", "🇺🇸 해외 TOP5"])
+with tab_kr:
+    render("국내 폭등 예측 TOP 5", kr_top, "KRW")
+with tab_sector:
+    st.caption("각 업종 시총 1위 종목 중 신호 강도 순 TOP5")
+    # 섹터 배지 추가
+    medals2 = ["🥇","🥈","🥉","4️⃣","5️⃣"]
+    for i, item in enumerate(sector_top):
+        gc = {"A+":"#f59e0b","A":"#10b981","B+":"#3b82f6","B":"#94a3b8","C":"#64748b"}.get(item.get("등급","C"),"#64748b")
+        pass_badge = "✅ 신호발화" if item.get("pass") else "⬜ 신호없음"
+        pass_color = "#10b981" if item.get("pass") else "#64748b"
+        flags = item.get("s_flags",[False]*7)
+        badges = " ".join(
+            f"<span style='background:{'#10b981' if ok else '#1e293b'};color:{'#fff' if ok else '#475569'};font-size:9px;padding:2px 4px;border-radius:3px;'>{lbl}</span>"
+            for ok,lbl in zip(flags, S_LABELS))
+        score_str = f"차트 <b>{item['점수']}점</b>"
+        if item.get("수급점수",0)>0: score_str += f" + 수급 <b style='color:#10b981'>{item['수급점수']}</b>"
+        total = item.get("종합점수", item["점수"])
+        score_str += f" = <b style='color:#f59e0b'>{total}점</b>"
+        sigs_html = "".join(f"<li style='font-size:11px;margin:2px 0;'>{s}</li>" for s in item.get("signals",[]))
+        def ff2(v): return f"${v:,.2f}" if v>1 else f"${v:,.4f}"
+        fmt3 = lambda v: f"₩{int(v):,}"
+        st.markdown(f"""
+<div style="background:#1e293b;padding:14px;border-radius:10px;border-left:4px solid {gc};margin-bottom:8px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+    <b>{medals2[i]} {item['종목']}</b>
+    <span style="background:{gc};color:#000;font-size:11px;padding:2px 6px;border-radius:4px;">{item.get('등급','?')}</span>
+  </div>
+  <div style="font-size:10px;color:#a78bfa;margin-bottom:6px;">🏭 {item.get('섹터','')}</div>
+  <div style="margin-bottom:6px;">{badges}</div>
+  <div style="font-size:12px;line-height:1.8;">
+    🎯 {score_str} | RSI <b>{item['RSI']}</b><br>
+    <span style="color:{pass_color};font-size:11px;">{pass_badge}</span><br>
+    💰 <b>{fmt3(item['현재가'])}</b> <span style="font-size:10px;color:#64748b;">({item.get('source','')})</span><br>
+    🟢 {item['매수구간']}<br>
+    📈 <span style="color:#3b82f6;">{fmt3(item['목표가'])}</span>
+    📉 <span style="color:#ef4444;">{fmt3(item['손절가'])}</span>
+  </div>
+  <details><summary style="font-size:11px;color:#94a3b8;cursor:pointer;">신호 상세</summary>
+    <ul style="padding-left:14px;margin-top:4px;">{sigs_html}</ul>
+  </details>
+</div>""", unsafe_allow_html=True)
+    if not sector_top:
+        st.info("섹터 대장주 데이터를 가져오는 중이에요. 잠시 후 재스캔해보세요.")
+with tab_us:
+    render("해외 폭등 예측 TOP 5", us_top, "USD")
 
 # ============================================================
 # 백테스트 (탭 맨 뒤 — 기존 유지)
