@@ -463,78 +463,133 @@ def kr_price(code: str, market_map: dict = None) -> tuple:
 # ============================================================
 # 시장 상태 진단 (Market Regime)
 # ============================================================
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)  # 5분 캐시 (당일 등락 반영)
+def get_kospi_today() -> dict:
+    """KIS API로 코스피 당일 등락률 조회"""
+    if not KIS_APP_KEY or not KIS_APP_SECRET:
+        return {"ok": False, "ret1": 0}
+    try:
+        h = kis_headers("FHPUP02100000")
+        if not h: return {"ok": False, "ret1": 0}
+        r = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-index-price",
+            params={"fid_cond_mrkt_div_code": "U", "fid_input_iscd": "0001"},  # 코스피
+            headers=h, timeout=4).json()
+        out = r.get("output", {})
+        # 당일 등락률
+        ret1 = float(out.get("bstp_nmix_prdy_ctrt", 0) or 0)  # 전일 대비 등락률
+        cur  = float(out.get("bstp_nmix_prpr", 0) or 0)       # 현재 지수
+        return {"ok": True, "ret1": ret1, "cur": cur}
+    except:
+        return {"ok": False, "ret1": 0}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_sector_index_kis(sector_code: str) -> dict:
+    """KIS API로 업종 지수 조회"""
+    if not KIS_APP_KEY or not KIS_APP_SECRET:
+        return {"ok": False, "ret1": 0}
+    try:
+        h = kis_headers("FHPUP02100000")
+        if not h: return {"ok": False, "ret1": 0}
+        r = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-index-price",
+            params={"fid_cond_mrkt_div_code": "U", "fid_input_iscd": sector_code},
+            headers=h, timeout=4).json()
+        out = r.get("output", {})
+        ret1 = float(out.get("bstp_nmix_prdy_ctrt", 0) or 0)
+        cur  = float(out.get("bstp_nmix_prpr", 0) or 0)
+        return {"ok": True, "ret1": ret1, "cur": cur}
+    except:
+        return {"ok": False, "ret1": 0}
+
+
+# KIS 업종 지수 코드
+KIS_SECTOR_CODE = {
+    "전기전자":  "1001",
+    "전기·전자": "1001",
+    "반도체":    "1001",
+    "화학":      "1003",
+    "철강금속":  "1004",
+    "기계":      "1005",
+    "조선":      "1006",
+    "건설":      "1007",
+    "운수장비":  "1008",
+    "금융":      "1009",
+    "증권":      "1010",
+    "보험":      "1011",
+    "의약품":    "1012",
+    "음식료":    "1002",
+    "통신":      "1013",
+    "유통":      "1014",
+    "IT":        "1001",
+    "바이오":    "1012",
+}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def get_market_regime() -> dict:
     """
-    코스피 지수 기반 시장 상태 진단
-    반환: {regime, score, detail, kospi_ret5, kospi_ret20, ma_signal}
+    코스피 시장 상태 진단
+    당일 등락률 최우선 → 5일 흐름 보조
     """
+    # 1. KIS로 당일 코스피 등락률 (최우선)
+    today_data = get_kospi_today()
+    ret1 = today_data.get("ret1", 0) if today_data.get("ok") else 0
+
+    # 2. fdr로 5일 흐름
+    ret5 = 0; ma5 = 0; ma20 = 0; down_days = 0; dd_from_hi = 0
     try:
         import FinanceDataReader as fdr
         df = fdr.DataReader("KS11", start=(datetime.now()-timedelta(days=120)).strftime("%Y-%m-%d"))
-        if df is None or len(df) < 30:
-            raise ValueError("데이터 부족")
-        df.columns = [c.lower() for c in df.columns]
-        cl = df["close"].astype(float)
+        if df is not None and len(df) >= 10:
+            df.columns = [c.lower() for c in df.columns]
+            cl = df["close"].astype(float)
+            cur = float(cl.iloc[-1])
+            ma5  = float(cl.rolling(5).mean().iloc[-1])
+            ma20 = float(cl.rolling(20).mean().iloc[-1])
+            ret5 = (cur-float(cl.iloc[-6]))/float(cl.iloc[-6])*100 if len(cl)>=6 else 0
+            hi52 = float(cl.rolling(252).max().iloc[-1]) if len(cl)>=252 else float(cl.max())
+            dd_from_hi = (cur-hi52)/hi52*100
+            for i in range(1, 6):
+                if float(cl.iloc[-i]) < float(cl.iloc[-i-1]): down_days+=1
+                else: break
+    except: pass
 
-        ma5  = float(cl.rolling(5).mean().iloc[-1])
-        ma20 = float(cl.rolling(20).mean().iloc[-1])
-        ma60 = float(cl.rolling(60).mean().iloc[-1]) if len(cl)>=60 else ma20
-        cur  = float(cl.iloc[-1])
+    # ── 당일 등락률 최우선 판단 ──
+    if ret1 <= -3:
+        regime="🔴 당일 급락"; score=0; color="#ef4444"
+        desc=f"오늘 {ret1:+.1f}% — 매수 절대 금지"
+    elif ret1 <= -1.5:
+        regime="🟠 당일 약세"; score=0; color="#f97316"
+        desc=f"오늘 {ret1:+.1f}% — 매수 자제"
+    elif ret1 >= 1.5:
+        regime="🟢 당일 강세"; score=3; color="#10b981"
+        desc=f"오늘 {ret1:+.1f}%"
+    elif ret1 >= 0:
+        regime="🟡 당일 보합"; score=2; color="#f59e0b"
+        desc=f"오늘 {ret1:+.1f}%"
+    else:
+        regime="🟡 당일 소폭하락"; score=1; color="#f59e0b"
+        desc=f"오늘 {ret1:+.1f}%"
 
-        # 수익률
-        ret5  = (cur - float(cl.iloc[-6]))  / float(cl.iloc[-6])  * 100 if len(cl)>=6  else 0
-        ret20 = (cur - float(cl.iloc[-21])) / float(cl.iloc[-21]) * 100 if len(cl)>=21 else 0
+    # 5일 흐름으로 보정 (당일 판단과 같은 방향이면 강화)
+    if ret5 < -3 and score > 0: score = max(0, score-1)
+    if ret5 > 3 and score < 3:  score = min(3, score+1)
+    if down_days >= 3 and score > 0: score = max(0, score-1)
 
-        # 연속 하락일
-        down_days = 0
-        for i in range(1, 6):
-            if float(cl.iloc[-i]) < float(cl.iloc[-i-1]):
-                down_days += 1
-            else:
-                break
+    # 극공포 (당일 -5% 이상)
+    if ret1 <= -5:
+        regime="🔥 극공포"; score=0; color="#ef4444"
+        desc=f"오늘 {ret1:+.1f}% 급락 — 역발상 기회 탐색"
 
-        # 52주 고점 대비
-        hi52 = float(cl.rolling(252).max().iloc[-1]) if len(cl)>=252 else float(cl.max())
-        dd_from_hi = (cur - hi52) / hi52 * 100
-
-        # 시장 상태 판단
-        if ma5 > ma20 > ma60 and ret5 > 0:
-            regime = "상승장"; score = 3; color = "#10b981"
-            desc = f"정배열 상승 (5일 {ret5:+.1f}%)"
-        elif ma5 > ma20 and ret20 > 0:
-            regime = "완만상승"; score = 2; color = "#10b981"
-            desc = f"단기 상승 (5일 {ret5:+.1f}%)"
-        elif down_days >= 3 or ret5 < -3:
-            regime = "하락장"; score = 0; color = "#ef4444"
-            desc = f"연속하락 {down_days}일 (5일 {ret5:+.1f}%)"
-        elif dd_from_hi < -15:
-            regime = "조정장"; score = 1; color = "#f59e0b"
-            desc = f"고점 대비 {dd_from_hi:.1f}%"
-        elif ret5 < -1.5:
-            regime = "약세"; score = 1; color = "#f59e0b"
-            desc = f"단기 약세 (5일 {ret5:+.1f}%)"
-        else:
-            regime = "중립"; score = 2; color = "#94a3b8"
-            desc = f"보합 (5일 {ret5:+.1f}%)"
-
-        # 극공포 체크 (5일 -5% 이상)
-        if ret5 < -5:
-            regime = "극공포"; score = 0; color = "#ef4444"
-            desc = f"급락 (5일 {ret5:+.1f}%) — 역발상 주목"
-
-        return {
-            "ok": True, "regime": regime, "score": score,
-            "color": color, "desc": desc,
-            "ret5": round(ret5,2), "ret20": round(ret20,2),
-            "ma_bull": ma5 > ma20, "down_days": down_days,
-            "dd_from_hi": round(dd_from_hi,1),
-        }
-    except Exception as e:
-        return {"ok": False, "regime": "알수없음", "score": 2,
-                "color": "#64748b", "desc": str(e),
-                "ret5": 0, "ret20": 0, "ma_bull": True,
-                "down_days": 0, "dd_from_hi": 0}
+    return {
+        "ok": True, "regime": regime, "score": score,
+        "color": color, "desc": desc,
+        "ret1": round(ret1,2), "ret5": round(ret5,2),
+        "ma_bull": ma5 > ma20 if ma5>0 and ma20>0 else True,
+        "down_days": down_days, "dd_from_hi": round(dd_from_hi,1),
+    }
 
 
 # 종목코드 → 섹터명 매핑 (KIS API 기반, 캐시)
@@ -616,42 +671,56 @@ def get_stock_sector_name(code: str) -> str:
     return sec
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_sector_regime(sector_name: str) -> dict:
-    """섹터명으로 섹터 지수 상태 진단"""
-    # 섹터명에서 지수 코드 매핑
-    sector_code = ""
+    """섹터명으로 섹터 지수 당일 등락 조회 — KIS API 우선"""
+    # KIS 업종 코드 매핑
+    kis_code = ""
+    for key, code in KIS_SECTOR_CODE.items():
+        if key in sector_name:
+            kis_code = code
+            break
+
+    # 1. KIS 업종 지수 (당일 등락률)
+    if kis_code and KIS_APP_KEY:
+        data = get_sector_index_kis(kis_code)
+        if data.get("ok"):
+            ret1 = data.get("ret1", 0)
+            if ret1 >= 2:
+                status="🟢 강세"; score=2
+            elif ret1 >= 0:
+                status="🟡 보합"; score=1
+            elif ret1 >= -2:
+                status="🟠 약세"; score=0
+            else:
+                status="🔴 급락"; score=-1
+            return {"ok":True,"status":status,"score":score,
+                    "ret1":round(ret1,2),"sector_name":sector_name}
+
+    # 2. fdr fallback (5일 기준)
+    fdr_code = ""
     for key, code in SECTOR_INDEX_MAP.items():
         if key in sector_name:
-            sector_code = code
+            fdr_code = code
             break
-    if not sector_code:
-        return {"ok": False, "status": "섹터확인불가", "score": 1, "ret5": 0}
-        # score=1 중립 유지 (강세/약세 판단 불가)
-    try:
-        import FinanceDataReader as fdr
-        df = fdr.DataReader(sector_code,
-                           start=(datetime.now()-timedelta(days=60)).strftime("%Y-%m-%d"))
-        if df is None or len(df) < 10:
-            return {"ok": False, "status": "데이터없음", "score": 1, "ret5": 0}
-        df.columns = [c.lower() for c in df.columns]
-        cl = df["close"].astype(float)
-        ret5 = (float(cl.iloc[-1])-float(cl.iloc[-6]))/float(cl.iloc[-6])*100 if len(cl)>=6 else 0
-        ma5  = float(cl.rolling(5).mean().iloc[-1])
-        ma20 = float(cl.rolling(20).mean().iloc[-1]) if len(cl)>=20 else ma5
-        if ret5 >= 3 and ma5 > ma20:
-            status="🟢 강세"; score=2
-        elif ret5 >= 0:
-            status="🟡 보합"; score=1
-        elif ret5 >= -3:
-            status="🟠 약세"; score=0
-        else:
-            status="🔴 급락"; score=-1
-        return {"ok":True,"status":status,"score":score,
-                "ret5":round(ret5,2),"sector_name":sector_name,
-                "sector_code":sector_code}
-    except:
-        return {"ok":False,"status":"조회실패","score":1,"ret5":0}
+    if fdr_code:
+        try:
+            import FinanceDataReader as fdr
+            df = fdr.DataReader(fdr_code,
+                               start=(datetime.now()-timedelta(days=30)).strftime("%Y-%m-%d"))
+            if df is not None and len(df) >= 5:
+                df.columns = [c.lower() for c in df.columns]
+                cl = df["close"].astype(float)
+                ret5 = (float(cl.iloc[-1])-float(cl.iloc[-6]))/float(cl.iloc[-6])*100 if len(cl)>=6 else 0
+                if ret5 >= 3:   status="🟢 강세"; score=2
+                elif ret5 >= 0: status="🟡 보합"; score=1
+                elif ret5 >= -3: status="🟠 약세"; score=0
+                else:           status="🔴 급락"; score=-1
+                return {"ok":True,"status":status,"score":score,
+                        "ret5":round(ret5,2),"sector_name":sector_name}
+        except: pass
+
+    return {"ok":False,"status":"조회실패","score":1,"ret5":0}
 
 
 def get_stock_full_regime(code: str) -> dict:
