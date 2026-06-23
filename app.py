@@ -290,25 +290,6 @@ def kis_name(code: str) -> str:
     return ""
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def kis_investor(code: str) -> dict:
-    h = kis_headers("FHKST01010900")
-    if not h: return {}
-    try:
-        r = requests.get(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor",
-            params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code},
-            headers=h, timeout=4).json()
-        result = {"외국인":0,"기관":0,"개인":0,"연기금":0}
-        for row in r.get("output",[]):
-            inv = row.get("invst_nm","")
-            try: net = int(row.get("netbuy_qty",0) or 0)
-            except: net = 0
-            if "외국인" in inv: result["외국인"] = net
-            elif "기관계" in inv: result["기관"] = net
-            elif "개인" in inv: result["개인"] = net
-            elif "연기금" in inv: result["연기금"] = net
-        return result
-    except: return {}
-
 @st.cache_data(ttl=1800, show_spinner=False)
 def kis_investor_trend(code: str, days=5) -> list:
     h = kis_headers("FHKST01010600")
@@ -478,6 +459,118 @@ def kr_price(code: str, market_map: dict = None) -> tuple:
         if p > 0: return p, "yfinance"
     except: pass
     return 0.0, "실패"
+
+# ============================================================
+# 시장 상태 진단 (Market Regime)
+# ============================================================
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_market_regime() -> dict:
+    """
+    코스피 지수 기반 시장 상태 진단
+    반환: {regime, score, detail, kospi_ret5, kospi_ret20, ma_signal}
+    """
+    try:
+        import FinanceDataReader as fdr
+        df = fdr.DataReader("KS11", start=(datetime.now()-timedelta(days=120)).strftime("%Y-%m-%d"))
+        if df is None or len(df) < 30:
+            raise ValueError("데이터 부족")
+        df.columns = [c.lower() for c in df.columns]
+        cl = df["close"].astype(float)
+
+        ma5  = float(cl.rolling(5).mean().iloc[-1])
+        ma20 = float(cl.rolling(20).mean().iloc[-1])
+        ma60 = float(cl.rolling(60).mean().iloc[-1]) if len(cl)>=60 else ma20
+        cur  = float(cl.iloc[-1])
+
+        # 수익률
+        ret5  = (cur - float(cl.iloc[-6]))  / float(cl.iloc[-6])  * 100 if len(cl)>=6  else 0
+        ret20 = (cur - float(cl.iloc[-21])) / float(cl.iloc[-21]) * 100 if len(cl)>=21 else 0
+
+        # 연속 하락일
+        down_days = 0
+        for i in range(1, 6):
+            if float(cl.iloc[-i]) < float(cl.iloc[-i-1]):
+                down_days += 1
+            else:
+                break
+
+        # 52주 고점 대비
+        hi52 = float(cl.rolling(252).max().iloc[-1]) if len(cl)>=252 else float(cl.max())
+        dd_from_hi = (cur - hi52) / hi52 * 100
+
+        # 시장 상태 판단
+        if ma5 > ma20 > ma60 and ret5 > 0:
+            regime = "상승장"; score = 3; color = "#10b981"
+            desc = f"정배열 상승 (5일 {ret5:+.1f}%)"
+        elif ma5 > ma20 and ret20 > 0:
+            regime = "완만상승"; score = 2; color = "#10b981"
+            desc = f"단기 상승 (5일 {ret5:+.1f}%)"
+        elif down_days >= 3 or ret5 < -3:
+            regime = "하락장"; score = 0; color = "#ef4444"
+            desc = f"연속하락 {down_days}일 (5일 {ret5:+.1f}%)"
+        elif dd_from_hi < -15:
+            regime = "조정장"; score = 1; color = "#f59e0b"
+            desc = f"고점 대비 {dd_from_hi:.1f}%"
+        elif ret5 < -1.5:
+            regime = "약세"; score = 1; color = "#f59e0b"
+            desc = f"단기 약세 (5일 {ret5:+.1f}%)"
+        else:
+            regime = "중립"; score = 2; color = "#94a3b8"
+            desc = f"보합 (5일 {ret5:+.1f}%)"
+
+        # 극공포 체크 (5일 -5% 이상)
+        if ret5 < -5:
+            regime = "극공포"; score = 0; color = "#ef4444"
+            desc = f"급락 (5일 {ret5:+.1f}%) — 역발상 주목"
+
+        return {
+            "ok": True, "regime": regime, "score": score,
+            "color": color, "desc": desc,
+            "ret5": round(ret5,2), "ret20": round(ret20,2),
+            "ma_bull": ma5 > ma20, "down_days": down_days,
+            "dd_from_hi": round(dd_from_hi,1),
+        }
+    except Exception as e:
+        return {"ok": False, "regime": "알수없음", "score": 2,
+                "color": "#64748b", "desc": str(e),
+                "ret5": 0, "ret20": 0, "ma_bull": True,
+                "down_days": 0, "dd_from_hi": 0}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_sector_regime(sector_code: str) -> dict:
+    """섹터 지수 상태 진단"""
+    try:
+        import FinanceDataReader as fdr
+        df = fdr.DataReader(sector_code,
+                           start=(datetime.now()-timedelta(days=60)).strftime("%Y-%m-%d"))
+        if df is None or len(df) < 10:
+            return {"ok": False}
+        df.columns = [c.lower() for c in df.columns]
+        cl = df["close"].astype(float)
+        ret5 = (float(cl.iloc[-1]) - float(cl.iloc[-6])) / float(cl.iloc[-6]) * 100 if len(cl)>=6 else 0
+        if ret5 >= 3:   status="🟢 강세"; score=2
+        elif ret5 >= 0: status="🟡 보합"; score=1
+        elif ret5 >= -3: status="🟠 약세"; score=0
+        else:           status="🔴 급락"; score=-1
+        return {"ok": True, "status": status, "score": score, "ret5": round(ret5,2)}
+    except:
+        return {"ok": False}
+
+
+def get_dynamic_pass_score(market: dict) -> int:
+    """
+    시장 상태에 따라 pass score 동적 조정
+    상승장 → 완화 (더 많은 종목 추천)
+    하락장 → 강화 (고품질만 추천)
+    """
+    base = 12
+    regime_score = market.get("score", 2)
+    if regime_score == 3:   return max(base - 4, 8)   # 상승장: 8점 (완화)
+    elif regime_score == 2: return base                # 중립: 12점 (기본)
+    elif regime_score == 1: return base + 8            # 조정장: 20점 (강화)
+    else:                   return base + 15           # 하락장: 27점 (매우 강화)
+
 
 # 미국 주요 휴장일
 _US_HOLIDAYS = {
@@ -1053,18 +1146,27 @@ def get_sector_leaders() -> list:
         df_cap.index.name = "Code"
         df_cap = df_cap.reset_index()
 
-        # 업종 분류
+        # 업종별 시총 상위 종목 (pykrx 업종 분류 사용)
         sectors = {}
-        tickers = pk.get_market_ticker_list(today, market="KOSPI")
-        for code in tickers:
-            try:
-                sector = pk.get_market_sector_classifications(today, code)
-                if not sector.empty:
-                    sec_name = sector.iloc[0].get("업종명","기타")
+        try:
+            # 업종별 종목 한번에 가져오기
+            df_sector = pk.get_market_sector_classifications(today, market="KOSPI")
+            if not df_sector.empty:
+                for _, row in df_sector.iterrows():
+                    sec_name = row.get("업종명","기타")
+                    code = row.get("티커","") or row.name
                     if sec_name not in sectors:
                         sectors[sec_name] = []
-                    sectors[sec_name].append(code)
-            except: pass
+                    sectors[sec_name].append(str(code))
+        except:
+            tickers = pk.get_market_ticker_list(today, market="KOSPI")
+            for code in tickers[:100]:  # 상위 100개만
+                try:
+                    sec = pk.get_market_sector_classifications(today, code)
+                    if not sec.empty:
+                        sec_name = sec.iloc[0].get("업종명","기타")
+                        sectors.setdefault(sec_name,[]).append(code)
+                except: pass
 
         # 섹터별 시총 1위
         leaders = []
@@ -1222,6 +1324,10 @@ def scan_kr_sector() -> tuple:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def scan_kr():
+    # 시장 상태 진단 → 동적 pass score
+    market = get_market_regime()
+    dynamic_score = get_dynamic_pass_score(market)
+
     listing = krx_listing()
     kospi  = listing[listing["Market"].str.contains("KOSPI", na=False)]  if "Market" in listing.columns else listing
     kosdaq = listing[listing["Market"].str.contains("KOSDAQ",na=False)]  if "Market" in listing.columns else pd.DataFrame()
@@ -1242,7 +1348,10 @@ def scan_kr():
         df = ohlcv_kr(code)
         if df is None: return {"_skip":True,"why":"데이터없음"}
         r = quant_predict(df,"KR")
-        if not r["pass"]:
+        # 시장 상태에 따라 pass 기준 동적 적용
+        r_pass = (r["pass"] or
+                  ((r["s3"] or r["s4"]) and r["score"] >= dynamic_score))
+        if not r_pass:
             why=next((s for s in r["signals"] if "❌" in s),"조건미충족")
             return {"_skip":True,"why":why}
         p, src = kr_price(code, market_map)
@@ -1489,7 +1598,6 @@ if st.sidebar.button("🔄 추천 재스캔", use_container_width=True, type="pr
 if st.sidebar.button("👀 관심종목 재평가", use_container_width=True):
     # ohlcv 캐시만 날림 (portfolio_data는 원래 캐시 없음)
     ohlcv_kr.clear(); ohlcv_us.clear()
-    kis_investor.clear()
     kis_investor_trend.clear()
     st.session_state["watch_refresh"] = True
     st.rerun()
@@ -1499,7 +1607,7 @@ if st.sidebar.button("🗑️ 전체 캐시 초기화", use_container_width=True
     scan_kr.clear(); scan_us.clear()
     ohlcv_kr.clear(); ohlcv_us.clear()
     krx_listing.clear(); us_tickers.clear()
-    kis_price.clear(); kis_investor.clear()
+    kis_price.clear()
     kis_investor_trend.clear(); kis_name.clear()
     st.rerun()
 
@@ -1548,6 +1656,10 @@ with tab_hold:
                 st.rerun()
 
 # 포트폴리오 카드
+# 시장 상태 루프 밖에서 1회만 조회 (캐시 있어도 루프 밖이 더 깔끔)
+_mkt_regime = get_market_regime()
+_mkt_down   = _mkt_regime.get("score", 2) <= 1
+
 to_remove = None
 for i, p in enumerate(st.session_state.portfolio):
     name = p["name"]; buy = p.get("buy",0); ptype = p.get("type","hold")
@@ -1593,14 +1705,19 @@ for i, p in enumerate(st.session_state.portfolio):
 
         # 종합 판단
         bs = 0
+        mkt_w = _mkt_regime  # 루프 밖 1회 조회 재사용
+        mkt_score_w = mkt_w.get("score", 2)
         if abs(gap_pct)<3: bs+=2
         elif abs(gap_pct)<5: bs+=1
         if signal_ok: bs+=2
         if is_kr and KIS_APP_KEY:
             sup2 = supply_signal(name)
             if sup2.get("ok") and sup2.get("score",0)>=3: bs+=2
-        if bs>=5: bv="🟢 매수 적극 고려"; bc="#10b981"
-        elif bs>=3: bv="🟡 조건부 매수"; bc="#f59e0b"
+        if mkt_score_w == 3:   bs+=2
+        elif mkt_score_w <= 0: bs-=3
+        if bs>=6: bv="🟢 매수 적극 고려"; bc="#10b981"
+        elif bs>=4: bv="🟡 조건부 매수 (시장 확인)"; bc="#f59e0b"
+        elif mkt_score_w <= 0: bv="🔴 하락장 — 매수 자제"; bc="#ef4444"
         else: bv="🔴 매수 보류"; bc="#ef4444"
 
         memo = p.get("memo","")
@@ -1661,8 +1778,12 @@ for i, p in enumerate(st.session_state.portfolio):
     rsi_v = d["rsi"]
     trend_broken = not s3_on
 
+    mkt = _mkt_regime  # 루프 밖에서 1회 조회한 값 재사용
+    mkt_down = _mkt_down
+
     if curr<=fixed_stop: act="🔴 즉시 손절"; ac="#ef4444"; ar=f"평단 -7% 이탈 ({profit:.1f}%)"
-    elif trend_broken and profit<-3: act="🔴 손절 고려"; ac="#ef4444"; ar=f"정배열붕괴+손실 {profit:.1f}%"
+    elif mkt_down and profit<-5: act="🔴 손절 고려"; ac="#ef4444"; ar=f"하락장+손실 {profit:.1f}% — 시장 위험"
+    elif trend_broken and profit<-5: act="🔴 손절 고려"; ac="#ef4444"; ar=f"정배열붕괴+손실 {profit:.1f}%"
     elif rsi_v>70 and profit>5: act="🟡 익절 고려"; ac="#f59e0b"; ar=f"RSI과열({rsi_v:.0f})+수익{profit:.1f}%"
     elif curr>=fixed_tgt: act="🟡 익절 고려"; ac="#f59e0b"; ar=f"목표가 도달"
     elif hold_days>=10 and trend_broken: act="🟡 재검토"; ac="#f59e0b"; ar=f"보유{hold_days}일+추세약화"
@@ -1762,6 +1883,40 @@ st.divider()
 # ============================================================
 # 스캔 결과
 # ============================================================
+# 시장 상태 진단
+market_regime = get_market_regime()
+
+# 시장 상태 배너
+reg_color = market_regime.get("color","#64748b")
+reg_name  = market_regime.get("regime","알수없음")
+reg_desc  = market_regime.get("desc","")
+reg_score = market_regime.get("score", 2)
+
+if reg_score == 3:
+    banner_msg = "✅ 상승장 — 적극 매수 적합"
+elif reg_score == 2:
+    banner_msg = "🟡 중립장 — 선별적 접근"
+elif reg_score == 1:
+    banner_msg = "⚠️ 조정장 — 고품질 종목만 / 소량 진입"
+else:
+    if "극공포" in reg_name:
+        banner_msg = "🔥 극공포 — 역발상 매수 기회 탐색 중"
+    else:
+        banner_msg = "🔴 하락장 — 매수 자제 / 현금 보유 권장"
+
+st.markdown(f"""
+<div style="background:{reg_color}22;border:1px solid {reg_color};
+            border-radius:8px;padding:10px 14px;margin-bottom:12px;">
+  <span style="color:{reg_color};font-weight:bold;font-size:14px;">
+    📊 코스피 {reg_name}
+  </span>
+  <span style="color:#94a3b8;font-size:12px;margin-left:8px;">{reg_desc}</span><br>
+  <span style="font-size:12px;color:{reg_color};">{banner_msg}</span>
+  <span style="font-size:10px;color:#64748b;margin-left:8px;">
+    (pass기준 {get_dynamic_pass_score(market_regime)}점 적용)
+  </span>
+</div>""", unsafe_allow_html=True)
+
 with st.spinner("스캔 중..."):
     kr_top, kr_skip = scan_kr()
     us_top, us_skip = scan_us()
@@ -1882,13 +2037,4 @@ with tab_sector:
 with tab_us:
     render("해외 폭등 예측 TOP 5", us_top, "USD")
 
-# ============================================================
-# 백테스트 (탭 맨 뒤 — 기존 유지)
-# ============================================================
-st.divider()
-st.header("🔬 백테스트")
-st.caption("백테스트 기능은 별도 탭에서 실행하세요 (무거워서 필요할 때만)")
 
-with st.expander("⚙️ 백테스트 실행", expanded=False):
-    import importlib.util
-    st.info("백테스트는 기존 v8 코드 참고 — 필요시 별도 파일로 분리 권장")
