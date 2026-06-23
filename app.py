@@ -25,6 +25,10 @@ except:
 # share.streamlit.io → 앱 → Settings → Secrets 에서 설정
 # ============================================================
 def _s(key, default=""):
+    # Railway(os.environ) 우선 → Streamlit Secrets fallback
+    import os
+    v = os.environ.get(key, "")
+    if v: return v
     try: return st.secrets.get(key, default)
     except: return default
 
@@ -219,8 +223,6 @@ def kis_close_price(code: str) -> tuple:
 
 
 def kis_price(code: str) -> tuple:
-    """KIS 현재가 — 장 중 실시간, 장외 종가"""
-def kis_price(code: str) -> tuple:
     """KIS 현재가 — 장 중 실시간, 장외 종가 자동 전환"""
     if not KIS_APP_KEY or not KIS_APP_SECRET:
         return 0.0, ""
@@ -289,7 +291,6 @@ def kis_name(code: str) -> str:
     except: pass
     return ""
 
-@st.cache_data(ttl=1800, show_spinner=False)
 @st.cache_data(ttl=1800, show_spinner=False)
 def kis_investor_trend(code: str, days=5) -> list:
     h = kis_headers("FHKST01010600")
