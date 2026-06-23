@@ -748,7 +748,7 @@ def us_prepost(ticker: str) -> tuple:
 # ============================================================
 # OHLCV
 # ============================================================
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def ohlcv_kr(code):
     try:
         df = fdr.DataReader(code, start="2024-01-01")
@@ -766,7 +766,7 @@ def ohlcv_kr(code):
     except: pass
     return None
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def ohlcv_us(ticker):
     try:
         df = yf.Ticker(ticker).history(period="1y")
@@ -1563,8 +1563,7 @@ def scan_us():
                 "매수구간":f"{uf(p*0.97)}~{uf(p*1.02)}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
                 "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"],r.get("s6",False),r.get("s7",False)],
-                "섹터명":get_stock_sector_name(code),
-                "섹터상태":"","시장섹터":"",
+                "섹터명":"","섹터상태":"","시장섹터":"",
                 "수급점수":0,"섹터점수":0,"공시점수":0,"공시목록":[],"종합점수":r["score"],"섹터강세":False}
 
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -1775,9 +1774,18 @@ with tab_hold:
                 st.rerun()
 
 # 포트폴리오 카드
-# 시장 상태 루프 밖에서 1회만 조회 (캐시 있어도 루프 밖이 더 깔끔)
+# 시장 상태 + 포트폴리오 섹터 미리 계산 (루프 밖 1회)
 _mkt_regime = get_market_regime()
 _mkt_down   = _mkt_regime.get("score", 2) <= 1
+
+# 보유종목 섹터 미리 캐싱 (루프 안에서 반복 호출 방지)
+_portfolio_sectors = {}
+for _p in st.session_state.portfolio:
+    _code = _p.get("name","")
+    if _code.isdigit() and len(_code)==6:
+        try:
+            _portfolio_sectors[_code] = get_stock_full_regime(_code)
+        except: pass
 
 to_remove = None
 for i, p in enumerate(st.session_state.portfolio):
@@ -1900,10 +1908,10 @@ for i, p in enumerate(st.session_state.portfolio):
     mkt = _mkt_regime
     mkt_down = _mkt_down
 
-    # 섹터 상태 (국내만)
+    # 섹터 상태 (국내만, 미리 계산된 값 재사용)
     sec_down = False
     if is_kr:
-        full_h = get_stock_full_regime(name)
+        full_h = _portfolio_sectors.get(name) or get_stock_full_regime(name)
         sec_down = full_h["sector"].get("score", 1) < 0  # 섹터 급락
         combined_down = mkt_down and sec_down            # 시장+섹터 동반 하락
     else:
@@ -1951,8 +1959,8 @@ for i, p in enumerate(st.session_state.portfolio):
     # 섹터 + 수급 (국내)
     sup_html2=""
     if is_kr and KIS_APP_KEY:
-        # 섹터 상태
-        full_r = get_stock_full_regime(name)
+        # 미리 계산된 섹터 사용
+        full_r = _portfolio_sectors.get(name) or get_stock_full_regime(name)
         sec_nm_h  = full_r.get("sector_name","")
         sec_st_h  = full_r.get("sec_status","")
         mkt_sum_h = full_r.get("summary","")
@@ -2142,16 +2150,13 @@ def render(title, data, currency):
   </details>
 </div>""", unsafe_allow_html=True)
 
-# 섹터 대장주 스캔
-with st.spinner("섹터 대장주 스캔 중..."):
-    sector_top, sector_skip = scan_kr_sector()
-
 tab_kr, tab_sector, tab_us = st.tabs(["🔥 국내 TOP5", "🏆 섹터 대장 TOP5", "🇺🇸 해외 TOP5"])
 with tab_kr:
     render("국내 폭등 예측 TOP 5", kr_top, "KRW")
 with tab_sector:
     st.caption("각 업종 시총 1위 종목 중 신호 강도 순 TOP5")
-    # 섹터 배지 추가
+    with st.spinner("섹터 대장주 스캔 중..."):
+        sector_top, sector_skip = scan_kr_sector()
     medals2 = ["🥇","🥈","🥉","4️⃣","5️⃣"]
     for i, item in enumerate(sector_top):
         gc = {"A+":"#f59e0b","A":"#10b981","B+":"#3b82f6","B":"#94a3b8","C":"#64748b"}.get(item.get("등급","C"),"#64748b")
