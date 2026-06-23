@@ -1906,40 +1906,76 @@ for i, p in enumerate(st.session_state.portfolio):
     trend_broken = not s3_on
 
     mkt = _mkt_regime
-    mkt_down = _mkt_down
+    mkt_score  = mkt.get("score", 2)
+    mkt_down   = mkt_score <= 1
+    mkt_bull   = mkt_score >= 3
 
-    # 섹터 상태 (국내만, 미리 계산된 값 재사용)
-    sec_down = False
+    # 섹터 상태 (국내만)
+    sec_score = 1; sec_down = False; sec_bull = False
+    combined_down = False; combined_bull = False
+    sec_nm_d = ""; sec_st_d = ""
     if is_kr:
-        full_h = _portfolio_sectors.get(name) or get_stock_full_regime(name)
-        sec_down = full_h["sector"].get("score", 1) < 0  # 섹터 급락
-        combined_down = mkt_down and sec_down            # 시장+섹터 동반 하락
-    else:
-        combined_down = False
+        full_h    = _portfolio_sectors.get(name) or get_stock_full_regime(name)
+        sec_score = full_h["sector"].get("score", 1)
+        sec_down  = sec_score < 0
+        sec_bull  = sec_score >= 2
+        combined_down = mkt_down and sec_down
+        combined_bull = mkt_bull and sec_bull
+        sec_nm_d  = full_h.get("sector_name","")
+        sec_st_d  = full_h.get("sec_status","")
 
-    if curr<=fixed_stop:
-        act="🔴 즉시 손절"; ac="#ef4444"; ar=f"평단 -7% 이탈 ({profit:.1f}%)"
-    elif combined_down and profit<-3:
-        act="🔴 손절 고려"; ac="#ef4444"; ar=f"시장+섹터 동반하락+손실 {profit:.1f}%"
-    elif mkt_down and profit<-5:
-        act="🔴 손절 고려"; ac="#ef4444"; ar=f"하락장+손실 {profit:.1f}%"
-    elif trend_broken and profit<-5:
-        act="🔴 손절 고려"; ac="#ef4444"; ar=f"정배열붕괴+손실 {profit:.1f}%"
-    elif rsi_v>70 and profit>5:
-        act="🟡 익절 고려"; ac="#f59e0b"; ar=f"RSI과열({rsi_v:.0f})+수익{profit:.1f}%"
-    elif curr>=fixed_tgt:
-        act="🟡 익절 고려"; ac="#f59e0b"; ar=f"목표가 도달"
-    elif hold_days>=10 and trend_broken:
-        act="🟡 재검토"; ac="#f59e0b"; ar=f"보유{hold_days}일+추세약화"
+    # ── 포지션 판단 (시장+섹터+차트 종합) ──
+    if curr <= fixed_stop:
+        act="🔴 즉시 손절"; ac="#ef4444"
+        ar=f"평단 -7% 이탈 ({profit:.1f}%)"
+    elif combined_down and profit < -3:
+        act="🔴 즉시 손절 고려"; ac="#ef4444"
+        ar=f"시장+섹터 동반하락({sec_nm_d} {sec_st_d})+손실{profit:.1f}%"
+    elif mkt_down and sec_down and profit < 0:
+        act="🔴 손절 고려"; ac="#ef4444"
+        ar=f"하락장+섹터약세({sec_nm_d})+손실{profit:.1f}%"
+    elif mkt_down and profit < -5:
+        act="🔴 손절 고려"; ac="#ef4444"
+        ar=f"하락장+손실{profit:.1f}%"
+    elif trend_broken and profit < -5:
+        act="🔴 손절 고려"; ac="#ef4444"
+        ar=f"정배열붕괴+손실{profit:.1f}%"
+    elif rsi_v > 70 and profit > 5:
+        act="🟡 익절 고려"; ac="#f59e0b"
+        ar=f"RSI과열({rsi_v:.0f})+수익{profit:.1f}%"
+    elif curr >= fixed_tgt:
+        act="🟡 익절 고려"; ac="#f59e0b"
+        ar=f"목표가 도달({profit:.1f}%)"
+    elif hold_days >= 10 and trend_broken and not sec_bull:
+        act="🟡 재검토"; ac="#f59e0b"
+        ar=f"보유{hold_days}일+추세약화+섹터부진"
+    elif combined_bull and s3_on and 35<=rsi_v<=60 and profit>=-5:
+        act="🟢 적극 추가매수"; ac="#10b981"
+        ar=f"시장+섹터강세({sec_nm_d})+정배열+RSI({rsi_v:.0f})"
+    elif sec_bull and s3_on and 40<=rsi_v<=60 and -3<=profit<=0:
+        act="🟢 추가매수 검토"; ac="#10b981"
+        ar=f"섹터강세({sec_nm_d})+정배열+눌림RSI({rsi_v:.0f})"
     elif s3_on and 40<=rsi_v<=60 and -3<=profit<=0 and not mkt_down:
-        act="🟢 추가매수 검토"; ac="#10b981"; ar=f"정배열+RSI여유({rsi_v:.0f})+눌림"
-    elif s3_on and profit>0:
-        act="⚪ 홀딩"; ac="#94a3b8"; ar=f"정배열유지+수익{profit:.1f}%"
-    elif hold_days>0 and hold_days<=3:
-        act="⚪ 관망"; ac="#94a3b8"; ar=f"매수{hold_days}일차"
+        act="🟢 추가매수 검토"; ac="#10b981"
+        ar=f"정배열+RSI여유({rsi_v:.0f})+눌림"
+    elif combined_bull and s3_on and profit > 0:
+        act="⚪ 강하게 홀딩"; ac="#10b981"
+        ar=f"시장+섹터강세+수익{profit:.1f}% — 익절 서두르지 말것"
+    elif s3_on and sec_bull and profit >= 0:
+        act="⚪ 홀딩"; ac="#94a3b8"
+        ar=f"섹터강세({sec_nm_d})+정배열유지"
+    elif s3_on and profit > 0:
+        act="⚪ 홀딩"; ac="#94a3b8"
+        ar=f"정배열유지+수익{profit:.1f}%"
+    elif hold_days > 0 and hold_days <= 3:
+        act="⚪ 관망"; ac="#94a3b8"
+        ar=f"매수{hold_days}일차 — 판단 유보"
+    elif mkt_down or sec_down:
+        act="⬜ 관망(시장주의)"; ac="#64748b"
+        ar=f"{'하락장' if mkt_down else ''} {'섹터약세' if sec_down else ''} — 신중"
     else:
-        act="⬜ 관망"; ac="#64748b"; ar="신호 대기"
-
+        act="⬜ 관망"; ac="#64748b"
+        ar="신호 대기"
     hold_str = f"{hold_days}일째" if hold_days>0 else ("날짜미입력" if not p.get("date") else "오늘")
     pc = "#10b981" if profit>=0 else "#ef4444"
 
