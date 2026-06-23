@@ -563,25 +563,55 @@ SECTOR_INDEX_MAP = {
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_stock_sector_name(code: str) -> str:
-    """종목 섹터명 조회 — KIS API"""
+    """종목 섹터명 조회 — pykrx → KIS → 하드코딩"""
     if code in _STOCK_SECTOR_CACHE:
         return _STOCK_SECTOR_CACHE[code]
-    if not KIS_APP_KEY: return ""
+
+    # 1. pykrx (가장 정확)
     try:
-        h = kis_headers("CTPF1002R")
-        if not h: return ""
-        r = requests.get(
-            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/search-stock-info",
-            params={"PRDT_TYPE_CD":"300","PDNO":code},
-            headers=h, timeout=3).json()
-        out = r.get("output",{})
-        # 업종명 필드
-        sec = (out.get("bstp_kor_isnm","") or
-               out.get("idx_bztp_scls_cd_name","") or "")
-        if sec:
-            _STOCK_SECTOR_CACHE[code] = sec
-        return sec
-    except: return ""
+        from pykrx import stock as pk
+        today = datetime.now().strftime("%Y%m%d")
+        info = pk.get_market_sector_classifications(today, code)
+        if not info.empty:
+            sec = str(info.iloc[0].get("업종명",""))
+            if sec:
+                _STOCK_SECTOR_CACHE[code] = sec
+                return sec
+    except: pass
+
+    # 2. KIS inquire-price 응답에서 업종 추출
+    if KIS_APP_KEY:
+        try:
+            h = kis_headers("FHKST01010100")
+            if h:
+                r = requests.get(
+                    f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
+                    params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code},
+                    headers=h, timeout=3).json()
+                out = r.get("output",{})
+                sec = (out.get("bstp_kor_isnm","") or
+                       out.get("idx_bztp_lcls_cd_name","") or "")
+                if sec:
+                    _STOCK_SECTOR_CACHE[code] = sec
+                    return sec
+        except: pass
+
+    # 3. 하드코딩 (주요 종목)
+    SECTOR_HARDCODE = {
+        "005930":"전기전자","000660":"전기전자","353200":"전기전자",
+        "005380":"운수장비","000270":"운수장비","012330":"운수장비",
+        "207940":"의약품","068270":"의약품","196170":"의약품",
+        "373220":"전기전자","006400":"전기전자","247540":"화학",
+        "086520":"화학","010130":"철강금속","329180":"조선",
+        "042660":"조선","105560":"금융","055550":"금융",
+        "086790":"금융","138040":"금융","316140":"금융",
+        "035420":"통신","035720":"통신","017670":"통신",
+        "051910":"화학","096770":"화학","011170":"화학",
+    }
+    sec = SECTOR_HARDCODE.get(code,"")
+    if sec:
+        _STOCK_SECTOR_CACHE[code] = sec
+    return sec
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -677,6 +707,17 @@ def get_dynamic_pass_score(market: dict) -> int:
     elif regime_score == 2: return base                # 중립: 12점 (기본)
     elif regime_score == 1: return base + 8            # 조정장: 20점 (강화)
     else:                   return base + 15           # 하락장: 27점 (매우 강화)
+
+
+def is_kr_open() -> bool:
+    """한국 장 중 여부 (09:00~15:30)"""
+    try:
+        now = datetime.now()
+        if now.weekday() >= 5: return False
+        open_t  = now.replace(hour=9,  minute=0,  second=0)
+        close_t = now.replace(hour=15, minute=30, second=0)
+        return open_t <= now <= close_t
+    except: return False
 
 
 # 미국 주요 휴장일
@@ -1842,7 +1883,9 @@ for i, p in enumerate(st.session_state.portfolio):
             if sup2.get("ok") and sup2.get("score",0)>=3: bs+=2
         if mkt_score_w == 3:   bs+=2
         elif mkt_score_w <= 0: bs-=3
-        if bs>=6: bv="🟢 매수 적극 고려"; bc="#10b981"
+        if is_kr_open():
+            bv="⚠️ 장 중 — 내일 시초가 확인 후 판단"; bc="#f59e0b"
+        elif bs>=6: bv="🟢 매수 적극 고려"; bc="#10b981"
         elif bs>=4: bv="🟡 조건부 매수 (시장 확인)"; bc="#f59e0b"
         elif mkt_score_w <= 0: bv="🔴 하락장 — 매수 자제"; bc="#ef4444"
         else: bv="🔴 매수 보류"; bc="#ef4444"
@@ -2001,8 +2044,9 @@ for i, p in enumerate(st.session_state.portfolio):
         sec_st_h  = full_r.get("sec_status","")
         mkt_sum_h = full_r.get("summary","")
         sec_color_h = full_r.get("color","#64748b")
-        if sec_nm_h:
-            sup_html2 += f'<div style="background:#0f172a;padding:6px 10px;border-radius:6px;margin:4px 0;font-size:11px;border-left:3px solid {sec_color_h};">🏭 <span style="color:#94a3b8;">{sec_nm_h}</span> <span style="color:{sec_color_h};font-weight:bold;">{sec_st_h}</span> <span style="color:#64748b;font-size:10px;">{mkt_sum_h}</span></div>'
+        # 섹터명 없어도 시장+섹터 종합 상태는 표시
+        display_sec = sec_nm_h or "업종확인중"
+        sup_html2 += f'<div style="background:#0f172a;padding:6px 10px;border-radius:6px;margin:4px 0;font-size:11px;border-left:3px solid {sec_color_h};">🏭 <span style="color:#94a3b8;">{display_sec}</span> <span style="color:{sec_color_h};font-weight:bold;"> {sec_st_h}</span> <span style="color:#64748b;font-size:10px;">{mkt_sum_h}</span></div>'
         # 수급
         sup=supply_signal(name)
         if sup.get("ok"):
@@ -2109,6 +2153,18 @@ st.markdown(f"""
     (pass기준 {get_dynamic_pass_score(market_regime)}점 적용)
   </span>
 </div>""", unsafe_allow_html=True)
+
+# 장 중 경고
+if is_kr_open():
+    st.warning("""
+⚠️ **지금 장 중이에요 (09:00~15:30)**
+
+장 중 신호는 미완성봉 기준이라 **오탐이 많아요.**
+
+✅ 올바른 사용법: **장 마감 후 (15:30 이후)** 재스캔
+- 관심종목 등록 → 다음날 시초가 보고 매수 결정
+- 장 중 추천 종목은 참고만 하고 즉시 매수 자제
+""")
 
 with st.spinner("스캔 중..."):
     kr_top, kr_skip = scan_kr()
