@@ -530,7 +530,9 @@ KIS_SECTOR_CODE = {
     "미디어": "0030", "엔터": "0030",
     "전기가스":  "0022",
     "건설":      "0023",
-    "운수":      "0024", "물류": "0024", "해운": "0024", "조선": "0024",
+    "운수":      "0024", "운수창고": "0024", "운송창고": "0024",
+    "운송 창고": "0024", "창고": "0024",
+    "물류": "0024", "해운": "0024", "조선": "0024",
     "통신":      "0025",
     "금융":      "0026", "은행": "0027",
     "증권":      "0028",
@@ -894,6 +896,14 @@ def ohlcv_kr(code):
             return df
     except: pass
     return None
+
+@st.cache_data(ttl=300, show_spinner=False)  # 보유/관심종목용 — 5분 캐시
+def portfolio_ohlcv_kr(code):
+    return ohlcv_kr(code)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def portfolio_ohlcv_us(ticker):
+    return ohlcv_us(ticker)
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def ohlcv_us(ticker):
@@ -1740,7 +1750,7 @@ def portfolio_data(name: str) -> dict:
 
     if name.isdigit() and len(name)==6:
         p, src = kr_price(name)
-        df = ohlcv_kr(name)
+        df = portfolio_ohlcv_kr(name)
         # 종목명: kis_name 직접 호출 (ttl=86400 캐시, 빠름)
         stock_name = ""
         if KIS_APP_KEY:
@@ -1776,7 +1786,7 @@ def portfolio_data(name: str) -> dict:
     # 해외
     p, src = us_price(name)
     pp, pp_label = us_prepost(name)
-    df = ohlcv_us(name)
+    df = portfolio_ohlcv_us(name)
     def ur(v): return round(v,4) if v<1 else round(v,3) if v<10 else round(v,2)
 
     if df is not None:
@@ -1845,8 +1855,9 @@ if st.sidebar.button("🔄 추천 재스캔", use_container_width=True, type="pr
     st.rerun()
 
 if st.sidebar.button("👀 관심종목 재평가", use_container_width=True):
-    # ohlcv 캐시만 날림 (portfolio_data는 원래 캐시 없음)
-    ohlcv_kr.clear(); ohlcv_us.clear()
+    # portfolio 전용 캐시 초기화 (scan_kr/us 캐시 유지)
+    portfolio_ohlcv_kr.clear()
+    portfolio_ohlcv_us.clear()
     kis_investor_trend.clear()
     st.session_state["watch_refresh"] = True
     st.rerun()
@@ -1941,7 +1952,7 @@ for i, p in enumerate(st.session_state.portfolio):
         # 갭 계산
         gap_pct = 0.0
         try:
-            df_tmp = ohlcv_kr(name) if is_kr else ohlcv_us(name)
+            df_tmp = portfolio_ohlcv_kr(name) if is_kr else portfolio_ohlcv_us(name)
             if df_tmp is not None and len(df_tmp)>=2:
                 prev = float(df_tmp["close"].iloc[-2])
                 if prev>0: gap_pct = (curr-prev)/prev*100
