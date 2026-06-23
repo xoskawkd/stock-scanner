@@ -537,25 +537,132 @@ def get_market_regime() -> dict:
                 "down_days": 0, "dd_from_hi": 0}
 
 
+# 종목코드 → 섹터명 매핑 (KIS API 기반, 캐시)
+_STOCK_SECTOR_CACHE = {}  # {code: sector_name}
+
+# 섹터명 → KRX 지수 코드 매핑
+SECTOR_INDEX_MAP = {
+    "반도체":    "KQ11001",
+    "전기전자":  "KS11001",
+    "화학":      "KS11003",
+    "철강금속":  "KS11004",
+    "기계":      "KS11005",
+    "조선":      "KS11006",
+    "건설":      "KS11007",
+    "금융":      "KS11009",
+    "증권":      "KS11010",
+    "보험":      "KS11011",
+    "운수장비":  "KS11008",
+    "의약품":    "KS11012",
+    "음식료":    "KS11002",
+    "통신":      "KS11013",
+    "유통":      "KS11014",
+    "IT":        "KQ11001",
+    "바이오":    "KS11012",
+}
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_stock_sector_name(code: str) -> str:
+    """종목 섹터명 조회 — KIS API"""
+    if code in _STOCK_SECTOR_CACHE:
+        return _STOCK_SECTOR_CACHE[code]
+    if not KIS_APP_KEY: return ""
+    try:
+        h = kis_headers("CTPF1002R")
+        if not h: return ""
+        r = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/search-stock-info",
+            params={"PRDT_TYPE_CD":"300","PDNO":code},
+            headers=h, timeout=3).json()
+        out = r.get("output",{})
+        # 업종명 필드
+        sec = (out.get("bstp_kor_isnm","") or
+               out.get("idx_bztp_scls_cd_name","") or "")
+        if sec:
+            _STOCK_SECTOR_CACHE[code] = sec
+        return sec
+    except: return ""
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_sector_regime(sector_code: str) -> dict:
-    """섹터 지수 상태 진단"""
+def get_sector_regime(sector_name: str) -> dict:
+    """섹터명으로 섹터 지수 상태 진단"""
+    # 섹터명에서 지수 코드 매핑
+    sector_code = ""
+    for key, code in SECTOR_INDEX_MAP.items():
+        if key in sector_name:
+            sector_code = code
+            break
+    if not sector_code:
+        return {"ok": False, "status": "섹터불명", "score": 1, "ret5": 0}
     try:
         import FinanceDataReader as fdr
         df = fdr.DataReader(sector_code,
                            start=(datetime.now()-timedelta(days=60)).strftime("%Y-%m-%d"))
         if df is None or len(df) < 10:
-            return {"ok": False}
+            return {"ok": False, "status": "데이터없음", "score": 1, "ret5": 0}
         df.columns = [c.lower() for c in df.columns]
         cl = df["close"].astype(float)
-        ret5 = (float(cl.iloc[-1]) - float(cl.iloc[-6])) / float(cl.iloc[-6]) * 100 if len(cl)>=6 else 0
-        if ret5 >= 3:   status="🟢 강세"; score=2
-        elif ret5 >= 0: status="🟡 보합"; score=1
-        elif ret5 >= -3: status="🟠 약세"; score=0
-        else:           status="🔴 급락"; score=-1
-        return {"ok": True, "status": status, "score": score, "ret5": round(ret5,2)}
+        ret5 = (float(cl.iloc[-1])-float(cl.iloc[-6]))/float(cl.iloc[-6])*100 if len(cl)>=6 else 0
+        ma5  = float(cl.rolling(5).mean().iloc[-1])
+        ma20 = float(cl.rolling(20).mean().iloc[-1]) if len(cl)>=20 else ma5
+        if ret5 >= 3 and ma5 > ma20:
+            status="🟢 강세"; score=2
+        elif ret5 >= 0:
+            status="🟡 보합"; score=1
+        elif ret5 >= -3:
+            status="🟠 약세"; score=0
+        else:
+            status="🔴 급락"; score=-1
+        return {"ok":True,"status":status,"score":score,
+                "ret5":round(ret5,2),"sector_name":sector_name,
+                "sector_code":sector_code}
     except:
-        return {"ok": False}
+        return {"ok":False,"status":"조회실패","score":1,"ret5":0}
+
+
+def get_stock_full_regime(code: str) -> dict:
+    """
+    종목의 시장 + 섹터 종합 상태
+    반환: {market, sector, combined_score, summary}
+    """
+    mkt    = get_market_regime()
+    sec_nm = get_stock_sector_name(code)
+    sec    = get_sector_regime(sec_nm) if sec_nm else {"ok":False,"score":1,"status":"섹터불명","ret5":0}
+
+    mkt_score = mkt.get("score", 2)
+    sec_score = sec.get("score", 1)
+    combined  = mkt_score + sec_score  # 0~5
+
+    # 종합 판단
+    if combined >= 4:
+        summary = "🟢 시장+섹터 강세"
+        color   = "#10b981"
+        buy_adj = 2   # 매수 보너스
+    elif combined >= 3:
+        summary = "🟡 시장 or 섹터 중립"
+        color   = "#f59e0b"
+        buy_adj = 0
+    elif combined >= 2:
+        summary = "🟠 주의"
+        color   = "#f97316"
+        buy_adj = -1
+    else:
+        summary = "🔴 시장+섹터 약세"
+        color   = "#ef4444"
+        buy_adj = -3
+
+    return {
+        "market":         mkt,
+        "sector":         sec,
+        "sector_name":    sec_nm,
+        "combined_score": combined,
+        "summary":        summary,
+        "color":          color,
+        "buy_adj":        buy_adj,
+        "mkt_regime":     mkt.get("regime",""),
+        "sec_status":     sec.get("status",""),
+    }
 
 
 def get_dynamic_pass_score(market: dict) -> int:
@@ -1367,6 +1474,8 @@ def scan_kr():
                 "매수구간":f"₩{bmin:,}~₩{bmax:,}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
                 "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"],r.get("s6",False),r.get("s7",False)],
+                "섹터명":get_stock_sector_name(code),
+                "섹터상태":"","시장섹터":"",
                 "수급점수":0,"섹터점수":0,"공시점수":0,"공시목록":[],"종합점수":r["score"],"섹터강세":False}
 
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -1393,16 +1502,24 @@ def scan_kr():
         def _add_supply(r):
             try:
                 sup  = supply_score(r["코드"])
-                sec  = sector_momentum_score(r["코드"])
+                # 섹터 진단 (종목별 섹터 상태)
+                full = get_stock_full_regime(r["코드"])
+                sec_score_val = full["sector"].get("score", 1)
+                sec_status    = full.get("sec_status","")
                 dart_s, dart_list = dart_score(r["코드"]) if DART_API_KEY else (0, [])
                 r["수급점수"] = sup
-                r["섹터점수"] = sec
+                r["섹터점수"] = sec_score_val * 5  # 0~10점
+                r["섹터명"]   = full.get("sector_name","")
+                r["섹터상태"] = sec_status
+                r["시장섹터"] = full.get("summary","")
                 r["공시점수"] = dart_s
-                r["공시목록"] = dart_list[:2]  # 최대 2개만
-                r["종합점수"] = r["점수"] + sup + sec + dart_s
-                r["섹터강세"] = sec >= 6
+                r["공시목록"] = dart_list[:2]
+                r["종합점수"] = r["점수"] + sup + (sec_score_val*5) + dart_s + full["buy_adj"]
+                r["섹터강세"] = sec_score_val >= 2
             except:
                 r["수급점수"] = 0; r["섹터점수"] = 0
+                r["섹터명"]   = r.get("섹터명","")
+                r["섹터상태"] = ""; r["시장섹터"] = ""
                 r["공시점수"] = 0; r["공시목록"] = []
                 r["종합점수"] = r["점수"]
                 r["섹터강세"] = False
@@ -1446,6 +1563,8 @@ def scan_us():
                 "매수구간":f"{uf(p*0.97)}~{uf(p*1.02)}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
                 "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"],r.get("s6",False),r.get("s7",False)],
+                "섹터명":get_stock_sector_name(code),
+                "섹터상태":"","시장섹터":"",
                 "수급점수":0,"섹터점수":0,"공시점수":0,"공시목록":[],"종합점수":r["score"],"섹터강세":False}
 
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -1778,19 +1897,40 @@ for i, p in enumerate(st.session_state.portfolio):
     rsi_v = d["rsi"]
     trend_broken = not s3_on
 
-    mkt = _mkt_regime  # 루프 밖에서 1회 조회한 값 재사용
+    mkt = _mkt_regime
     mkt_down = _mkt_down
 
-    if curr<=fixed_stop: act="🔴 즉시 손절"; ac="#ef4444"; ar=f"평단 -7% 이탈 ({profit:.1f}%)"
-    elif mkt_down and profit<-5: act="🔴 손절 고려"; ac="#ef4444"; ar=f"하락장+손실 {profit:.1f}% — 시장 위험"
-    elif trend_broken and profit<-5: act="🔴 손절 고려"; ac="#ef4444"; ar=f"정배열붕괴+손실 {profit:.1f}%"
-    elif rsi_v>70 and profit>5: act="🟡 익절 고려"; ac="#f59e0b"; ar=f"RSI과열({rsi_v:.0f})+수익{profit:.1f}%"
-    elif curr>=fixed_tgt: act="🟡 익절 고려"; ac="#f59e0b"; ar=f"목표가 도달"
-    elif hold_days>=10 and trend_broken: act="🟡 재검토"; ac="#f59e0b"; ar=f"보유{hold_days}일+추세약화"
-    elif s3_on and 40<=rsi_v<=60 and -3<=profit<=0: act="🟢 추가매수 검토"; ac="#10b981"; ar=f"정배열+RSI여유({rsi_v:.0f})+눌림"
-    elif s3_on and profit>0: act="⚪ 홀딩"; ac="#94a3b8"; ar=f"정배열유지+수익{profit:.1f}%"
-    elif hold_days>0 and hold_days<=3: act="⚪ 관망"; ac="#94a3b8"; ar=f"매수{hold_days}일차"
-    else: act="⬜ 관망"; ac="#64748b"; ar="신호 대기"
+    # 섹터 상태 (국내만)
+    sec_down = False
+    if is_kr:
+        full_h = get_stock_full_regime(name)
+        sec_down = full_h["sector"].get("score", 1) < 0  # 섹터 급락
+        combined_down = mkt_down and sec_down            # 시장+섹터 동반 하락
+    else:
+        combined_down = False
+
+    if curr<=fixed_stop:
+        act="🔴 즉시 손절"; ac="#ef4444"; ar=f"평단 -7% 이탈 ({profit:.1f}%)"
+    elif combined_down and profit<-3:
+        act="🔴 손절 고려"; ac="#ef4444"; ar=f"시장+섹터 동반하락+손실 {profit:.1f}%"
+    elif mkt_down and profit<-5:
+        act="🔴 손절 고려"; ac="#ef4444"; ar=f"하락장+손실 {profit:.1f}%"
+    elif trend_broken and profit<-5:
+        act="🔴 손절 고려"; ac="#ef4444"; ar=f"정배열붕괴+손실 {profit:.1f}%"
+    elif rsi_v>70 and profit>5:
+        act="🟡 익절 고려"; ac="#f59e0b"; ar=f"RSI과열({rsi_v:.0f})+수익{profit:.1f}%"
+    elif curr>=fixed_tgt:
+        act="🟡 익절 고려"; ac="#f59e0b"; ar=f"목표가 도달"
+    elif hold_days>=10 and trend_broken:
+        act="🟡 재검토"; ac="#f59e0b"; ar=f"보유{hold_days}일+추세약화"
+    elif s3_on and 40<=rsi_v<=60 and -3<=profit<=0 and not mkt_down:
+        act="🟢 추가매수 검토"; ac="#10b981"; ar=f"정배열+RSI여유({rsi_v:.0f})+눌림"
+    elif s3_on and profit>0:
+        act="⚪ 홀딩"; ac="#94a3b8"; ar=f"정배열유지+수익{profit:.1f}%"
+    elif hold_days>0 and hold_days<=3:
+        act="⚪ 관망"; ac="#94a3b8"; ar=f"매수{hold_days}일차"
+    else:
+        act="⬜ 관망"; ac="#64748b"; ar="신호 대기"
 
     hold_str = f"{hold_days}일째" if hold_days>0 else ("날짜미입력" if not p.get("date") else "오늘")
     pc = "#10b981" if profit>=0 else "#ef4444"
@@ -1808,13 +1948,22 @@ for i, p in enumerate(st.session_state.portfolio):
   <span style="color:{pp_color};font-size:12px;margin-left:6px;">({pp_profit:+.1f}%)</span>
 </div>'''
 
-    # 수급 (국내)
+    # 섹터 + 수급 (국내)
     sup_html2=""
     if is_kr and KIS_APP_KEY:
+        # 섹터 상태
+        full_r = get_stock_full_regime(name)
+        sec_nm_h  = full_r.get("sector_name","")
+        sec_st_h  = full_r.get("sec_status","")
+        mkt_sum_h = full_r.get("summary","")
+        sec_color_h = full_r.get("color","#64748b")
+        if sec_nm_h:
+            sup_html2 += f'<div style="background:#0f172a;padding:6px 10px;border-radius:6px;margin:4px 0;font-size:11px;border-left:3px solid {sec_color_h};">🏭 <span style="color:#94a3b8;">{sec_nm_h}</span> <span style="color:{sec_color_h};font-weight:bold;">{sec_st_h}</span> <span style="color:#64748b;font-size:10px;">{mkt_sum_h}</span></div>'
+        # 수급
         sup=supply_signal(name)
         if sup.get("ok"):
             sigs2=" / ".join(sup.get("signals",[])[:2])
-            sup_html2=f'<div style="background:#0f172a;padding:8px;border-radius:6px;margin:6px 0;font-size:11px;">수급: <span style="color:{sup["color"]};font-weight:bold;">{sup["verdict"]}</span> <span style="color:#64748b;">{sigs2}</span></div>'
+            sup_html2+=f'<div style="background:#0f172a;padding:8px;border-radius:6px;margin:6px 0;font-size:11px;">수급: <span style="color:{sup["color"]};font-weight:bold;">{sup["verdict"]}</span> <span style="color:#64748b;">{sigs2}</span></div>'
 
     st.markdown(f"""
 <div style="background:#1e293b;padding:14px;border-radius:10px;border-left:5px solid {gc};margin-bottom:10px;">
@@ -1960,11 +2109,18 @@ def render(title, data, currency):
 
             # 공시/섹터 뱃지
             extra_badges = ""
+            # 섹터 상태 표시
+            sec_nm_card  = item.get("섹터명","")
+            sec_st_card  = item.get("섹터상태","")
+            mkt_sec_card = item.get("시장섹터","")
+            if sec_nm_card:
+                sec_color = "#10b981" if "강세" in sec_st_card else "#f59e0b" if "보합" in sec_st_card else "#ef4444"
+                extra_badges += f"<span style='font-size:10px;color:{sec_color};'>🏭 {sec_nm_card} {sec_st_card}</span> "
             if item.get('공시목록'):
                 title_short = item['공시목록'][0]['title'][:18]
                 extra_badges += f"<span style='font-size:10px;color:#f59e0b;'>📢 {title_short}</span> "
-            if item.get('섹터강세'):
-                extra_badges += "<span style='font-size:10px;color:#a78bfa;'>🔥 섹터강세</span>"
+            if mkt_sec_card:
+                extra_badges += f"<span style='font-size:10px;color:#a78bfa;'>{mkt_sec_card}</span>"
 
             st.markdown(f"""
 <div style="background:#1e293b;padding:14px;border-radius:10px;border-left:4px solid {gc};margin-bottom:8px;">
