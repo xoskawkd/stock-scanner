@@ -506,8 +506,7 @@ def get_sector_index_kis(sector_code: str) -> dict:
 
 # KIS 업종 지수 코드
 KIS_SECTOR_CODE = {
-    "전기전자":  "1001",
-    "전기·전자": "1001",
+    "전기전자":  "1001", "전기·전자": "1001",
     "반도체":    "1001",
     "화학":      "1003",
     "철강금속":  "1004",
@@ -515,15 +514,25 @@ KIS_SECTOR_CODE = {
     "조선":      "1006",
     "건설":      "1007",
     "운수장비":  "1008",
-    "금융":      "1009",
+    "금융":      "1009", "은행": "1009",
     "증권":      "1010",
     "보험":      "1011",
-    "의약품":    "1012",
-    "음식료":    "1002",
+    "의약품":    "1012", "바이오": "1012", "헬스케어": "1012",
+    "음식료":    "1002", "식품": "1002",
     "통신":      "1013",
-    "유통":      "1014",
+    "유통":      "1014", "서비스": "1014",
+    "일반서비스":"1014",  # 에코마케팅 등
     "IT":        "1001",
-    "바이오":    "1012",
+    "소프트웨어":"1001",
+    "미디어":    "1014",
+    "엔터":      "1014",
+    "게임":      "1001",
+    "항공":      "1008",
+    "해운":      "1006",
+    "에너지":    "1003",
+    "섬유":      "1015",
+    "종이":      "1015",
+    "비금속":    "1015",
 }
 
 
@@ -1625,17 +1634,19 @@ def scan_kr():
                 sup  = supply_score(r["코드"])
                 # 섹터 진단 (종목별 섹터 상태)
                 full = get_stock_full_regime(r["코드"])
-                sec_score_val = full["sector"].get("score", 1)
+                sec_ok_val    = full["sector"].get("ok", False)
+                sec_score_val = full["sector"].get("score", 1) if sec_ok_val else 1
                 sec_status    = full.get("sec_status","")
                 dart_s, dart_list = dart_score(r["코드"]) if DART_API_KEY else (0, [])
                 r["수급점수"] = sup
-                r["섹터점수"] = sec_score_val * 5  # 0~10점
+                # 섹터 조회 실패 시 0점 (잘못된 가산점 방지)
+                r["섹터점수"] = (sec_score_val - 1) * 5 if sec_ok_val else 0  # -5~+5점
                 r["섹터명"]   = full.get("sector_name","")
                 r["섹터상태"] = sec_status
                 r["시장섹터"] = full.get("summary","")
                 r["공시점수"] = dart_s
                 r["공시목록"] = dart_list[:2]
-                r["종합점수"] = r["점수"] + sup + (sec_score_val*5) + dart_s + full["buy_adj"]
+                r["종합점수"] = r["점수"] + sup + r["섹터점수"] + dart_s + (full["buy_adj"] if sec_ok_val else 0)
                 r["섹터강세"] = sec_score_val >= 2
             except:
                 r["수급점수"] = 0; r["섹터점수"] = 0
