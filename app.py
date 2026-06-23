@@ -544,6 +544,8 @@ _STOCK_SECTOR_CACHE = {}  # {code: sector_name}
 SECTOR_INDEX_MAP = {
     "반도체":    "KQ11001",
     "전기전자":  "KS11001",
+    "전기·전자": "KS11001",  # 표기 변형
+    "전기 전자": "KS11001",  # 표기 변형
     "화학":      "KS11003",
     "철강금속":  "KS11004",
     "기계":      "KS11005",
@@ -624,7 +626,8 @@ def get_sector_regime(sector_name: str) -> dict:
             sector_code = code
             break
     if not sector_code:
-        return {"ok": False, "status": "섹터불명", "score": 1, "ret5": 0}
+        return {"ok": False, "status": "섹터확인불가", "score": 1, "ret5": 0}
+        # score=1 중립 유지 (강세/약세 판단 불가)
     try:
         import FinanceDataReader as fdr
         df = fdr.DataReader(sector_code,
@@ -658,29 +661,37 @@ def get_stock_full_regime(code: str) -> dict:
     """
     mkt    = get_market_regime()
     sec_nm = get_stock_sector_name(code)
-    sec    = get_sector_regime(sec_nm) if sec_nm else {"ok":False,"score":1,"status":"섹터불명","ret5":0}
+    sec = get_sector_regime(sec_nm) if sec_nm else {"ok":False,"score":1,"status":"섹터확인불가","ret5":0}
 
     mkt_score = mkt.get("score", 2)
-    sec_score = sec.get("score", 1)
+    # 섹터 조회 실패 시 중립(1)로 고정 — 강세/약세 판단 금지
+    sec_ok    = sec.get("ok", False)
+    sec_score = sec.get("score", 1) if sec_ok else 1
     combined  = mkt_score + sec_score  # 0~5
 
-    # 종합 판단
-    if combined >= 4:
+    # 종합 판단 — 섹터 확인 불가 시 시장만으로 판단
+    if not sec_ok:
+        if mkt_score >= 3:
+            summary = "🟡 시장 강세 (섹터확인불가)"
+            color   = "#f59e0b"; buy_adj = 1
+        elif mkt_score <= 1:
+            summary = "🟠 시장 약세 (섹터확인불가)"
+            color   = "#f97316"; buy_adj = -1
+        else:
+            summary = "⬜ 시장 중립 (섹터확인불가)"
+            color   = "#64748b"; buy_adj = 0
+    elif combined >= 4:
         summary = "🟢 시장+섹터 강세"
-        color   = "#10b981"
-        buy_adj = 2   # 매수 보너스
+        color   = "#10b981"; buy_adj = 2
     elif combined >= 3:
         summary = "🟡 시장 or 섹터 중립"
-        color   = "#f59e0b"
-        buy_adj = 0
+        color   = "#f59e0b"; buy_adj = 0
     elif combined >= 2:
         summary = "🟠 주의"
-        color   = "#f97316"
-        buy_adj = -1
+        color   = "#f97316"; buy_adj = -1
     else:
         summary = "🔴 시장+섹터 약세"
-        color   = "#ef4444"
-        buy_adj = -3
+        color   = "#ef4444"; buy_adj = -3
 
     return {
         "market":         mkt,
