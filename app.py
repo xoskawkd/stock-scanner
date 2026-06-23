@@ -486,7 +486,7 @@ def get_kospi_today() -> dict:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_sector_index_kis(sector_code: str) -> dict:
-    """KIS API로 업종 지수 조회"""
+    """KIS API로 업종 지수 당일 등락 조회"""
     if not KIS_APP_KEY or not KIS_APP_SECRET:
         return {"ok": False, "ret1": 0}
     try:
@@ -497,9 +497,14 @@ def get_sector_index_kis(sector_code: str) -> dict:
             params={"fid_cond_mrkt_div_code": "U", "fid_input_iscd": sector_code},
             headers=h, timeout=4).json()
         out = r.get("output", {})
-        ret1 = float(out.get("bstp_nmix_prdy_ctrt", 0) or 0)
-        cur  = float(out.get("bstp_nmix_prpr", 0) or 0)
-        return {"ok": True, "ret1": ret1, "cur": cur}
+        # 등락률 필드 여러 개 시도
+        ret1 = float(out.get("bstp_nmix_prdy_ctrt", 0) or
+                     out.get("prdy_ctrt", 0) or 0)
+        cur  = float(out.get("bstp_nmix_prpr", 0) or
+                     out.get("prpr", 0) or 0)
+        if cur > 0:
+            return {"ok": True, "ret1": ret1, "cur": cur}
+        return {"ok": False, "ret1": 0}
     except:
         return {"ok": False, "ret1": 0}
 
@@ -682,21 +687,22 @@ def get_sector_regime(sector_name: str) -> dict:
             kis_code = code
             break
 
-    # 1. KIS 업종 지수 (당일 등락률)
+    # 1. KIS 업종 지수 (당일 등락률) — 여러 코드 시도
     if kis_code and KIS_APP_KEY:
-        data = get_sector_index_kis(kis_code)
-        if data.get("ok"):
-            ret1 = data.get("ret1", 0)
-            if ret1 >= 2:
-                status="🟢 강세"; score=2
-            elif ret1 >= 0:
-                status="🟡 보합"; score=1
-            elif ret1 >= -2:
-                status="🟠 약세"; score=0
-            else:
-                status="🔴 급락"; score=-1
-            return {"ok":True,"status":status,"score":score,
-                    "ret1":round(ret1,2),"sector_name":sector_name}
+        # 코드 변형 시도 (0030 → 030 → 30 등)
+        codes_to_try = [kis_code, kis_code.lstrip("0") or kis_code,
+                        f"{int(kis_code):04d}" if kis_code.isdigit() else kis_code]
+        codes_to_try = list(dict.fromkeys(codes_to_try))  # 중복 제거
+        for try_code in codes_to_try:
+            data = get_sector_index_kis(try_code)
+            if data.get("ok"):
+                ret1 = data.get("ret1", 0)
+                if ret1 >= 2:   status="🟢 강세"; score=2
+                elif ret1 >= 0: status="🟡 보합"; score=1
+                elif ret1 >= -2: status="🟠 약세"; score=0
+                else:           status="🔴 급락"; score=-1
+                return {"ok":True,"status":status,"score":score,
+                        "ret1":round(ret1,2),"sector_name":sector_name}
 
     # 2. fdr fallback (5일 기준)
     fdr_code = ""
