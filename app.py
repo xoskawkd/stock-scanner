@@ -799,6 +799,87 @@ def get_dynamic_pass_score(market: dict) -> int:
     else:                   return base + 15           # 하락장: 27점 (매우 강화)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_tomorrow_outlook() -> dict:
+    """
+    내일 매수 환경 종합 판단
+    나스닥 등락 + 코스피200 선물 + 환율
+    """
+    result = {
+        "nasdaq_ret": 0.0, "nasdaq_ok": False,
+        "futures_ret": 0.0, "futures_ok": False,
+        "usd_krw": 0.0, "fx_ok": False,
+        "score": 0, "verdict": "알수없음", "color": "#64748b",
+    }
+
+    # 1. 나스닥 등락 (yfinance)
+    try:
+        import yfinance as yf
+        nq = yf.Ticker("^IXIC").history(period="2d")
+        if len(nq) >= 2:
+            ret = (float(nq["Close"].iloc[-1]) - float(nq["Close"].iloc[-2])) / float(nq["Close"].iloc[-2]) * 100
+            result["nasdaq_ret"] = round(ret, 2)
+            result["nasdaq_ok"] = ret > 0
+    except: pass
+
+    # 2. 코스피200 선물 (yfinance — KS200F)
+    try:
+        fut = yf.Ticker("ES=F").history(period="1d", interval="5m")  # S&P500 선물로 대체
+        if not fut.empty:
+            p_now  = float(fut["Close"].iloc[-1])
+            p_prev = float(fut["Close"].iloc[0])
+            ret_f  = (p_now - p_prev) / p_prev * 100
+            result["futures_ret"] = round(ret_f, 2)
+            result["futures_ok"]  = ret_f > 0
+    except: pass
+
+    # 3. 원달러 환율
+    try:
+        fx = yf.Ticker("KRW=X").history(period="2d")
+        if len(fx) >= 2:
+            usd_krw = float(fx["Close"].iloc[-1])
+            result["usd_krw"] = round(usd_krw, 1)
+            # 환율 하락(원화강세) = 외국인 매수 우호적
+            fx_ret = (usd_krw - float(fx["Close"].iloc[-2])) / float(fx["Close"].iloc[-2]) * 100
+            result["fx_ok"] = fx_ret < 0  # 환율 하락 = 긍정
+            result["fx_ret"] = round(fx_ret, 2)
+    except: pass
+
+    # 종합 점수
+    score = 0
+    nq = result["nasdaq_ret"]
+    fx = result.get("fx_ret", 0)
+
+    if nq >= 2:    score += 3
+    elif nq >= 1:  score += 2
+    elif nq >= 0:  score += 1
+    elif nq >= -1: score -= 1
+    else:          score -= 3
+
+    if result["futures_ok"]: score += 1
+    else:                    score -= 1
+
+    if result["fx_ok"]:  score += 1
+    else:                score -= 1
+
+    result["score"] = score
+
+    if score >= 4:
+        result["verdict"] = "✅ 내일 매수 적합"
+        result["color"]   = "#10b981"
+    elif score >= 2:
+        result["verdict"] = "🟡 내일 조건부 매수"
+        result["color"]   = "#f59e0b"
+    elif score >= 0:
+        result["verdict"] = "🟠 내일 신중하게"
+        result["color"]   = "#f97316"
+    else:
+        result["verdict"] = "🔴 내일 매수 보류"
+        result["color"]   = "#ef4444"
+
+    return result
+
+
 def is_kr_open() -> bool:
     """한국 장 중 여부 (09:00~15:30)"""
     try:
@@ -1568,7 +1649,7 @@ def scan_kr_sector() -> tuple:
     return top5, skips
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)  # 1시간 — 🔄 재스캔 버튼으로만 갱신
 def scan_kr():
     # 시장 상태 진단 → 동적 pass score
     market = get_market_regime()
@@ -1677,7 +1758,7 @@ def scan_kr():
 
     return top5, skips
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)  # 1시간
 def scan_us():
     rt = {}
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -2253,6 +2334,41 @@ st.markdown(f"""
   <span style="font-size:10px;color:#64748b;margin-left:8px;">
     (pass기준 {get_dynamic_pass_score(market_regime)}점 적용)
   </span>
+</div>""", unsafe_allow_html=True)
+
+# ── 내일 매수 환경 판단 ──
+tomorrow = get_tomorrow_outlook()
+t_color  = tomorrow["color"]
+t_verdict= tomorrow["verdict"]
+nq_ret   = tomorrow["nasdaq_ret"]
+fx_ret   = tomorrow.get("fx_ret", 0)
+usd_krw  = tomorrow["usd_krw"]
+fut_ret  = tomorrow["futures_ret"]
+
+nq_emoji  = "🟢" if nq_ret >= 1 else "🔴" if nq_ret <= -1 else "🟡"
+fx_emoji  = "🟢" if fx_ret < 0 else "🔴" if fx_ret > 0.5 else "🟡"
+fut_emoji = "🟢" if fut_ret >= 0.3 else "🔴" if fut_ret <= -0.3 else "🟡"
+
+st.markdown(f"""
+<div style="background:#0f172a;border:1px solid {t_color};
+            border-radius:8px;padding:10px 14px;margin-bottom:12px;">
+  <div style="font-weight:bold;color:{t_color};font-size:13px;margin-bottom:6px;">
+    📅 내일 매수 환경 — <span>{t_verdict}</span>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;">
+    <div style="background:#1e293b;padding:6px;border-radius:6px;text-align:center;">
+      <div style="color:#64748b;font-size:9px;">나스닥</div>
+      <div style="color:{'#10b981' if nq_ret>=0 else '#ef4444'};font-weight:bold;">{nq_emoji} {nq_ret:+.1f}%</div>
+    </div>
+    <div style="background:#1e293b;padding:6px;border-radius:6px;text-align:center;">
+      <div style="color:#64748b;font-size:9px;">S&P선물</div>
+      <div style="color:{'#10b981' if fut_ret>=0 else '#ef4444'};font-weight:bold;">{fut_emoji} {fut_ret:+.1f}%</div>
+    </div>
+    <div style="background:#1e293b;padding:6px;border-radius:6px;text-align:center;">
+      <div style="color:#64748b;font-size:9px;">원/달러</div>
+      <div style="color:{'#10b981' if fx_ret<0 else '#ef4444'};font-weight:bold;">{fx_emoji} {usd_krw:.0f}원</div>
+    </div>
+  </div>
 </div>""", unsafe_allow_html=True)
 
 # 장 중 경고
