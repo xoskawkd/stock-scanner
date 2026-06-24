@@ -2055,9 +2055,15 @@ for i, p in enumerate(st.session_state.portfolio):
                 if prev>0: gap_pct = (curr-prev)/prev*100
         except: pass
 
-        if abs(gap_pct)<3: gv="🟢 갭 양호"; gc2="#10b981"; gd=f"갭 {gap_pct:+.1f}% — 매수 검토"
-        elif abs(gap_pct)<5: gv="🟡 소폭 갭"; gc2="#f59e0b"; gd=f"갭 {gap_pct:+.1f}% — 눌림 기다려"
-        else: gv="🔴 갭 과다"; gc2="#ef4444"; gd=f"갭 {gap_pct:+.1f}% — 추격 위험"
+        if is_kr_open():
+            # 장 중 — 실제 갭
+            if abs(gap_pct)<3: gv="🟢 갭 양호"; gc2="#10b981"; gd=f"갭 {gap_pct:+.1f}% — 매수 검토"
+            elif abs(gap_pct)<5: gv="🟡 소폭 갭"; gc2="#f59e0b"; gd=f"갭 {gap_pct:+.1f}% — 눌림 기다려"
+            else: gv="🔴 갭 과다"; gc2="#ef4444"; gd=f"갭 {gap_pct:+.1f}% — 추격 위험"
+        else:
+            # 장 마감 후 — 갭 의미 없음
+            gv="📋 장 마감"; gc2="#64748b"; gd="내일 시초가로 갭 확인하세요"
+            gap_pct = 0.0
 
         signal_ok = s3_on or s4_on  # quant_predict core와 동일 조건
 
