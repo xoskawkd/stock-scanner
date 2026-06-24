@@ -1120,16 +1120,22 @@ def get_krx_caution_stocks() -> set:
     codes = set()
     if not KRX_API_KEY: return codes
     try:
-        # 투자주의 종목
-        for url_path in ["sto/invst_caution", "sto/invst_warning", "sto/invst_risk"]:
+        # KRX 투자주의/경고/위험 종목 (실제 API 경로)
+        today = datetime.now().strftime("%Y%m%d")
+        for url_path in [
+            "sto/invst_caution_isu",   # 투자주의
+            "sto/invst_wrnng_isu",     # 투자경고
+            "sto/invst_risk_isu",      # 투자위험
+        ]:
             try:
                 r = requests.get(
                     f"http://data-dbg.krx.co.kr/svc/apis/{url_path}",
-                    params={"basDd": datetime.now().strftime("%Y%m%d")},
+                    params={"basDd": today},
                     headers={"AUTH_KEY": KRX_API_KEY}, timeout=5).json()
                 for row in r.get("OutBlock_1", []):
-                    code = row.get("ISU_SRT_CD", "")
-                    if code: codes.add(code)
+                    code = (row.get("ISU_SRT_CD","") or
+                            row.get("SHRT_ISU_CD","") or "")
+                    if code and len(code)==6: codes.add(code)
             except: pass
     except: pass
     return codes
