@@ -1115,6 +1115,34 @@ def sector_momentum_score(code: str) -> int:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def get_krx_caution_stocks() -> set:
+    """KRX 투자주의/경고/위험 종목 코드 집합"""
+    codes = set()
+    if not KRX_API_KEY: return codes
+    try:
+        # 투자주의 종목
+        for url_path in ["sto/invst_caution", "sto/invst_warning", "sto/invst_risk"]:
+            try:
+                r = requests.get(
+                    f"http://data-dbg.krx.co.kr/svc/apis/{url_path}",
+                    params={"basDd": datetime.now().strftime("%Y%m%d")},
+                    headers={"AUTH_KEY": KRX_API_KEY}, timeout=5).json()
+                for row in r.get("OutBlock_1", []):
+                    code = row.get("ISU_SRT_CD", "")
+                    if code: codes.add(code)
+            except: pass
+    except: pass
+    return codes
+
+
+def get_caution_label(code: str, caution_set: set) -> str:
+    """투자주의 라벨 반환"""
+    if code in caution_set:
+        return "⚠️ 투자주의"
+    return ""
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_dart_disclosures(code: str, days: int = 3) -> list:
     """
     DART 최근 N일 주요 공시 조회
@@ -1656,6 +1684,7 @@ def scan_kr():
     dynamic_score = get_dynamic_pass_score(market)
 
     listing = krx_listing()
+    caution_set = get_krx_caution_stocks()  # 투자주의 종목
     kospi  = listing[listing["Market"].str.contains("KOSPI", na=False)]  if "Market" in listing.columns else listing
     kosdaq = listing[listing["Market"].str.contains("KOSDAQ",na=False)]  if "Market" in listing.columns else pd.DataFrame()
     kp = kospi[kospi["Marcap"]>3e11].nlargest(KR_SCAN_N,"Marcap")
@@ -1696,6 +1725,7 @@ def scan_kr():
                 "s_flags":[r["s1"],r["s2"],r["s3"],r["s4"],r["s5"],r.get("s6",False),r.get("s7",False)],
                 "섹터명":get_stock_sector_name(code),
                 "섹터상태":"","시장섹터":"",
+                "caution": code in caution_set,
                 "수급점수":0,"섹터점수":0,"공시점수":0,"공시목록":[],"종합점수":r["score"],"섹터강세":False}
 
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -2426,6 +2456,9 @@ def render(title, data, currency):
 
             # 공시/섹터 뱃지
             extra_badges = ""
+            # 투자주의 표시
+            if item.get("caution"):
+                extra_badges += "<span style='font-size:10px;color:#ef4444;background:#1e293b;padding:2px 6px;border-radius:3px;'>⚠️ 투자주의</span> "
             # 섹터 상태 표시
             sec_nm_card  = item.get("섹터명","")
             sec_st_card  = item.get("섹터상태","")
