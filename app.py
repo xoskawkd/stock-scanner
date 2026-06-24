@@ -629,23 +629,11 @@ SECTOR_INDEX_MAP = {
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_stock_sector_name(code: str) -> str:
-    """종목 섹터명 조회 — pykrx → KIS → 하드코딩"""
+    """종목 섹터명 조회 — KIS inquire-price → 하드코딩"""
     if code in _STOCK_SECTOR_CACHE:
         return _STOCK_SECTOR_CACHE[code]
 
-    # 1. pykrx (가장 정확)
-    try:
-        from pykrx import stock as pk
-        today = datetime.now().strftime("%Y%m%d")
-        info = pk.get_market_sector_classifications(today, code)
-        if not info.empty:
-            sec = str(info.iloc[0].get("업종명",""))
-            if sec:
-                _STOCK_SECTOR_CACHE[code] = sec
-                return sec
-    except: pass
-
-    # 2. KIS inquire-price 응답에서 업종 추출
+    # 1. KIS inquire-price 응답에서 업종 추출 (가장 안정적)
     if KIS_APP_KEY:
         try:
             h = kis_headers("FHKST01010100")
@@ -658,11 +646,11 @@ def get_stock_sector_name(code: str) -> str:
                 sec = (out.get("bstp_kor_isnm","") or
                        out.get("idx_bztp_lcls_cd_name","") or "")
                 if sec:
-                    _STOCK_SECTOR_CACHE[code] = sec
-                    return sec
+                    _STOCK_SECTOR_CACHE[code] = sec.strip()
+                    return sec.strip()
         except: pass
 
-    # 3. 하드코딩 (주요 종목)
+    # 2. 하드코딩 (주요 종목 fallback)
     SECTOR_HARDCODE = {
         "005930":"전기전자","000660":"전기전자","353200":"전기전자",
         "005380":"운수장비","000270":"운수장비","012330":"운수장비",
@@ -673,6 +661,7 @@ def get_stock_sector_name(code: str) -> str:
         "086790":"금융","138040":"금융","316140":"금융",
         "035420":"통신","035720":"통신","017670":"통신",
         "051910":"화학","096770":"화학","011170":"화학",
+        "230360":"일반서비스","064290":"기계","211050":"전기전자",
     }
     sec = SECTOR_HARDCODE.get(code,"")
     if sec:
@@ -1515,19 +1504,9 @@ def get_sector_leaders() -> list:
             if not df_sector.empty:
                 for _, row in df_sector.iterrows():
                     sec_name = row.get("업종명","기타")
-                    code = row.get("티커","") or row.name
-                    if sec_name not in sectors:
-                        sectors[sec_name] = []
-                    sectors[sec_name].append(str(code))
-        except:
-            tickers = pk.get_market_ticker_list(today, market="KOSPI")
-            for code in tickers[:100]:  # 상위 100개만
-                try:
-                    sec = pk.get_market_sector_classifications(today, code)
-                    if not sec.empty:
-                        sec_name = sec.iloc[0].get("업종명","기타")
-                        sectors.setdefault(sec_name,[]).append(code)
-                except: pass
+                    code = row.get("티커","") or str(row.name)
+                    sectors.setdefault(sec_name,[]).append(str(code))
+        except: pass  # pykrx 로그인 필요 시 무시
 
         # 섹터별 시총 1위
         leaders = []
