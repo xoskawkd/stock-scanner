@@ -2030,6 +2030,7 @@ with tab_hold:
 # 시장 상태 + 포트폴리오 섹터 미리 계산 (루프 밖 1회)
 _mkt_regime = get_market_regime()
 _mkt_down   = _mkt_regime.get("score", 2) <= 1
+_caution_set = get_krx_caution_stocks()  # 투자주의 종목
 
 # 보유종목 섹터 미리 캐싱 (루프 안에서 반복 호출 방지)
 _portfolio_sectors = {}
@@ -2106,7 +2107,7 @@ for i, p in enumerate(st.session_state.portfolio):
         st.markdown(f"""
 <div style="background:#1e293b;padding:14px;border-radius:10px;border-left:5px solid {gc};margin-bottom:10px;">
   <div style="display:flex;justify-content:space-between;align-items:center;">
-    <b>👀 {d['label']}</b>
+    <b>👀 {d['label']}</b>{f" <span style='color:#ef4444;font-size:10px;'>⚠️ 투자주의</span>" if name in _caution_set else ""}
     <span style="background:{gc};color:#000;font-size:11px;padding:2px 6px;border-radius:4px;">{d['grade']} {d['score']}점</span>
   </div>
   {f'<div style="font-size:11px;color:#64748b;margin-top:4px;">📝 {memo}</div>' if memo else ''}
@@ -2268,7 +2269,7 @@ for i, p in enumerate(st.session_state.portfolio):
     st.markdown(f"""
 <div style="background:#1e293b;padding:14px;border-radius:10px;border-left:5px solid {gc};margin-bottom:10px;">
   <div style="display:flex;justify-content:space-between;align-items:center;">
-    <b>📈 {d['label']}</b>
+    <b>📈 {d['label']}</b>{f" <span style='color:#ef4444;font-size:10px;'>⚠️ 투자주의</span>" if name in _caution_set else ""}
     <span style="background:{gc};color:#000;font-size:11px;padding:2px 6px;border-radius:4px;">{d['grade']} {d['score']}점</span>
   </div>
   {pp_html}
