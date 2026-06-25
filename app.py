@@ -870,12 +870,16 @@ def get_tomorrow_outlook() -> dict:
 
 
 def is_kr_open() -> bool:
-    """한국 장 중 여부 (09:00~15:30)"""
+    """한국 장 중 여부 (09:00~15:30) — KST 기준"""
     try:
-        now = datetime.now()
+        if ZoneInfo:
+            now = datetime.now(ZoneInfo("Asia/Seoul"))
+        else:
+            # UTC+9 수동 변환
+            now = datetime.utcnow() + timedelta(hours=9)
         if now.weekday() >= 5: return False
-        open_t  = now.replace(hour=9,  minute=0,  second=0)
-        close_t = now.replace(hour=15, minute=30, second=0)
+        open_t  = now.replace(hour=9,  minute=0,  second=0, microsecond=0)
+        close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
         return open_t <= now <= close_t
     except: return False
 
