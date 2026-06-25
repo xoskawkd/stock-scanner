@@ -2123,21 +2123,22 @@ with st.sidebar.expander("🔑 API 상태"):
             st.write(f"🇺🇸 ET: {now_et.strftime('%H:%M')} ({'장중' if is_us_open() else '장외'})")
         except: pass
 
-# 코스피 기반 공포탐욕 지수
+# 코스피 기반 시장 심리
 try:
-    _mkt = get_market_regime()
-    _ret1 = _mkt.get("ret1", 0)
-    _ret5 = _mkt.get("ret5", 0)
-    _dd   = _mkt.get("dd_from_hi", 0)
-    # 코스피 기반 점수 계산 (0~100)
-    _score = 50  # 기본 중립
-    _score += min(_ret1 * 5, 20)   # 당일 등락 반영
-    _score += min(_ret5 * 2, 10)   # 5일 흐름
-    _score += max(_dd * 0.5, -20)  # 고점 대비 낙폭
-    _score = max(0, min(100, _score))
-    fgv = int(_score)
-    fgt = "극탐욕" if fgv>=75 else "탐욕" if fgv>=60 else "중립" if fgv>=40 else "공포" if fgv>=25 else "극공포"
-    st.sidebar.metric("코스피 심리", f"{fgv} ({fgt})")
+    _mkt_sb = get_market_regime()
+    _r1 = _mkt_sb.get("ret1", 0)
+    _r5 = _mkt_sb.get("ret5", 0)
+    _dd = _mkt_sb.get("dd_from_hi", 0)
+    _dn = _mkt_sb.get("down_days", 0)
+    # 점수 계산
+    _sc = 50
+    _sc += min(_r1 * 4, 20)
+    _sc += min(_r5 * 1.5, 10)
+    _sc += max(_dd * 0.3, -15)
+    _sc -= _dn * 3
+    _sc = max(0, min(100, int(_sc)))
+    fgt = "극탐욕" if _sc>=75 else "탐욕" if _sc>=60 else "중립" if _sc>=40 else "공포" if _sc>=25 else "극공포"
+    st.sidebar.metric("코스피 심리", f"{_sc} ({fgt})")
 except: pass
 st.sidebar.metric("🇺🇸 미국장", "OPEN" if is_us_open() else "CLOSED")
 
@@ -2731,14 +2732,17 @@ with tab_sector:
 with tab_us:
     render("해외 폭등 예측 TOP 5", us_top, "USD")
 with tab_ct:
-    # 시장 상태 확인
-    _mkt_ct = get_market_regime()
-    _ret1_ct = _mkt_ct.get("ret1", 0)
-    _score_ct = 50 + min(_ret1_ct*5,20)
-    _score_ct = max(0,min(100,int(_score_ct)))
+    # 시장 상태 확인 — get_market_regime 직접 사용
+    _mkt_ct   = get_market_regime()
+    _mkt_score = _mkt_ct.get("score", 2)
+    _mkt_name  = _mkt_ct.get("regime","")
+    _ret1_ct   = _mkt_ct.get("ret1", 0)
 
-    if _score_ct >= 40:
-        st.warning("⚠️ 현재 시장은 과매도 구간이 아니에요. 역발상 전략의 기대수익이 낮아요.")
+    # 역발상 활성화 조건: 조정장 이하 (score <= 1) or 당일 -2% 이상
+    ct_active = _mkt_score <= 1 or _ret1_ct <= -2
+
+    if not ct_active:
+        st.warning(f"⚠️ 현재 시장은 {_mkt_name} ({_ret1_ct:+.1f}%)예요. 역발상 전략의 기대수익이 낮아요.")
 
     st.caption("⚡ 역발상 스캐너 — 과매도 + 거래량 급증 + 수급 개선 | 보유기간 2~5일 | 손절 -5%")
 
