@@ -1706,25 +1706,37 @@ def scan_contrarian() -> tuple:
         avg_vol = float(vo.rolling(20).mean().iloc[-1])
         if avg_vol < 50000: return {"_skip":True,"why":"유동성부족"}
 
-        # 거래량 조건
-        vol_today = float(vo.iloc[-1])
-        vol_ratio = vol_today / avg_vol if avg_vol > 0 else 0
+        # 장 중이면 전일 봉 기준으로 계산 (미완성봉 제외)
+        if is_kr_open() and len(cl) >= 2:
+            ref_cl = cl.iloc[:-1]  # 전일까지
+            ref_vo = vo.iloc[:-1]
+        else:
+            ref_cl = cl
+            ref_vo = vo
+
+        # 거래량 조건 (최근 급등일 기준)
+        avg_vol_ref = float(ref_vo.rolling(20).mean().iloc[-1])
+        # 최근 5일 중 MA20의 1.5배 이상인 날이 하루라도 있으면 통과
+        vol_max5 = float(ref_vo.iloc[-5:].max())
+        vol_ratio = vol_max5 / avg_vol_ref if avg_vol_ref > 0 else 0
         if vol_ratio < 1.5: return {"_skip":True,"why":f"거래량부족({vol_ratio:.1f}배)"}
 
-        # RSI
-        delta = cl.diff()
+        # RSI (전일 기준)
+        delta = ref_cl.diff()
         gain  = delta.clip(lower=0).ewm(alpha=1/14,adjust=False).mean()
         loss  = (-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
         rsi_s = 100 - 100/(1+gain/loss.replace(0,np.nan))
         rsi   = float(rsi_s.iloc[-1])
-        if rsi > 30: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}
+        if rsi > 35: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}  # 35로 완화
+
+        cur_ref = float(ref_cl.iloc[-1])
 
         # 20일 수익률
-        ret20 = (cur - float(cl.iloc[-21]))/float(cl.iloc[-21])*100 if len(cl)>=21 else 0
-        if ret20 > -15: return {"_skip":True,"why":f"낙폭부족({ret20:.1f}%)"}
+        ret20 = (cur_ref - float(ref_cl.iloc[-21]))/float(ref_cl.iloc[-21])*100 if len(ref_cl)>=21 else 0
+        if ret20 > -10: return {"_skip":True,"why":f"낙폭부족({ret20:.1f}%)"}  # -10%로 완화
 
         # 5일 수익률 (급락 제외)
-        ret5 = (cur - float(cl.iloc[-6]))/float(cl.iloc[-6])*100 if len(cl)>=6 else 0
+        ret5 = (cur_ref - float(ref_cl.iloc[-6]))/float(ref_cl.iloc[-6])*100 if len(ref_cl)>=6 else 0
         if ret5 <= -30: return {"_skip":True,"why":f"급락제외({ret5:.1f}%)"}
 
         # ── 가산점수 ──
@@ -2147,6 +2159,7 @@ st.sidebar.metric("🇺🇸 미국장", "OPEN" if is_us_open() else "CLOSED")
 if st.sidebar.button("🔄 추천 재스캔", use_container_width=True, type="primary"):
     scan_kr.clear(); scan_us.clear(); scan_kr_sector.clear(); scan_contrarian.clear()
     ohlcv_kr.clear(); ohlcv_us.clear()
+    st.session_state["scan_done"] = True
     st.rerun()
 
 if st.sidebar.button("👀 관심종목 재평가", use_container_width=True):
@@ -2158,12 +2171,12 @@ if st.sidebar.button("👀 관심종목 재평가", use_container_width=True):
     st.rerun()
 
 if st.sidebar.button("🗑️ 전체 캐시 초기화", use_container_width=True):
-    # 포트폴리오 데이터 제외 모든 캐시 초기화
-    scan_kr.clear(); scan_us.clear()
+    scan_kr.clear(); scan_us.clear(); scan_kr_sector.clear(); scan_contrarian.clear()
     ohlcv_kr.clear(); ohlcv_us.clear()
     krx_listing.clear(); us_tickers.clear()
     kis_price.clear()
     kis_investor_trend.clear(); kis_name.clear()
+    st.session_state["scan_done"] = False  # 재스캔 필요
     st.rerun()
 
 st.title("🚀 Tae Scanner v9")
@@ -2557,10 +2570,17 @@ st.markdown(f"""
   </span>
 </div>""", unsafe_allow_html=True)
 
-# 스캔 먼저 실행 (캐시 활용)
-with st.spinner("스캔 중..."):
-    kr_top, kr_skip = scan_kr()
-    us_top, us_skip = scan_us()
+# 스캔 지연 로딩 — 버튼 클릭 or 캐시 있을 때만 실행
+if "scan_done" not in st.session_state:
+    st.session_state["scan_done"] = False
+
+if not st.session_state["scan_done"]:
+    st.info("📊 추천 종목을 보려면 **🔄 추천 재스캔** 버튼을 눌러주세요.")
+    kr_top, kr_skip, us_top, us_skip = [], [], [], []
+else:
+    with st.spinner("스캔 중..."):
+        kr_top, kr_skip = scan_kr()
+        us_top, us_skip = scan_us()
 
 # ── 내일 매수 환경 판단 (스캔 완료 후 1회만 렌더링) ──
 tomorrow = get_tomorrow_outlook()
@@ -2689,8 +2709,12 @@ with tab_kr:
     render("국내 폭등 예측 TOP 5", kr_top, "KRW")
 with tab_sector:
     st.caption("각 업종 시총 1위 종목 중 신호 강도 순 TOP5")
-    with st.spinner("섹터 대장주 스캔 중..."):
-        sector_top, sector_skip = scan_kr_sector()
+    if not st.session_state.get("scan_done"):
+        st.info("📊 추천 재스캔 버튼을 먼저 눌러주세요.")
+        sector_top = []
+    else:
+        with st.spinner("섹터 대장주 스캔 중..."):
+            sector_top, sector_skip = scan_kr_sector()
     medals2 = ["🥇","🥈","🥉","4️⃣","5️⃣"]
     for i, item in enumerate(sector_top):
         gc = {"A+":"#f59e0b","A":"#10b981","B+":"#3b82f6","B":"#94a3b8","C":"#64748b"}.get(item.get("등급","C"),"#64748b")
@@ -2746,8 +2770,12 @@ with tab_ct:
 
     st.caption("⚡ 역발상 스캐너 — 과매도 + 거래량 급증 + 수급 개선 | 보유기간 2~5일 | 손절 -5%")
 
-    with st.spinner("역발상 스캔 중..."):
-        ct_top, ct_skip = scan_contrarian()
+    if not st.session_state.get("scan_done"):
+        st.info("📊 추천 재스캔 버튼을 먼저 눌러주세요.")
+        ct_top = []
+    else:
+        with st.spinner("역발상 스캔 중..."):
+            ct_top, ct_skip = scan_contrarian()
 
     if not ct_top:
         st.info("조건 충족 종목 없음 — 과매도 + 거래량 + 수급 조건 동시 충족 종목이 없어요.")
