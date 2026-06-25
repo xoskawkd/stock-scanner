@@ -1666,6 +1666,190 @@ def scan_kr_sector() -> tuple:
     return top5, skips
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def scan_contrarian() -> tuple:
+    """
+    역발상 매수 스캐너
+    과매도 + 거래량 급증 + 수급 개선 종목 탐색
+    보유기간 2~5일 단기 기술적 반등 전략
+    """
+    listing  = krx_listing()
+    caution_set = get_krx_caution_stocks()
+    kospi  = listing[listing["Market"].str.contains("KOSPI",na=False)] if "Market" in listing.columns else listing
+    kosdaq = listing[listing["Market"].str.contains("KOSDAQ",na=False)] if "Market" in listing.columns else pd.DataFrame()
+    kp = kospi[kospi["Marcap"]>1e11].nlargest(400,"Marcap")
+    kq = kosdaq[kosdaq["Marcap"]>3e10].nlargest(200,"Marcap") if not kosdaq.empty else pd.DataFrame()
+    targets = pd.concat([kp,kq]).drop_duplicates("Code")
+    codes   = list(zip(targets["Code"],targets["Name"]))
+    market_map = dict(zip(listing["Code"],listing.get("Market",pd.Series()))) if "Market" in listing.columns else {}
+
+    # 코스피 20일 수익률 (상대강도 계산용)
+    kospi_ret20 = 0.0
+    try:
+        mkt = get_market_regime()
+        kospi_ret20 = mkt.get("ret5", 0) * 4  # 5일 수익률로 20일 추정
+    except: pass
+
+    def _fetch_ct(item):
+        code, name = item
+        if code in caution_set: return {"_skip":True,"why":"투자주의/경고"}
+        df = ohlcv_kr(code)
+        if df is None or len(df)<25: return {"_skip":True,"why":"데이터부족"}
+        df = df.copy(); df.columns=[c.lower() for c in df.columns]
+        cl = df["close"].astype(float)
+        vo = df["volume"].astype(float)
+
+        cur = float(cl.iloc[-1])
+        if cur <= 0: return {"_skip":True,"why":"가격없음"}
+
+        # 평균 거래량
+        avg_vol = float(vo.rolling(20).mean().iloc[-1])
+        if avg_vol < 50000: return {"_skip":True,"why":"유동성부족"}
+
+        # 거래량 조건
+        vol_today = float(vo.iloc[-1])
+        vol_ratio = vol_today / avg_vol if avg_vol > 0 else 0
+        if vol_ratio < 1.5: return {"_skip":True,"why":f"거래량부족({vol_ratio:.1f}배)"}
+
+        # RSI
+        delta = cl.diff()
+        gain  = delta.clip(lower=0).ewm(alpha=1/14,adjust=False).mean()
+        loss  = (-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
+        rsi_s = 100 - 100/(1+gain/loss.replace(0,np.nan))
+        rsi   = float(rsi_s.iloc[-1])
+        if rsi > 30: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}
+
+        # 20일 수익률
+        ret20 = (cur - float(cl.iloc[-21]))/float(cl.iloc[-21])*100 if len(cl)>=21 else 0
+        if ret20 > -15: return {"_skip":True,"why":f"낙폭부족({ret20:.1f}%)"}
+
+        # 5일 수익률 (급락 제외)
+        ret5 = (cur - float(cl.iloc[-6]))/float(cl.iloc[-6])*100 if len(cl)>=6 else 0
+        if ret5 <= -30: return {"_skip":True,"why":f"급락제외({ret5:.1f}%)"}
+
+        # ── 가산점수 ──
+        score = 0; signals = []
+
+        # 수급 점수
+        if KIS_APP_KEY:
+            try:
+                trend = kis_investor_trend(code, 5)
+                if trend:
+                    fore_today = trend[0].get("외국인",0)
+                    inst_today = trend[0].get("기관",0)
+                    pension    = trend[0].get("연기금",0)
+                    fore_prev  = trend[1].get("외국인",0) if len(trend)>1 else 0
+                    inst_prev  = trend[1].get("기관",0)  if len(trend)>1 else 0
+                    if fore_today > 0 and fore_prev <= 0:
+                        score += 10; signals.append("✅ 외국인 순매수 전환 +10")
+                    elif fore_today > 0:
+                        score += 5;  signals.append("✅ 외국인 순매수 +5")
+                    if inst_today > 0 and inst_prev <= 0:
+                        score += 8;  signals.append("✅ 기관 순매수 전환 +8")
+                    elif inst_today > 0:
+                        score += 4;  signals.append("✅ 기관 순매수 +4")
+                    if pension > 0:
+                        score += 5;  signals.append("✅ 연기금 순매수 +5")
+            except: pass
+
+        # OBV 상승
+        try:
+            obv = (np.sign(cl.diff())*vo).fillna(0).cumsum()
+            if float(obv.iloc[-1]) > float(obv.iloc[-6]):
+                score += 5; signals.append("✅ OBV 반등 +5")
+        except: pass
+
+        # 52주 신저가 구간
+        try:
+            lo52 = float(cl.rolling(252).min().iloc[-1]) if len(cl)>=252 else float(cl.min())
+            if cur <= lo52 * 1.05:
+                score += 3; signals.append("✅ 52주 신저가 구간 +3")
+        except: pass
+
+        # 오늘 양봉
+        try:
+            if "open" in df.columns:
+                op = df["open"].astype(float)
+                if float(cl.iloc[-1]) > float(op.iloc[-1]):
+                    score += 5; signals.append("✅ 양봉 마감 +5")
+        except: pass
+
+        # 코스피 대비 상대강도
+        try:
+            rel_str = ret20 - kospi_ret20
+            if rel_str > 0:
+                score += 4; signals.append(f"✅ 코스피 대비 강함 +4 ({rel_str:+.1f}%)")
+        except: pass
+
+        # DART 공시 제외 조건
+        if DART_API_KEY:
+            try:
+                disc = get_dart_disclosures(code, days=3)
+                bad_kw = ["유상증자","전환사채","감자","거래정지","상장폐지","BW"]
+                for d in disc:
+                    if any(k in d["title"] for k in bad_kw):
+                        return {"_skip":True,"why":f"악재공시:{d['title'][:10]}"}
+            except: pass
+
+        # pass 기준
+        if score < 10: return {"_skip":True,"why":f"점수부족({score}점)"}
+
+        # 가격 조회
+        p, src = kr_price(code, market_map)
+        if p <= 0: p = cur
+
+        # 등급
+        if score >= 25: grade="A+"
+        elif score >= 18: grade="A"
+        elif score >= 13: grade="B+"
+        else: grade="B"
+
+        tgt = int(p * 1.10)   # 목표 +10%
+        stp = int(p * 0.95)   # 손절 -5%
+
+        return {
+            "_skip":   False,
+            "종목":    _KIS_NAME_CACHE.get(code) or name,
+            "코드":    code,
+            "등급":    grade,
+            "점수":    score,
+            "현재가":  int(p),
+            "RSI":     round(rsi,1),
+            "낙폭20일": round(ret20,1),
+            "낙폭5일":  round(ret5,1),
+            "거래량배율": round(vol_ratio,1),
+            "목표가":  tgt,
+            "손절가":  stp,
+            "signals": signals,
+            "source":  src,
+            "caution": False,
+        }
+
+    if KIS_APP_KEY and KIS_APP_SECRET:
+        kis_token()
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        raw = list(ex.map(_fetch_ct, codes))
+
+    passed = [r for r in raw if not r.get("_skip")]
+    skips  = [r for r in raw if r.get("_skip")]
+
+    # KIS 가격 재조회
+    if KIS_APP_KEY and KIS_APP_SECRET:
+        for item in passed:
+            try:
+                p_kis, src_kis = kis_price(item["코드"])
+                if p_kis > 0:
+                    item["현재가"] = int(p_kis)
+                    item["source"] = src_kis
+                cached = _KIS_NAME_CACHE.get(item["코드"])
+                if cached: item["종목"] = cached
+            except: pass
+
+    top5 = sorted(passed, key=lambda x: x["점수"], reverse=True)[:5]
+    return top5, skips
+
+
 @st.cache_data(ttl=3600, show_spinner=False)  # 1시간 — 🔄 재스캔 버튼으로만 갱신
 def scan_kr():
     # 시장 상태 진단 → 동적 pass score
@@ -1939,18 +2123,28 @@ with st.sidebar.expander("🔑 API 상태"):
             st.write(f"🇺🇸 ET: {now_et.strftime('%H:%M')} ({'장중' if is_us_open() else '장외'})")
         except: pass
 
+# 코스피 기반 공포탐욕 지수
 try:
-    fg = requests.get("https://api.alternative.me/fng/?limit=1",timeout=3).json()
-    fgv = fg["data"][0]["value"]
-    fgt = "극탐욕" if int(fgv)>=75 else "탐욕" if int(fgv)>=60 else "중립" if int(fgv)>=40 else "공포" if int(fgv)>=25 else "극공포"
-    st.sidebar.metric("공포탐욕", f"{fgv} ({fgt})")
+    _mkt = get_market_regime()
+    _ret1 = _mkt.get("ret1", 0)
+    _ret5 = _mkt.get("ret5", 0)
+    _dd   = _mkt.get("dd_from_hi", 0)
+    # 코스피 기반 점수 계산 (0~100)
+    _score = 50  # 기본 중립
+    _score += min(_ret1 * 5, 20)   # 당일 등락 반영
+    _score += min(_ret5 * 2, 10)   # 5일 흐름
+    _score += max(_dd * 0.5, -20)  # 고점 대비 낙폭
+    _score = max(0, min(100, _score))
+    fgv = int(_score)
+    fgt = "극탐욕" if fgv>=75 else "탐욕" if fgv>=60 else "중립" if fgv>=40 else "공포" if fgv>=25 else "극공포"
+    st.sidebar.metric("코스피 심리", f"{fgv} ({fgt})")
 except: pass
 st.sidebar.metric("🇺🇸 미국장", "OPEN" if is_us_open() else "CLOSED")
 
 # 재스캔
 # 버튼 3개: 추천 재스캔 / 관심종목 재스캔 / 전체 캐시 초기화
 if st.sidebar.button("🔄 추천 재스캔", use_container_width=True, type="primary"):
-    scan_kr.clear(); scan_us.clear(); scan_kr_sector.clear()
+    scan_kr.clear(); scan_us.clear(); scan_kr_sector.clear(); scan_contrarian.clear()
     ohlcv_kr.clear(); ohlcv_us.clear()
     st.rerun()
 
@@ -2362,7 +2556,12 @@ st.markdown(f"""
   </span>
 </div>""", unsafe_allow_html=True)
 
-# ── 내일 매수 환경 판단 ──
+# 스캔 먼저 실행 (캐시 활용)
+with st.spinner("스캔 중..."):
+    kr_top, kr_skip = scan_kr()
+    us_top, us_skip = scan_us()
+
+# ── 내일 매수 환경 판단 (스캔 완료 후 1회만 렌더링) ──
 tomorrow = get_tomorrow_outlook()
 t_color  = tomorrow["color"]
 t_verdict= tomorrow["verdict"]
@@ -2408,10 +2607,6 @@ if is_kr_open():
 - 관심종목 등록 → 다음날 시초가 보고 매수 결정
 - 장 중 추천 종목은 참고만 하고 즉시 매수 자제
 """)
-
-with st.spinner("스캔 중..."):
-    kr_top, kr_skip = scan_kr()
-    us_top, us_skip = scan_us()
 
 with st.sidebar.expander(f"국내 제외 ({len(kr_skip)})"):
     cnt=Counter()
@@ -2488,7 +2683,7 @@ def render(title, data, currency):
   </details>
 </div>""", unsafe_allow_html=True)
 
-tab_kr, tab_sector, tab_us = st.tabs(["🔥 국내 TOP5", "🏆 섹터 대장 TOP5", "🇺🇸 해외 TOP5"])
+tab_kr, tab_sector, tab_us, tab_ct = st.tabs(["🔥 국내 TOP5", "🏆 섹터 대장 TOP5", "🇺🇸 해외 TOP5", "⚡ 역발상"])
 with tab_kr:
     render("국내 폭등 예측 TOP 5", kr_top, "KRW")
 with tab_sector:
@@ -2535,5 +2730,57 @@ with tab_sector:
         st.info("섹터 대장주 데이터를 가져오는 중이에요. 잠시 후 재스캔해보세요.")
 with tab_us:
     render("해외 폭등 예측 TOP 5", us_top, "USD")
+with tab_ct:
+    # 시장 상태 확인
+    _mkt_ct = get_market_regime()
+    _ret1_ct = _mkt_ct.get("ret1", 0)
+    _score_ct = 50 + min(_ret1_ct*5,20)
+    _score_ct = max(0,min(100,int(_score_ct)))
+
+    if _score_ct >= 40:
+        st.warning("⚠️ 현재 시장은 과매도 구간이 아니에요. 역발상 전략의 기대수익이 낮아요.")
+
+    st.caption("⚡ 역발상 스캐너 — 과매도 + 거래량 급증 + 수급 개선 | 보유기간 2~5일 | 손절 -5%")
+
+    with st.spinner("역발상 스캔 중..."):
+        ct_top, ct_skip = scan_contrarian()
+
+    if not ct_top:
+        st.info("조건 충족 종목 없음 — 과매도 + 거래량 + 수급 조건 동시 충족 종목이 없어요.")
+    else:
+        medals_ct = ["🥇","🥈","🥉","4️⃣","5️⃣"]
+        for i, item in enumerate(ct_top):
+            gc = {"A+":"#f59e0b","A":"#10b981","B+":"#3b82f6","B":"#94a3b8"}.get(item.get("등급","B"),"#94a3b8")
+            sigs_html = "".join(f"<li style='font-size:11px;margin:2px 0;'>{s}</li>" for s in item.get("signals",[]))
+            st.markdown(f"""
+<div style="background:#1e293b;padding:14px;border-radius:10px;border-left:4px solid {gc};margin-bottom:8px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+    <b>{medals_ct[i]} {item['종목']}</b>
+    <span style="background:{gc};color:#000;font-size:11px;padding:2px 6px;border-radius:4px;">{item.get('등급','?')} {item['점수']}점</span>
+  </div>
+  <div style="font-size:11px;color:#f59e0b;margin-bottom:6px;">⚡ 단기 반등 전략 — 손절 철저히</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px;">
+    <div style="background:#0f172a;padding:6px;border-radius:6px;text-align:center;">
+      <div style="font-size:9px;color:#94a3b8;">RSI</div>
+      <div style="color:#10b981;font-weight:bold;">{item['RSI']}</div>
+    </div>
+    <div style="background:#0f172a;padding:6px;border-radius:6px;text-align:center;">
+      <div style="font-size:9px;color:#94a3b8;">20일 낙폭</div>
+      <div style="color:#ef4444;font-weight:bold;">{item['낙폭20일']:+.1f}%</div>
+    </div>
+    <div style="background:#0f172a;padding:6px;border-radius:6px;text-align:center;">
+      <div style="font-size:9px;color:#94a3b8;">거래량</div>
+      <div style="color:#f59e0b;font-weight:bold;">{item['거래량배율']:.1f}배</div>
+    </div>
+  </div>
+  <div style="font-size:12px;line-height:1.8;">
+    💰 <b>₩{int(item['현재가']):,}</b> <span style="font-size:10px;color:#64748b;">({item.get('source','')})</span><br>
+    📈 <span style="color:#3b82f6;">목표 ₩{int(item['목표가']):,}</span>
+    📉 <span style="color:#ef4444;">손절 ₩{int(item['손절가']):,}</span>
+  </div>
+  <details><summary style="font-size:11px;color:#94a3b8;cursor:pointer;margin-top:6px;">수급 상세</summary>
+    <ul style="padding-left:14px;margin-top:4px;">{sigs_html}</ul>
+  </details>
+</div>""", unsafe_allow_html=True)
 
 
