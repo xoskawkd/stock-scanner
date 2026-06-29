@@ -199,7 +199,11 @@ def kis_close_price(code: str) -> tuple:
     h = kis_headers("FHKST03010100")
     if not h: return 0.0, ""
     try:
-        today = datetime.now().strftime("%Y%m%d")
+        # KST 기준 날짜 (Railway는 UTC)
+        if ZoneInfo:
+            today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+        else:
+            today = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
         r = requests.get(
             f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
             params={
@@ -971,8 +975,16 @@ def ohlcv_kr(code):
     except: pass
     return None
 
-@st.cache_data(ttl=300, show_spinner=False)  # 보유/관심종목용 — 5분 캐시
+@st.cache_data(ttl=300, show_spinner=False)
 def portfolio_ohlcv_kr(code):
+    """보유/관심종목 전용 ohlcv — scan_kr과 독립 캐시"""
+    try:
+        import FinanceDataReader as fdr
+        df = fdr.DataReader(code, start="2024-01-01")
+        if df is not None and len(df)>=60:
+            df.columns=[c.lower() for c in df.columns]
+            return df
+    except: pass
     return ohlcv_kr(code)
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1002,7 +1014,11 @@ def ohlcv_us(ticker):
 def krx_listing():
     try:
         from pykrx import stock as pk
-        today = datetime.now().strftime("%Y%m%d")
+        # KST 기준 날짜 (Railway는 UTC)
+        if ZoneInfo:
+            today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+        else:
+            today = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
         rows=[]
         for mkt in ["KOSPI","KOSDAQ"]:
             for code in pk.get_market_ticker_list(today,market=mkt):
@@ -1114,7 +1130,11 @@ def get_krx_caution_stocks() -> set:
     if not KRX_API_KEY: return codes
     try:
         # KRX 투자주의/경고/위험 종목 (실제 API 경로)
-        today = datetime.now().strftime("%Y%m%d")
+        # KST 기준 날짜 (Railway는 UTC)
+        if ZoneInfo:
+            today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+        else:
+            today = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
         for url_path in [
             "sto/invst_caution_isu",   # 투자주의
             "sto/invst_wrnng_isu",     # 투자경고
@@ -1493,7 +1513,11 @@ def get_sector_leaders() -> list:
     """
     try:
         from pykrx import stock as pk
-        today = datetime.now().strftime("%Y%m%d")
+        # KST 기준 날짜 (Railway는 UTC)
+        if ZoneInfo:
+            today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+        else:
+            today = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
 
         # 전체 종목 시총 데이터
         df_cap = pk.get_market_cap(today, market="KOSPI")
@@ -1706,9 +1730,10 @@ def scan_contrarian() -> tuple:
         avg_vol = float(vo.rolling(20).mean().iloc[-1])
         if avg_vol < 50000: return {"_skip":True,"why":"유동성부족"}
 
-        # 장 중이면 전일 봉 기준으로 계산 (미완성봉 제외)
-        if is_kr_open() and len(cl) >= 2:
-            ref_cl = cl.iloc[:-1]  # 전일까지
+        # 항상 전일 종가 기준 (오늘 반등 봉 제외)
+        # 오늘 봉이 포함되면 RSI/낙폭이 왜곡됨
+        if len(cl) >= 2:
+            ref_cl = cl.iloc[:-1]
             ref_vo = vo.iloc[:-1]
         else:
             ref_cl = cl
@@ -1727,13 +1752,13 @@ def scan_contrarian() -> tuple:
         loss  = (-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
         rsi_s = 100 - 100/(1+gain/loss.replace(0,np.nan))
         rsi   = float(rsi_s.iloc[-1])
-        if rsi > 35: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}  # 35로 완화
+        if rsi > 35: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}
 
         cur_ref = float(ref_cl.iloc[-1])
 
         # 20일 수익률
         ret20 = (cur_ref - float(ref_cl.iloc[-21]))/float(ref_cl.iloc[-21])*100 if len(ref_cl)>=21 else 0
-        if ret20 > -10: return {"_skip":True,"why":f"낙폭부족({ret20:.1f}%)"}  # -10%로 완화
+        if ret20 > -15: return {"_skip":True,"why":f"낙폭부족({ret20:.1f}%)"}
 
         # 5일 수익률 (급락 제외)
         ret5 = (cur_ref - float(ref_cl.iloc[-6]))/float(ref_cl.iloc[-6])*100 if len(ref_cl)>=6 else 0
@@ -1803,7 +1828,7 @@ def scan_contrarian() -> tuple:
                         return {"_skip":True,"why":f"악재공시:{d['title'][:10]}"}
             except: pass
 
-        # pass 기준
+        # pass 기준 (5점으로 완화 — KIS 수급 없어도 통과 가능)
         if score < 10: return {"_skip":True,"why":f"점수부족({score}점)"}
 
         # 가격 조회
