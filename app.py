@@ -1274,10 +1274,13 @@ def quant_predict(df, market="KR"):
 
         rejected=False
         avg_vol=_sf(vo.rolling(20).mean().iloc[-1])
-        # 거래정지/상장폐지 감지 — 최근 5일 거래량 합계 0
+        # 거래정지/상장폐지 감지
         recent_vol = _sf(vo.iloc[-5:].sum())
+        recent_days_zero = sum(1 for v in vo.iloc[-5:] if _sf(v) == 0)
         if recent_vol == 0:
-            OUT["signals"].append("❌ 거래정지/상장폐지 의심"); rejected=True
+            OUT["signals"].append("❌ 거래정지 의심 (5일 거래량 0)"); rejected=True
+        elif recent_days_zero >= 2:
+            OUT["signals"].append(f"❌ 간헐적 거래정지 의심 ({recent_days_zero}일 거래량 0)"); rejected=True
         elif avg_vol<th["min_vol"]:
             OUT["signals"].append("❌ 유동성 부족"); rejected=True
         # MA 계산 (rejected 체크보다 먼저)
@@ -1729,6 +1732,9 @@ def scan_contrarian() -> tuple:
         # 평균 거래량
         avg_vol = float(vo.rolling(20).mean().iloc[-1])
         if avg_vol < 50000: return {"_skip":True,"why":"유동성부족"}
+        # 거래정지 감지
+        zero_days = sum(1 for v in vo.iloc[-5:] if float(v) == 0)
+        if zero_days >= 2: return {"_skip":True,"why":f"거래정지의심({zero_days}일 거래량0)"}
 
         # 거래대금 조건 (5억 이상)
         if "close" in df.columns:
