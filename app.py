@@ -1262,7 +1262,8 @@ def _sf(v, d=0.0):
 def quant_predict(df, market="KR"):
     OUT={"score":0,"grade":"C","signals":[],"pass":False,
          "buy_min":0.0,"buy_max":0.0,"target":0.0,"stop":0.0,
-         "rsi":50.0,"current":0.0,"s1":False,"s2":False,"s3":False,"s4":False,"s5":False,"s6":False,"s7":False}
+         "rsi":50.0,"current":0.0,"s1":False,"s2":False,"s3":False,"s4":False,"s5":False,"s6":False,"s7":False,
+         "atr_pct":0.0,"s3_streak":0,"s4_streak":0}
     th=THRESHOLDS.get(market,THRESHOLDS["KR"])
     try:
         if df is None or len(df)<60: return OUT
@@ -1283,6 +1284,12 @@ def quant_predict(df, market="KR"):
             OUT["signals"].append(f"❌ 간헐적 거래정지 의심 ({recent_days_zero}일 거래량 0)"); rejected=True
         elif avg_vol<th["min_vol"]:
             OUT["signals"].append("❌ 유동성 부족"); rejected=True
+
+        # 거래대금 필터 (5억원 이상, 국내만 적용)
+        if market == "KR" and not rejected:
+            daily_amount = _sf((cl * vo).rolling(20).mean().iloc[-1])
+            if daily_amount < 500_000_000:
+                OUT["signals"].append(f"❌ 거래대금 부족 ({daily_amount/1e8:.1f}억)"); rejected=True
         # MA 계산 (rejected 체크보다 먼저)
         _ma20_s  = cl.rolling(20).mean().replace(0, np.nan)
         _std20_s = cl.rolling(20).std()
@@ -1338,10 +1345,35 @@ def quant_predict(df, market="KR"):
         # S3 정배열+눌림목
         aligned=ma5>0 and ma20>0 and ma60>0 and ma5>ma20>ma60
         mid_up=ma20>0 and ma60>0 and ma20>ma60
-        near=ma20>0 and abs(cur-ma20)/ma20<=0.04; s3=False  # MA20 ±4% (3%는 과도, 5%는 과대)
-        if aligned and near: s3=True;setup+=1;strong+=1;score+=W["s3_strong"]; OUT["signals"].append("✅ [S3] 정배열+눌림목 ★")
-        elif mid_up and near: s3=True;setup+=1;score+=W["s3_weak"]; OUT["signals"].append("🔶 [S3] 중기상승+눌림목")
-        else: OUT["signals"].append(f"⬜ [S3] 눌림목없음 (이격 {abs(cur-ma20)/ma20*100:.1f}%)" if ma20>0 else "⬜ [S3] MA20없음")
+        near=ma20>0 and abs(cur-ma20)/ma20<=0.04; s3=False
+        if aligned and near: s3=True;setup+=1;strong+=1;score+=W["s3_strong"]
+        elif mid_up and near: s3=True;setup+=1;score+=W["s3_weak"]
+
+        # S3 연속 유지일수 계산 (노이즈성 신호 vs 안정된 신호 구분)
+        s3_streak = 0
+        try:
+            _ma5s  = cl.rolling(5).mean()
+            _ma20s = cl.rolling(20).mean()
+            _ma60s = cl.rolling(60).mean()
+            for k in range(1, 11):  # 최대 10일 전까지 확인
+                if len(cl) <= k: break
+                _c   = _sf(cl.iloc[-1-k])
+                _m5  = _sf(_ma5s.iloc[-1-k]); _m20 = _sf(_ma20s.iloc[-1-k]); _m60 = _sf(_ma60s.iloc[-1-k])
+                _al  = _m5>0 and _m20>0 and _m60>0 and _m5>_m20>_m60
+                _mu  = _m20>0 and _m60>0 and _m20>_m60
+                _nr  = _m20>0 and abs(_c-_m20)/_m20<=0.04
+                if (_al and _nr) or (_mu and _nr): s3_streak += 1
+                else: break
+        except: pass
+        OUT["s3_streak"] = s3_streak
+
+        if s3:
+            if s3_streak >= 2:
+                score += 3; OUT["signals"].append(f"✅ [S3] 정배열+눌림목 ★ ({s3_streak+1}일째 유지)")
+            else:
+                OUT["signals"].append("✅ [S3] 정배열+눌림목 ★ (오늘 첫 발생)")
+        else:
+            OUT["signals"].append(f"⬜ [S3] 눌림목없음 (이격 {abs(cur-ma20)/ma20*100:.1f}%)" if ma20>0 else "⬜ [S3] MA20없음")
         OUT["s3"]=s3
 
         # S4 RSI다이버전스
@@ -1358,7 +1390,16 @@ def quant_predict(df, market="KR"):
                 r1 = _sf(rw.iloc[p1_idx], 50.0)
                 r2 = _sf(rw.iloc[p2_idx], 50.0)
                 s4 = (p2 < p1 * 0.98) and (r2 > r1 + 5) and (r2 < 60)
-                if s4: trigger+=1;score+=W["s4"]; OUT["signals"].append(f"✅ [S4] RSI다이버전스 (가격↓{p1:.0f}→{p2:.0f} RSI↑{r1:.0f}→{r2:.0f})")
+                if s4:
+                    trigger+=1;score+=W["s4"]
+                    # S4는 다이버전스 직후(저점 형성 후 며칠 이내)가 골든타임
+                    # 저점에서 너무 멀어졌으면(이미 많이 반등) 신뢰도 낮음
+                    days_since_low = len(pw) - 1 - p2_idx
+                    if days_since_low <= 3:
+                        OUT["signals"].append(f"✅ [S4] RSI다이버전스 (가격↓{p1:.0f}→{p2:.0f} RSI↑{r1:.0f}→{r2:.0f}) 신선함")
+                    else:
+                        score -= 3  # 저점 형성 후 시간 지남 → 신뢰도 감점
+                        OUT["signals"].append(f"🔶 [S4] RSI다이버전스 (저점 {days_since_low}일 전, 신뢰도↓)")
                 else: OUT["signals"].append("⬜ [S4] 다이버전스없음")
             elif len(cl)>=30:
                 pw=cl.iloc[-30:].reset_index(drop=True)
@@ -1470,18 +1511,25 @@ def quant_predict(df, market="KR"):
 
         # ATR 목표가/손절가
         _tgt=cur*1.08; _stp=cur*0.93; _blo=cur*0.97; _bhi=cur*1.02
+        atr_pct = 0.0  # ATR 비율 (변동성 지표) — 보유종목 판단에도 재사용
         try:
             tr=pd.concat([hi-lo,(hi-cl.shift()).abs(),(lo-cl.shift()).abs()],axis=1).max(axis=1)
             atr=_sf(tr.rolling(14).mean().iloc[-1])
-            if atr>0:
-                std20=_sf(_std20_s.iloc[-1])  # 중복 계산 제거 (_std20_s 재사용)
+            if atr>0 and cur>0:
+                atr_pct = atr/cur*100  # ATR이 현재가 대비 몇 %인지
+                std20=_sf(_std20_s.iloc[-1])
                 bb_top=ma20+std20*2 if ma20>0 and std20>0 else 0
                 t_atr=cur+atr*2; t_bb=bb_top if bb_top>cur else cur+atr*2
                 _tgt=min(t_atr,t_bb)
                 _tgt=max(_tgt,cur*1.05); _tgt=min(_tgt,cur*1.15)
-                _stp=cur-atr*1.5; _stp=max(_stp,cur*0.93); _stp=min(_stp,cur*0.97)
+
+                # ATR 기반 손절 — 변동성 따라 -4%~-10% 범위에서 결정 (고정 -7% 캡 제거)
+                _stp=cur-atr*2.0
+                _stp=max(_stp,cur*0.92)   # 손절 하한 -8% (모순 방지용 캡)
+                _stp=min(_stp,cur*0.96)   # 손절 상한 -4%
                 _blo=max(cur*0.97,cur-atr*0.5); _bhi=min(cur*1.02,cur+atr*0.3)
         except: pass
+        OUT["atr_pct"]=round(atr_pct,2)
         OUT["target"]=round(_tgt,4); OUT["stop"]=round(_stp,4)
         OUT["buy_min"]=round(_blo,4); OUT["buy_max"]=round(_bhi,4)
         OUT["score"]=int(score)
@@ -2123,7 +2171,8 @@ def portfolio_data(name: str) -> dict:
             return {"label":label,"curr":curr,"score":r["score"],"grade":r["grade"],
                     "rsi":round(r["rsi"],1),"currency":"KRW","stop":stp,"target":tgt,
                     "buy_min":int(curr*0.97),"buy_max":int(curr*1.02),
-                    "source":src,"ok":curr>0,"signals":r["signals"]}
+                    "source":src,"ok":curr>0,"signals":r["signals"],
+                    "atr_pct":r.get("atr_pct",0),"s3_streak":r.get("s3_streak",0)}
         if p>0:
             return {"label":label,"curr":p,"score":0,"grade":"-","rsi":50,"currency":"KRW",
                     "stop":int(p*0.93),"target":int(p*1.08),
@@ -2251,7 +2300,8 @@ with tab_watch:
             if wn:
                 nm = wn.strip().upper()
                 if not any(p["name"]==nm for p in st.session_state.portfolio):
-                    st.session_state.portfolio.append({"name":nm,"buy":0.0,"date":"","type":"watch","memo":wm.strip()})
+                    st.session_state.portfolio.append({"name":nm,"buy":0.0,"date":"","type":"watch","memo":wm.strip(),
+                                                          "bottom_date":"","bottom_low":0.0})
                     save_portfolio(st.session_state.portfolio)
                     st.rerun()
 
@@ -2331,6 +2381,88 @@ for i, p in enumerate(st.session_state.portfolio):
 
         signal_ok = s3_on or s4_on  # quant_predict core와 동일 조건
 
+        # 신호 소멸 시 — 바닥 형성 중인지 역발상 체크 (이미 검증된 종목이므로)
+        bottom_check = ""
+        if not signal_ok and is_kr:
+            try:
+                _df_b = portfolio_ohlcv_kr(name)
+                if _df_b is not None and len(_df_b) >= 25:
+                    _cl_b = _df_b["close"].astype(float)
+                    _vo_b = _df_b["volume"].astype(float)
+                    _ref_cl = _cl_b.iloc[:-1] if is_kr_open() and len(_cl_b)>=2 else _cl_b
+                    _ref_vo = _vo_b.iloc[:-1] if is_kr_open() and len(_vo_b)>=2 else _vo_b
+
+                    _delta = _ref_cl.diff()
+                    _gain  = _delta.clip(lower=0).ewm(alpha=1/14,adjust=False).mean()
+                    _loss  = (-_delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
+                    _rsi_b = float((100-100/(1+_gain/_loss.replace(0,np.nan))).iloc[-1])
+
+                    _cur_b  = float(_ref_cl.iloc[-1])
+                    _ret20_b = (_cur_b-float(_ref_cl.iloc[-21]))/float(_ref_cl.iloc[-21])*100 if len(_ref_cl)>=21 else 0
+                    # 거래량: 5일 최대값 → 3일 평균으로 변경 (노이즈 감소)
+                    _avgvol_b = float(_ref_vo.rolling(20).mean().iloc[-1])
+                    _vol3avg_b = float(_ref_vo.iloc[-3:].mean())
+                    _volratio_b = _vol3avg_b/_avgvol_b if _avgvol_b>0 else 0
+
+                    # 악재 공시 체크 (최우선 — 충족해도 무효화)
+                    _has_bad_news = False
+                    if DART_API_KEY:
+                        try:
+                            _disc_b = get_dart_disclosures(name, days=5)
+                            _bad_kw = ["유상증자","전환사채","감자","거래정지","상장폐지","BW","관리종목","회생절차",
+                                       "횡령","배임","감사의견","영업정지"]
+                            _resolve_kw = ["해소","무혐의","철회","취하"]  # "정정"은 제외 (조건변경일 뿐 취소 아님)
+                            _has_bad_news = any(
+                                any(k in d["title"] for k in _bad_kw) and
+                                not any(rk in d["title"] for rk in _resolve_kw)
+                                for d in _disc_b
+                            )
+                        except: pass
+
+                    # 시장 급락 체크
+                    _mkt_b = _mkt_regime.get("ret1", 0)
+                    _mkt_severe_panic = _mkt_b <= -3   # 패닉 — 바닥체크 무효화
+                    _mkt_warn = -3 < _mkt_b <= -2       # 경고만
+
+                    if _has_bad_news:
+                        bottom_check = "🚫 악재 공시 확인 — 바닥 체크 무효 (유상증자/전환사채/횡령 등)"
+                    elif _mkt_severe_panic:
+                        bottom_check = f"🚫 시장 패닉(-3%↓) — 바닥 체크 무효 (코스피 {_mkt_b:+.1f}%, 개별판단 무의미)"
+                    elif _volratio_b < 1.0:
+                        # 거래량 Hard Filter — 평균 이하 거래량은 "관심 없는 종목"으로 즉시 제외
+                        pass  # 신호 표시 안 함 (관심없는 소외주 가능성)
+                    else:
+                        # Soft Score (Hard Filter 통과 종목만 RSI+낙폭으로 강도 측정)
+                        _bscore = 0
+                        if _rsi_b <= 25: _bscore += 3
+                        elif _rsi_b <= 30: _bscore += 2
+                        elif _rsi_b <= 35: _bscore += 1
+                        if _ret20_b <= -25: _bscore += 4
+                        elif _ret20_b <= -15: _bscore += 3
+                        elif _ret20_b <= -10: _bscore += 1
+
+                        # RSI 상승전환 — PASS점수 아닌 신뢰도 라벨로만 사용
+                        _rsi_up = False
+                        try:
+                            _rsi_prev = float((100-100/(1+_gain/_loss.replace(0,np.nan))).iloc[-2])
+                            _rsi_up = _rsi_b > _rsi_prev
+                        except: pass
+
+                        if _bscore >= 6:
+                            _conf = "강한 바닥 신호" if _bscore == 7 else "바닥 신호"
+                        elif _bscore >= 4:
+                            _conf = "약한 과매도"
+                        else:
+                            _conf = None
+
+                        if _conf:
+                            _warn = " ⚠️시장약세주의" if _mkt_warn else ""
+                            _trust = " 🔵RSI반등정황(참고용)" if (_rsi_up and _bscore>=7) else ""
+                            bottom_check = f"⚡ {_conf}({_bscore}/7점) — RSI {_rsi_b:.0f} + 20일 {_ret20_b:.0f}% + 거래량{_volratio_b:.1f}배{_warn}{_trust}"
+                        elif _ret20_b <= -10:
+                            bottom_check = f"🔍 과매도 관찰 구간({_bscore}/7점) — RSI {_rsi_b:.0f} + 20일 {_ret20_b:.0f}%"
+            except: pass
+
         # 수급
         sup_html=""
         if is_kr and KIS_APP_KEY:
@@ -2340,21 +2472,23 @@ for i, p in enumerate(st.session_state.portfolio):
                 sup_html = f'<div style="background:#0f172a;padding:8px;border-radius:6px;margin:6px 0;font-size:12px;">수급: <span style="color:{sup["color"]};font-weight:bold;">{sup["verdict"]}</span> <span style="color:#64748b;">{sup_sigs}</span></div>'
 
         # 종합 판단
+        # 가중치 재조정: S3/S4(4) > 시장(3) > 수급(2) > 갭(1)
         bs = 0
-        mkt_w = _mkt_regime  # 루프 밖 1회 조회 재사용
+        mkt_w = _mkt_regime
         mkt_score_w = mkt_w.get("score", 2)
-        if abs(gap_pct)<3: bs+=2
-        elif abs(gap_pct)<5: bs+=1
-        if signal_ok: bs+=2
+        if signal_ok: bs+=4              # S3/S4 핵심 신호 — 최우선
+        if mkt_score_w == 3:   bs+=3     # 상승장
+        elif mkt_score_w <= 0: bs-=4     # 하락장 페널티 강화
         if is_kr and KIS_APP_KEY:
             sup2 = supply_signal(name)
             if sup2.get("ok") and sup2.get("score",0)>=3: bs+=2
-        if mkt_score_w == 3:   bs+=2
-        elif mkt_score_w <= 0: bs-=3
+        if abs(gap_pct)<3: bs+=1         # 갭은 보조 지표로 축소
+        elif abs(gap_pct)<5: bs+=0.5
+
         if is_kr_open():
             bv="⚠️ 장 중 — 내일 시초가 확인 후 판단"; bc="#f59e0b"
-        elif bs>=6: bv="🟢 매수 적극 고려"; bc="#10b981"
-        elif bs>=4: bv="🟡 조건부 매수 (시장 확인)"; bc="#f59e0b"
+        elif bs>=8: bv="🟢 매수 적극 고려"; bc="#10b981"
+        elif bs>=5: bv="🟡 조건부 매수 (시장 확인)"; bc="#f59e0b"
         elif mkt_score_w <= 0: bv="🔴 하락장 — 매수 자제"; bc="#ef4444"
         else: bv="🔴 매수 보류"; bc="#ef4444"
 
@@ -2383,6 +2517,7 @@ for i, p in enumerate(st.session_state.portfolio):
   <div style="background:#0f172a;padding:8px;border-radius:6px;margin-top:6px;font-size:12px;">
     신호: <span style="font-weight:bold;">{'✅ S3+S4 유지' if signal_ok else ('⚠️ S3만' if s3_on else '❌ 신호소멸')}</span>
   </div>
+  {f'<div style="background:#1a2744;border:1px solid #6366f1;padding:8px;border-radius:6px;margin-top:6px;font-size:12px;color:#a5b4fc;">{bottom_check}</div>' if bottom_check else ''}
   {sup_html}
   <div style="background:#0f172a;padding:10px;border-radius:6px;margin-top:6px;border-left:3px solid {bc};">
     <span style="font-size:13px;font-weight:bold;color:{bc};">{bv}</span>
@@ -2411,10 +2546,114 @@ for i, p in enumerate(st.session_state.portfolio):
         try: hold_days=(datetime.now()-datetime.strptime(p["date"],"%Y-%m-%d")).days
         except: pass
 
-    fixed_stop  = buy*0.93
-    fixed_tgt   = buy*1.08
+    # ATR 기반 손절 (변동성 반영) — 없으면 기존 -7%/+8% fallback
+    _atr_pct = d.get("atr_pct", 0)
+    if _atr_pct > 0:
+        _stop_pct = min(max(_atr_pct * 2 / 100, 0.04), 0.08)  # 4~8% 범위 (모순 방지)
+        fixed_stop = buy * (1 - _stop_pct)
+    else:
+        fixed_stop = buy * 0.93
+    fixed_tgt = buy * 1.08
     rsi_v = d["rsi"]
     trend_broken = not s3_on
+
+    # 정배열 붕괴 시 — 바닥 형성 중인지 확인 (이미 검증된 종목이므로)
+    hold_bottom_check = ""
+    hold_bottom_invalid = False  # 악재 등으로 무효화 여부
+    ar_override_lowbreak = ""    # 저가갱신 시 손절고려 메시지
+    if not trend_broken and (p.get("bottom_date") or p.get("bottom_low")):
+        # 정배열 회복 시 추적 리셋
+        p["bottom_date"] = ""; p["bottom_low"] = 0.0
+        save_portfolio(st.session_state.portfolio)
+
+    if trend_broken and is_kr:
+        try:
+            _df_b2 = portfolio_ohlcv_kr(name)
+            if _df_b2 is not None and len(_df_b2) >= 25:
+                _cl_b2 = _df_b2["close"].astype(float)
+                _vo_b2 = _df_b2["volume"].astype(float)
+                _ref_cl2 = _cl_b2.iloc[:-1] if is_kr_open() and len(_cl_b2)>=2 else _cl_b2
+                _ref_vo2 = _vo_b2.iloc[:-1] if is_kr_open() and len(_vo_b2)>=2 else _vo_b2
+
+                _delta2 = _ref_cl2.diff()
+                _gain2  = _delta2.clip(lower=0).ewm(alpha=1/14,adjust=False).mean()
+                _loss2  = (-_delta2.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
+                _rsi_b2 = float((100-100/(1+_gain2/_loss2.replace(0,np.nan))).iloc[-1])
+
+                _cur_b2  = float(_ref_cl2.iloc[-1])
+                _ret20_b2 = (_cur_b2-float(_ref_cl2.iloc[-21]))/float(_ref_cl2.iloc[-21])*100 if len(_ref_cl2)>=21 else 0
+                _avgvol_b2 = float(_ref_vo2.rolling(20).mean().iloc[-1])
+                _vol3avg_b2 = float(_ref_vo2.iloc[-3:].mean())
+                _volratio_b2 = _vol3avg_b2/_avgvol_b2 if _avgvol_b2>0 else 0
+
+                # 악재 공시 체크 (최우선)
+                _has_bad_news2 = False
+                if DART_API_KEY:
+                    try:
+                        _disc_b2 = get_dart_disclosures(name, days=5)
+                        _bad_kw2 = ["유상증자","전환사채","감자","거래정지","상장폐지","BW","관리종목","회생절차",
+                                         "횡령","배임","감사의견","영업정지"]
+                        _resolve_kw2 = ["해소","무혐의","철회","취하"]
+                        _has_bad_news2 = any(
+                            any(k in d["title"] for k in _bad_kw2) and
+                            not any(rk in d["title"] for rk in _resolve_kw2)
+                            for d in _disc_b2
+                        )
+                    except: pass
+
+                _mkt_b2 = _mkt_regime.get("ret1", 0)
+                _mkt_severe_panic2 = _mkt_b2 <= -3
+                _mkt_warn2 = -3 < _mkt_b2 <= -2
+
+                if _has_bad_news2 or _mkt_severe_panic2:
+                    hold_bottom_invalid = True
+                elif _volratio_b2 < 1.0:
+                    pass  # 거래량 Hard Filter — 평균 이하면 신호 표시 안 함
+                else:
+                    _bscore2 = 0
+                    if _rsi_b2 <= 25: _bscore2 += 3
+                    elif _rsi_b2 <= 30: _bscore2 += 2
+                    elif _rsi_b2 <= 35: _bscore2 += 1
+                    if _ret20_b2 <= -25: _bscore2 += 4
+                    elif _ret20_b2 <= -15: _bscore2 += 3
+                    elif _ret20_b2 <= -10: _bscore2 += 1
+
+                    _rsi_up2 = False
+                    try:
+                        _rsi_prev2 = float((100-100/(1+_gain2/_loss2.replace(0,np.nan))).iloc[-2])
+                        _rsi_up2 = _rsi_b2 > _rsi_prev2
+                    except: pass
+
+                    if _bscore2 >= 6:
+                        _w2 = " ⚠️시장약세주의" if _mkt_warn2 else ""
+                        _trust2 = " 🔵RSI반등정황(참고용)" if _rsi_up2 else ""
+
+                        # 시간 필터 — 신규 저가 갱신 체크
+                        _today_str = datetime.now().strftime("%Y-%m-%d")
+                        if not p.get("bottom_date"):
+                            # 바닥신호 최초 발생 — 기준 저가 기록
+                            p["bottom_date"] = _today_str
+                            p["bottom_low"] = _cur_b2
+                            save_portfolio(st.session_state.portfolio)
+                            hold_bottom_check = f"과매도 반등 가능성({_bscore2}/7점) — RSI {_rsi_b2:.0f} + 20일{_ret20_b2:.0f}%+거래량{_volratio_b2:.1f}배{_w2}{_trust2}. 추세이탈 아닌 일시조정일 수 있음(확정 아님)"
+                        else:
+                            try:
+                                _days_since = (datetime.now() - datetime.strptime(p["bottom_date"],"%Y-%m-%d")).days
+                            except: _days_since = 0
+                            _ref_low = p.get("bottom_low", _cur_b2)
+
+                            if _cur_b2 < _ref_low:
+                                # 신규 저가 갱신 → 바닥신호 무효, 기준 저가 갱신
+                                p["bottom_low"] = _cur_b2
+                                save_portfolio(st.session_state.portfolio)
+                                hold_bottom_check = ""  # 무효화
+                                hold_bottom_invalid = True
+                                ar_override_lowbreak = f"⏰ 바닥신호 후 저가 갱신 ({_days_since}일 경과) — 반등 실패, 재평가 필요"
+                            elif _days_since >= 3:
+                                hold_bottom_check = f"과매도 반등 가능성({_bscore2}/7점) — {_days_since}일째 저가 유지 중. RSI {_rsi_b2:.0f}{_w2}{_trust2}"
+                            else:
+                                hold_bottom_check = f"과매도 반등 가능성({_bscore2}/7점) — RSI {_rsi_b2:.0f} + 20일{_ret20_b2:.0f}%+거래량{_volratio_b2:.1f}배{_w2}{_trust2} ({_days_since}일째)"
+        except: pass
 
     mkt = _mkt_regime
     mkt_score  = mkt.get("score", 2)
@@ -2443,9 +2682,15 @@ for i, p in enumerate(st.session_state.portfolio):
     elif combined_down and profit < -3:
         act="🔴 즉시 손절 고려"; ac="#ef4444"
         ar=f"시장+섹터 동반하락({sec_nm_d})+손실{profit:.1f}%"
+    elif hold_bottom_check and not hold_bottom_invalid and profit < -5:
+        act="🟣 과매도 반등 가능성 — 신중 관찰"; ac="#a855f7"
+        ar=hold_bottom_check
+    elif ar_override_lowbreak and profit < -5:
+        act="🔴 손절 고려"; ac="#ef4444"
+        ar=ar_override_lowbreak
     elif (mkt_down and profit < -5) or (trend_broken and profit < -5 and hold_days >= 5):
         act="🔴 손절 고려"; ac="#ef4444"
-        ar=f"{'하락장' if mkt_down else '정배열붕괴'}+손실{profit:.1f}%"
+        ar=f"{'하락장' if mkt_down else '정배열붕괴'}+손실{profit:.1f}%" + (" [악재공시 확인됨]" if hold_bottom_invalid else "")
     elif curr >= fixed_tgt or (rsi_v > 70 and profit > 5):
         act="🟡 익절 고려"; ac="#f59e0b"
         ar=f"{'목표가 도달' if curr>=fixed_tgt else f'RSI과열({rsi_v:.0f})'}({profit:.1f}%)"
@@ -2523,8 +2768,9 @@ for i, p in enumerate(st.session_state.portfolio):
   {sup_html2}
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-top:6px;">
     <div style="background:#0f172a;padding:6px;border-radius:6px;text-align:center;">
-      <div style="font-size:9px;color:#94a3b8;">고정손절</div>
+      <div style="font-size:9px;color:#94a3b8;">{'ATR손절' if _atr_pct>0 else '고정손절'}</div>
       <div style="color:#ef4444;font-size:11px;font-weight:bold;">{fmt(fixed_stop)}</div>
+      <div style="color:#64748b;font-size:8px;">({(buy-fixed_stop)/buy*100:.1f}%)</div>
     </div>
     <div style="background:#0f172a;padding:6px;border-radius:6px;text-align:center;">
       <div style="font-size:9px;color:#94a3b8;">목표가</div>
