@@ -1209,7 +1209,7 @@ def dart_score(code: str) -> tuple:
     DART 공시 점수 + 공시 요약
     반환: (점수, 공시목록)
     """
-    disclosures = get_dart_disclosures(code, days=3)
+    disclosures = get_dart_disclosures(code, days=5)
     if not disclosures: return 0, []
 
     score = 0
@@ -1315,8 +1315,8 @@ def quant_predict(df, market="KR"):
             bbw_60 = bbw.iloc[-60:].dropna()
             pct20 = bbw_60.quantile(0.20) if len(bbw_60)>=20 else bwavg*0.85
             pct10 = bbw_60.quantile(0.10) if len(bbw_60)>=20 else bwavg*0.75
-            if bw<=pct10: s1=True;setup+=1;strong+=1;score+=W["s1_strong"]; OUT["signals"].append(f"✅ [S1] BB강수축 (하위10%)")
-            elif bw<=pct20: s1=True;setup+=1;score+=W["s1_weak"]; OUT["signals"].append(f"🔶 [S1] BB수축 (하위20%)")
+            if bw<=pct10: s1=True;setup+=1;strong+=1;score+=8; OUT["signals"].append(f"✅ [S1] BB강수축 (하위10%)")
+            elif bw<=pct20: s1=True;setup+=1;score+=4; OUT["signals"].append(f"🔶 [S1] BB수축 (하위20%)")
             else: OUT["signals"].append("⬜ [S1] BB수축없음")
         OUT["s1"]=s1
 
@@ -1397,7 +1397,7 @@ def quant_predict(df, market="KR"):
                     hammer=body>0 and lower>body*2 and upper<body*0.5
                     bull=c2<o2 and c1>o1
                     s5=hammer or bull
-                    if s5: trigger+=1;score+=W["s5"]; OUT["signals"].append(f"✅ [S5] {'망치형' if hammer else '양봉전환'}")
+                    if s5: OUT["signals"].append(f"✅ [S5] {'망치형' if hammer else '양봉전환'}")  # 점수 제외 (노이즈)
                     else: OUT["signals"].append("⬜ [S5] 캔들없음")
         except: OUT["signals"].append("⬜ [S5] 캔들실패")
         OUT["s5"]=s5
@@ -1730,6 +1730,12 @@ def scan_contrarian() -> tuple:
         avg_vol = float(vo.rolling(20).mean().iloc[-1])
         if avg_vol < 50000: return {"_skip":True,"why":"유동성부족"}
 
+        # 거래대금 조건 (5억 이상)
+        if "close" in df.columns:
+            daily_amount = float((cl * vo).rolling(20).mean().iloc[-1])
+            if daily_amount < 500_000_000:
+                return {"_skip":True,"why":f"거래대금부족({daily_amount/1e8:.1f}억)"}
+
         # 항상 전일 종가 기준 (오늘 반등 봉 제외)
         # 오늘 봉이 포함되면 RSI/낙폭이 왜곡됨
         if len(cl) >= 2:
@@ -1744,7 +1750,7 @@ def scan_contrarian() -> tuple:
         # 최근 5일 중 MA20의 1.5배 이상인 날이 하루라도 있으면 통과
         vol_max5 = float(ref_vo.iloc[-5:].max())
         vol_ratio = vol_max5 / avg_vol_ref if avg_vol_ref > 0 else 0
-        if vol_ratio < 1.5: return {"_skip":True,"why":f"거래량부족({vol_ratio:.1f}배)"}
+        if vol_ratio < 2.0: return {"_skip":True,"why":f"거래량부족({vol_ratio:.1f}배)"}
 
         # RSI (전일 기준)
         delta = ref_cl.diff()
@@ -1759,10 +1765,11 @@ def scan_contrarian() -> tuple:
         # 20일 수익률
         ret20 = (cur_ref - float(ref_cl.iloc[-21]))/float(ref_cl.iloc[-21])*100 if len(ref_cl)>=21 else 0
         if ret20 > -15: return {"_skip":True,"why":f"낙폭부족({ret20:.1f}%)"}
+        if ret20 < -35: return {"_skip":True,"why":f"급락악재제외({ret20:.1f}%)"}
 
         # 5일 수익률 (급락 제외)
         ret5 = (cur_ref - float(ref_cl.iloc[-6]))/float(ref_cl.iloc[-6])*100 if len(ref_cl)>=6 else 0
-        if ret5 <= -30: return {"_skip":True,"why":f"급락제외({ret5:.1f}%)"}
+        if ret5 <= -25: return {"_skip":True,"why":f"급락제외({ret5:.1f}%)"}
 
         # ── 가산점수 ──
         score = 0; signals = []
@@ -1778,37 +1785,46 @@ def scan_contrarian() -> tuple:
                     fore_prev  = trend[1].get("외국인",0) if len(trend)>1 else 0
                     inst_prev  = trend[1].get("기관",0)  if len(trend)>1 else 0
                     if fore_today > 0 and fore_prev <= 0:
-                        score += 10; signals.append("✅ 외국인 순매수 전환 +10")
+                        score += 7; signals.append("✅ 외국인 순매수 전환 +7")
                     elif fore_today > 0:
-                        score += 5;  signals.append("✅ 외국인 순매수 +5")
+                        score += 4; signals.append("✅ 외국인 순매수 +4")
                     if inst_today > 0 and inst_prev <= 0:
-                        score += 8;  signals.append("✅ 기관 순매수 전환 +8")
+                        score += 6; signals.append("✅ 기관 순매수 전환 +6")
                     elif inst_today > 0:
-                        score += 4;  signals.append("✅ 기관 순매수 +4")
+                        score += 3; signals.append("✅ 기관 순매수 +3")
                     if pension > 0:
-                        score += 5;  signals.append("✅ 연기금 순매수 +5")
+                        score += 4; signals.append("✅ 연기금 순매수 +4")
             except: pass
 
-        # OBV 상승
+        # OBV 3일 연속 상승
         try:
             obv = (np.sign(cl.diff())*vo).fillna(0).cumsum()
-            if float(obv.iloc[-1]) > float(obv.iloc[-6]):
-                score += 5; signals.append("✅ OBV 반등 +5")
+            obv_rising3 = (float(obv.iloc[-1]) > float(obv.iloc[-2]) > float(obv.iloc[-3]))
+            if obv_rising3:
+                score += 6; signals.append("✅ OBV 3일 연속 상승 +6")
+            elif float(obv.iloc[-1]) > float(obv.iloc[-6]):
+                score += 3; signals.append("✅ OBV 반등 +3")
         except: pass
 
         # 52주 신저가 구간
         try:
             lo52 = float(cl.rolling(252).min().iloc[-1]) if len(cl)>=252 else float(cl.min())
             if cur <= lo52 * 1.05:
-                score += 3; signals.append("✅ 52주 신저가 구간 +3")
+                score += 5; signals.append("✅ 52주 신저가 ±5% +5")
         except: pass
 
-        # 오늘 양봉
+        # 전일 양봉 + 거래량 증가
         try:
             if "open" in df.columns:
                 op = df["open"].astype(float)
-                if float(cl.iloc[-1]) > float(op.iloc[-1]):
-                    score += 5; signals.append("✅ 양봉 마감 +5")
+                # 전일 기준 (ref_cl)
+                ref_op = op.iloc[:-1] if len(op)>=2 else op
+                is_bull = float(ref_cl.iloc[-1]) > float(ref_op.iloc[-1])
+                vol_inc = float(ref_vo.iloc[-1]) > float(ref_vo.iloc[-2]) if len(ref_vo)>=2 else False
+                if is_bull and vol_inc:
+                    score += 5; signals.append("✅ 양봉+거래량증가 +5")
+                elif is_bull:
+                    score += 3; signals.append("✅ 양봉 마감 +3")
         except: pass
 
         # 코스피 대비 상대강도
@@ -1828,8 +1844,13 @@ def scan_contrarian() -> tuple:
                         return {"_skip":True,"why":f"악재공시:{d['title'][:10]}"}
             except: pass
 
-        # pass 기준 (5점으로 완화 — KIS 수급 없어도 통과 가능)
-        if score < 10: return {"_skip":True,"why":f"점수부족({score}점)"}
+        # pass 기준 — 시장 상태 연동
+        _mkt_r = get_market_regime()
+        _r1 = _mkt_r.get("ret1", 0)
+        if _r1 <= -3:   ct_pass = 10   # 급락장: 완화
+        elif _r1 <= -1: ct_pass = 12   # 약세장: 기본
+        else:           ct_pass = 15   # 중립 이상: 엄격
+        if score < ct_pass: return {"_skip":True,"why":f"점수부족({score}/{ct_pass}점)"}
 
         # 가격 조회
         p, src = kr_price(code, market_map)
@@ -1976,7 +1997,7 @@ def scan_kr():
                 r["시장섹터"] = full.get("summary","")
                 r["공시점수"] = dart_s
                 r["공시목록"] = dart_list[:2]
-                r["종합점수"] = r["점수"] + sup + r["섹터점수"] + dart_s + (full["buy_adj"] if sec_ok_val else 0)
+                r["종합점수"] = r["점수"] + sup + dart_s  # 섹터 중복 제거
                 r["섹터강세"] = sec_score_val >= 2
             except:
                 r["수급점수"] = 0; r["섹터점수"] = 0
@@ -2409,57 +2430,31 @@ for i, p in enumerate(st.session_state.portfolio):
         sec_st_d  = full_h.get("sec_status","")
 
     # ── 포지션 판단 (시장+섹터+차트 종합) ──
+    # ── 보유종목 판단 v10 (5단계 단순화) ──
     if curr <= fixed_stop:
         act="🔴 즉시 손절"; ac="#ef4444"
         ar=f"평단 -7% 이탈 ({profit:.1f}%)"
     elif combined_down and profit < -3:
         act="🔴 즉시 손절 고려"; ac="#ef4444"
-        ar=f"시장+섹터 동반하락({sec_nm_d} {sec_st_d})+손실{profit:.1f}%"
-    elif mkt_down and sec_down and profit < 0:
+        ar=f"시장+섹터 동반하락({sec_nm_d})+손실{profit:.1f}%"
+    elif (mkt_down and profit < -5) or (trend_broken and profit < -5 and hold_days >= 5):
         act="🔴 손절 고려"; ac="#ef4444"
-        ar=f"하락장+섹터약세({sec_nm_d})+손실{profit:.1f}%"
-    elif mkt_down and profit < -5:
-        act="🔴 손절 고려"; ac="#ef4444"
-        ar=f"하락장+손실{profit:.1f}%"
-    elif trend_broken and profit < -5:
-        act="🔴 손절 고려"; ac="#ef4444"
-        ar=f"정배열붕괴+손실{profit:.1f}%"
-    elif rsi_v > 70 and profit > 5:
+        ar=f"{'하락장' if mkt_down else '정배열붕괴'}+손실{profit:.1f}%"
+    elif curr >= fixed_tgt or (rsi_v > 70 and profit > 5):
         act="🟡 익절 고려"; ac="#f59e0b"
-        ar=f"RSI과열({rsi_v:.0f})+수익{profit:.1f}%"
-    elif curr >= fixed_tgt:
-        act="🟡 익절 고려"; ac="#f59e0b"
-        ar=f"목표가 도달({profit:.1f}%)"
-    elif hold_days >= 10 and trend_broken and not sec_bull:
-        act="🟡 재검토"; ac="#f59e0b"
-        ar=f"보유{hold_days}일+추세약화+섹터부진"
+        ar=f"{'목표가 도달' if curr>=fixed_tgt else f'RSI과열({rsi_v:.0f})'}({profit:.1f}%)"
     elif combined_bull and s3_on and 35<=rsi_v<=60 and profit>=-5:
-        act="🟢 적극 추가매수"; ac="#10b981"
-        ar=f"시장+섹터강세({sec_nm_d})+정배열+RSI({rsi_v:.0f})"
-    elif sec_bull and s3_on and 40<=rsi_v<=60 and -3<=profit<=0:
         act="🟢 추가매수 검토"; ac="#10b981"
-        ar=f"섹터강세({sec_nm_d})+정배열+눌림RSI({rsi_v:.0f})"
-    elif s3_on and 40<=rsi_v<=60 and -3<=profit<=0 and not mkt_down:
-        act="🟢 추가매수 검토"; ac="#10b981"
-        ar=f"정배열+RSI여유({rsi_v:.0f})+눌림"
-    elif combined_bull and s3_on and profit > 0:
-        act="⚪ 강하게 홀딩"; ac="#10b981"
-        ar=f"시장+섹터강세+수익{profit:.1f}% — 익절 서두르지 말것"
-    elif s3_on and sec_bull and profit >= 0:
-        act="⚪ 홀딩"; ac="#94a3b8"
-        ar=f"섹터강세({sec_nm_d})+정배열유지"
+        ar=f"시장+섹터강세+정배열+RSI({rsi_v:.0f})"
     elif s3_on and profit > 0:
         act="⚪ 홀딩"; ac="#94a3b8"
         ar=f"정배열유지+수익{profit:.1f}%"
     elif hold_days > 0 and hold_days <= 3:
         act="⚪ 관망"; ac="#94a3b8"
         ar=f"매수{hold_days}일차 — 판단 유보"
-    elif mkt_down or sec_down:
-        act="⬜ 관망(시장주의)"; ac="#64748b"
-        ar=f"{'하락장' if mkt_down else ''} {'섹터약세' if sec_down else ''} — 신중"
     else:
         act="⬜ 관망"; ac="#64748b"
-        ar="신호 대기"
+        ar=f"{'하락장' if mkt_down else '섹터약세' if sec_down else '신호 대기'}"
     hold_str = f"{hold_days}일째" if hold_days>0 else ("날짜미입력" if not p.get("date") else "오늘")
     pc = "#10b981" if profit>=0 else "#ef4444"
 
