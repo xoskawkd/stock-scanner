@@ -2519,28 +2519,6 @@ for i, p in enumerate(st.session_state.portfolio):
                 st.session_state[f"bc_{i}"]=False
                 save_portfolio(st.session_state.portfolio)
                 st.rerun()
-        # 평단가 수정 버튼 (물타기/추가매수 후 재설정)
-        if p.get("type") == "hold":
-            if st.button("✏️ 평단가 수정", key=f"edit_{i}"):
-                st.session_state[f"edit_{i}"] = True
-            if st.session_state.get(f"edit_{i}"):
-                new_buy = st.number_input("새 평단가", min_value=0.0,
-                    value=float(p.get("buy",0) or 0),
-                    step=100.0, format="%.0f", key=f"newbuy_{i}")
-                new_date = st.text_input("매수일자",
-                    value=p.get("date", datetime.now().strftime("%Y-%m-%d")),
-                    key=f"newdate_{i}")
-                col_ok, col_cancel = st.columns(2)
-                if col_ok.button("✅ 저장", key=f"editsave_{i}") and new_buy > 0:
-                    p["buy"] = float(new_buy)
-                    p["date"] = new_date
-                    st.session_state[f"edit_{i}"] = False
-                    save_portfolio(st.session_state.portfolio)
-                    st.rerun()
-                if col_cancel.button("❌ 취소", key=f"editcancel_{i}"):
-                    st.session_state[f"edit_{i}"] = False
-                    st.rerun()
-
         if col_d.button("🗑️", key=f"dw_{i}"): to_remove=i
         continue
 
@@ -2795,6 +2773,28 @@ for i, p in enumerate(st.session_state.portfolio):
     <span style="font-size:11px;">{'🟢정배열' if s3_on else '🔴추세약화'}</span>
   </div>
 </div>""", unsafe_allow_html=True)
+
+    # 평단가 수정 버튼 (물타기/추가매수 후 재설정)
+    if ptype == "hold":
+        if st.button("✏️ 평단가 수정", key=f"edit_{i}"):
+            st.session_state[f"edit_{i}"] = True
+        if st.session_state.get(f"edit_{i}"):
+            new_buy = st.number_input("새 평단가", min_value=0.0,
+                value=float(p.get("buy",0) or 0),
+                step=100.0, format="%.0f", key=f"newbuy_{i}")
+            new_date = st.text_input("매수일자",
+                value=p.get("date", datetime.now().strftime("%Y-%m-%d")),
+                key=f"newdate_{i}")
+            col_ok, col_cancel = st.columns(2)
+            if col_ok.button("✅ 저장", key=f"editsave_{i}") and new_buy > 0:
+                p["buy"] = float(new_buy)
+                p["date"] = new_date
+                st.session_state[f"edit_{i}"] = False
+                save_portfolio(st.session_state.portfolio)
+                st.rerun()
+            if col_cancel.button("❌ 취소", key=f"editcancel_{i}"):
+                st.session_state[f"edit_{i}"] = False
+                st.rerun()
 
     if st.button("🗑️ 삭제", key=f"del_{i}"): to_remove=i
 
