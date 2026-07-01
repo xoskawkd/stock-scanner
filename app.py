@@ -2674,9 +2674,21 @@ for i, p in enumerate(st.session_state.portfolio):
     elif (mkt_down and profit < -5) or (trend_broken and profit < -5 and hold_days >= 5):
         act="🔴 손절 고려"; ac="#ef4444"
         ar=f"{'하락장' if mkt_down else '정배열붕괴'}+손실{profit:.1f}%" + (" [악재공시 확인됨]" if hold_bottom_invalid else "")
+    elif curr >= fixed_tgt and s3_on and rsi_v <= 60 and combined_bull:
+        act="🚀 홀딩 (추가 상승 여지)"; ac="#10b981"
+        ar=f"목표가 도달({profit:.1f}%) + 정배열유지 + RSI{rsi_v:.0f} + 시장섹터강세 — 추가 상승 가능"
+    elif curr >= fixed_tgt and s3_on and rsi_v <= 60:
+        act="🟡 일부 익절 검토"; ac="#f59e0b"
+        ar=f"목표가 도달({profit:.1f}%) + 정배열유지 — 일부 익절 후 나머지 홀딩 고려"
     elif curr >= fixed_tgt or (rsi_v > 70 and profit > 5):
         act="🟡 익절 고려"; ac="#f59e0b"
-        ar=f"{'목표가 도달' if curr>=fixed_tgt else f'RSI과열({rsi_v:.0f})'}({profit:.1f}%)"
+        ar=f"{'목표가 도달+추세약화' if curr>=fixed_tgt else f'RSI과열({rsi_v:.0f})'}({profit:.1f}%)"
+    elif profit > 3 and trend_broken:
+        act="🟡 익절 고려 (추세약화)"; ac="#f59e0b"
+        ar=f"수익 {profit:.1f}% + 정배열 붕괴 — 수익 확정 검토"
+    elif profit > 5 and not s3_on and rsi_v > 60:
+        act="🟡 익절 고려 (차트 피크)"; ac="#f59e0b"
+        ar=f"수익 {profit:.1f}% + 신호 소멸 + RSI {rsi_v:.0f} — 고점 가능성"
     elif combined_bull and s3_on and 35<=rsi_v<=60 and profit>=-5:
         act="🟢 추가매수 검토"; ac="#10b981"
         ar=f"시장+섹터강세+정배열+RSI({rsi_v:.0f})"
