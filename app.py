@@ -1704,39 +1704,20 @@ def scan_kr_sector() -> tuple:
     with ThreadPoolExecutor(max_workers=8) as ex:
         raw = list(ex.map(_fetch_leader, leaders))
 
-    # KIS 가격 재조회
+    # KIS 가격 재조회 — 상위 20개만 순차 처리 (rate limit 방지)
     if KIS_APP_KEY and KIS_APP_SECRET:
-        for item in raw:
-            if not item.get("_skip"):
-                try:
-                    p_kis, src_kis = kis_price(item["코드"])
-                    if p_kis > 0:
-                        item["현재가"] = int(p_kis)
-                        item["source"] = src_kis
-                    cached = _KIS_NAME_CACHE.get(item["코드"])
-                    if cached: item["종목"] = f"{cached} ({item['코드']})"
-                except: pass
-
-    passed = [r for r in raw if not r.get("_skip")]
-    skips  = [r for r in raw if r.get("_skip")]
-
-    # 수급 점수 추가
-    if KIS_APP_KEY and KIS_APP_SECRET and passed:
-        def _add_sup(r):
+        import time as _time
+        _cands = [item for item in raw if not item.get("_skip")]
+        for item in _cands[:20]:
             try:
-                sup = supply_score(r["코드"])
-                sec = sector_momentum_score(r["코드"])
-                r["수급점수"]  = sup
-                r["섹터점수"]  = sec
-                r["종합점수"]  = r["점수"] + sup + sec
-                r["섹터강세"]  = sec >= 6
-            except:
-                pass
-            return r
-        with ThreadPoolExecutor(max_workers=5) as ex:
-            passed = list(ex.map(_add_sup, passed))
-
-    # 종합점수 기준 TOP5
+                p_kis, src_kis = kis_price(item["코드"])
+                if p_kis > 0:
+                    item["현재가"] = int(p_kis)
+                    item["source"] = src_kis
+                cached = _KIS_NAME_CACHE.get(item["코드"])
+                if cached: item["종목"] = cached
+                _time.sleep(0.05)
+            except: pass
     top5 = sorted(passed, key=lambda x: x["종합점수"], reverse=True)[:5]
     return top5, skips
 
@@ -1946,9 +1927,10 @@ def scan_contrarian() -> tuple:
     passed = [r for r in raw if not r.get("_skip")]
     skips  = [r for r in raw if r.get("_skip")]
 
-    # KIS 가격 재조회
+    # KIS 가격 재조회 — 순차 처리 (rate limit 방지)
     if KIS_APP_KEY and KIS_APP_SECRET:
-        for item in passed:
+        import time
+        for item in passed[:20]:
             try:
                 p_kis, src_kis = kis_price(item["코드"])
                 if p_kis > 0:
@@ -1956,6 +1938,7 @@ def scan_contrarian() -> tuple:
                     item["source"] = src_kis
                 cached = _KIS_NAME_CACHE.get(item["코드"])
                 if cached: item["종목"] = cached
+                time.sleep(0.05)
             except: pass
 
     top5 = sorted(passed, key=lambda x: x["점수"], reverse=True)[:5]
@@ -2536,6 +2519,28 @@ for i, p in enumerate(st.session_state.portfolio):
                 st.session_state[f"bc_{i}"]=False
                 save_portfolio(st.session_state.portfolio)
                 st.rerun()
+        # 평단가 수정 버튼 (물타기/추가매수 후 재설정)
+        if p.get("type") == "hold":
+            if st.button("✏️ 평단가 수정", key=f"edit_{i}"):
+                st.session_state[f"edit_{i}"] = True
+            if st.session_state.get(f"edit_{i}"):
+                new_buy = st.number_input("새 평단가", min_value=0.0,
+                    value=float(p.get("buy",0) or 0),
+                    step=100.0, format="%.0f", key=f"newbuy_{i}")
+                new_date = st.text_input("매수일자",
+                    value=p.get("date", datetime.now().strftime("%Y-%m-%d")),
+                    key=f"newdate_{i}")
+                col_ok, col_cancel = st.columns(2)
+                if col_ok.button("✅ 저장", key=f"editsave_{i}") and new_buy > 0:
+                    p["buy"] = float(new_buy)
+                    p["date"] = new_date
+                    st.session_state[f"edit_{i}"] = False
+                    save_portfolio(st.session_state.portfolio)
+                    st.rerun()
+                if col_cancel.button("❌ 취소", key=f"editcancel_{i}"):
+                    st.session_state[f"edit_{i}"] = False
+                    st.rerun()
+
         if col_d.button("🗑️", key=f"dw_{i}"): to_remove=i
         continue
 
