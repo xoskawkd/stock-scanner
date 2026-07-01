@@ -2776,24 +2776,25 @@ for i, p in enumerate(st.session_state.portfolio):
 
     # 평단가 수정 버튼 (물타기/추가매수 후 재설정)
     if ptype == "hold":
-        if st.button("✏️ 평단가 수정", key=f"edit_{i}"):
-            st.session_state[f"edit_{i}"] = True
-        if st.session_state.get(f"edit_{i}"):
+        _ekey = f"pedit_{i}"  # 위젯 key 충돌 방지
+        if st.button("✏️ 평단가 수정", key=f"pbtn_{i}"):
+            st.session_state[_ekey] = not st.session_state.get(_ekey, False)
+        if st.session_state.get(_ekey):
             new_buy = st.number_input("새 평단가", min_value=0.0,
                 value=float(p.get("buy",0) or 0),
-                step=100.0, format="%.0f", key=f"newbuy_{i}")
+                step=100.0, format="%.0f", key=f"pnbuy_{i}")
             new_date = st.text_input("매수일자",
                 value=p.get("date", datetime.now().strftime("%Y-%m-%d")),
-                key=f"newdate_{i}")
+                key=f"pndate_{i}")
             col_ok, col_cancel = st.columns(2)
-            if col_ok.button("✅ 저장", key=f"editsave_{i}") and new_buy > 0:
+            if col_ok.button("✅ 저장", key=f"pnsave_{i}") and new_buy > 0:
                 p["buy"] = float(new_buy)
                 p["date"] = new_date
-                st.session_state[f"edit_{i}"] = False
+                st.session_state[_ekey] = False
                 save_portfolio(st.session_state.portfolio)
                 st.rerun()
-            if col_cancel.button("❌ 취소", key=f"editcancel_{i}"):
-                st.session_state[f"edit_{i}"] = False
+            if col_cancel.button("❌ 취소", key=f"pncancel_{i}"):
+                st.session_state[_ekey] = False
                 st.rerun()
 
     if st.button("🗑️ 삭제", key=f"del_{i}"): to_remove=i
