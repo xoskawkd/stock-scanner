@@ -2665,7 +2665,7 @@ for i, p in enumerate(st.session_state.portfolio):
     elif combined_down and profit < -3:
         act="🔴 즉시 손절 고려"; ac="#ef4444"
         ar=f"시장+섹터 동반하락({sec_nm_d})+손실{profit:.1f}%"
-    elif hold_bottom_check and not hold_bottom_invalid and profit < -5:
+    elif hold_bottom_check and not hold_bottom_invalid:
         act="🟣 과매도 반등 가능성 — 신중 관찰"; ac="#a855f7"
         ar=hold_bottom_check
     elif ar_override_lowbreak and profit < -5:
