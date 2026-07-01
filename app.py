@@ -2446,6 +2446,16 @@ for i, p in enumerate(st.session_state.portfolio):
                             bottom_check = f"🔍 과매도 관찰 구간({_bscore}/7점) — RSI {_rsi_b:.0f} + 20일 {_ret20_b:.0f}%"
             except: pass
 
+        # 섹터 추이
+        watch_sec_nm = ""; watch_sec_st = ""
+        if is_kr:
+            try:
+                _wfull = get_stock_full_regime(name)
+                watch_sec_nm = _wfull.get("sec_name","")
+                _wss = _wfull.get("sec_score", 1)
+                watch_sec_st = "🟢 강세" if _wss>=2 else "🟡 보합" if _wss==1 else "🟠 약세" if _wss==0 else "🔴 급락"
+            except: pass
+
         # 수급
         sup_html=""
         if is_kr and KIS_APP_KEY:
@@ -2500,6 +2510,7 @@ for i, p in enumerate(st.session_state.portfolio):
   <div style="background:#0f172a;padding:8px;border-radius:6px;margin-top:6px;font-size:12px;">
     신호: <span style="font-weight:bold;">{'✅ S3+S4 유지' if signal_ok else ('⚠️ S3만' if s3_on else '❌ 신호소멸')}</span>
   </div>
+  {f'<div style="background:#0f172a;padding:8px;border-radius:6px;margin-top:6px;font-size:11px;"><span style="color:#64748b;">섹터:</span> <span style="color:#94a3b8;">{watch_sec_nm}</span> <span style="margin-left:6px;">{watch_sec_st}</span></div>' if watch_sec_nm else ''}
   {f'<div style="background:#1a2744;border:1px solid #6366f1;padding:8px;border-radius:6px;margin-top:6px;font-size:12px;color:#a5b4fc;">{bottom_check}</div>' if bottom_check else ''}
   {sup_html}
   <div style="background:#0f172a;padding:10px;border-radius:6px;margin-top:6px;border-left:3px solid {bc};">
