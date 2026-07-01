@@ -1718,7 +1718,7 @@ def scan_kr_sector() -> tuple:
                 if cached: item["종목"] = cached
                 _time.sleep(0.05)
             except: pass
-    top5 = sorted(passed, key=lambda x: x["종합점수"], reverse=True)[:5]
+    top5 = sorted(passed, key=lambda x: x.get("종합점수", x.get("점수", 0)), reverse=True)[:5]
     return top5, skips
 
 
@@ -2047,7 +2047,7 @@ def scan_kr():
         with ThreadPoolExecutor(max_workers=5) as ex:
             passed = list(ex.map(_add_supply, passed))
         # 종합점수(차트+수급)로 정렬
-        top5 = sorted(passed, key=lambda x: x["종합점수"], reverse=True)[:5]
+        top5 = sorted(passed, key=lambda x: x.get("종합점수", x.get("점수", 0)), reverse=True)[:5]
     else:
         for r in passed:
             r["수급점수"] = 0
