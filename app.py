@@ -1793,13 +1793,16 @@ def scan_contrarian() -> tuple:
         loss  = (-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
         rsi_s = 100 - 100/(1+gain/loss.replace(0,np.nan))
         rsi   = float(rsi_s.iloc[-1])
-        if rsi > 40: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}  # 급락장 완화
+        if rsi > 35: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}
 
         cur_ref = float(ref_cl.iloc[-1])
 
         # 20일 수익률
         ret20 = (cur_ref - float(ref_cl.iloc[-21]))/float(ref_cl.iloc[-21])*100 if len(ref_cl)>=21 else 0
-        if ret20 > -10: return {"_skip":True,"why":f"낙폭부족({ret20:.1f}%)"}  # 급락장 완화
+        # 20일 낙폭 -15% 이상 OR 오늘 단일 낙폭 -5% 이상 (급락 당일 포착)
+        today_ret = (float(cl.iloc[-1]) - float(cl.iloc[-2])) / float(cl.iloc[-2]) * 100 if len(cl) >= 2 else 0
+        if ret20 > -15 and today_ret > -5:
+            return {"_skip":True,"why":f"낙폭부족(20일:{ret20:.1f}% 오늘:{today_ret:.1f}%)"}
         if ret20 < -35: return {"_skip":True,"why":f"급락악재제외({ret20:.1f}%)"}
 
         # 5일 수익률 (급락 제외)
@@ -1882,9 +1885,9 @@ def scan_contrarian() -> tuple:
         # pass 기준 — 시장 상태 연동
         _mkt_r = get_market_regime()
         _r1 = _mkt_r.get("ret1", 0)
-        if _r1 <= -5:   ct_pass = 6    # 극공포: 최대 완화
-        elif _r1 <= -3: ct_pass = 8    # 급락장: 완화
-        elif _r1 <= -1: ct_pass = 12   # 약세장: 기본
+        if _r1 <= -5:   ct_pass = 8    # 극공포 (-5%↓): 완화
+        elif _r1 <= -3: ct_pass = 10   # 급락장 (-3%↓): 기본
+        elif _r1 <= -1: ct_pass = 12   # 약세장 (-1%↓): 중간
         else:           ct_pass = 15   # 중립 이상: 엄격
         if score < ct_pass: return {"_skip":True,"why":f"점수부족({score}/{ct_pass}점)"}
 
@@ -3093,7 +3096,7 @@ with tab_ct:
             st.markdown(f"""
 <div style="background:#1e293b;padding:14px;border-radius:10px;border-left:4px solid {gc};margin-bottom:8px;">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-    <b>{medals_ct[i]} {item['종목']}</b>
+    <b>{medals_ct[i]} {item['종목']}</b> <span style="color:#64748b;font-size:11px;">({item.get('코드','')})</span>
     <span style="background:{gc};color:#000;font-size:11px;padding:2px 6px;border-radius:4px;">{item.get('등급','?')} {item['점수']}점</span>
   </div>
   <div style="font-size:11px;color:#f59e0b;margin-bottom:6px;">⚡ 단기 반등 전략 — 손절 철저히</div>
