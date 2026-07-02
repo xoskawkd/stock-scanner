@@ -1704,11 +1704,13 @@ def scan_kr_sector() -> tuple:
     with ThreadPoolExecutor(max_workers=8) as ex:
         raw = list(ex.map(_fetch_leader, leaders))
 
+    passed = [x for x in raw if not x.get("_skip") and isinstance(x, dict)]
+    skips  = [x for x in raw if x.get("_skip") and isinstance(x, dict)]
+
     # KIS 가격 재조회 — 상위 20개만 순차 처리 (rate limit 방지)
     if KIS_APP_KEY and KIS_APP_SECRET:
         import time as _time
-        _cands = [item for item in raw if not item.get("_skip")]
-        for item in _cands[:20]:
+        for item in passed[:20]:
             try:
                 p_kis, src_kis = kis_price(item["코드"])
                 if p_kis > 0:
@@ -1718,6 +1720,7 @@ def scan_kr_sector() -> tuple:
                 if cached: item["종목"] = cached
                 _time.sleep(0.05)
             except: pass
+
     top5 = sorted(passed, key=lambda x: x.get("종합점수", x.get("점수", 0)), reverse=True)[:5]
     return top5, skips
 
@@ -2047,7 +2050,8 @@ def scan_kr():
         with ThreadPoolExecutor(max_workers=5) as ex:
             passed = list(ex.map(_add_supply, passed))
         # 종합점수(차트+수급)로 정렬
-        top5 = sorted(passed, key=lambda x: x.get("종합점수", x.get("점수", 0)), reverse=True)[:5]
+        passed = [x for x in passed if isinstance(x, dict)]  # dict 아닌 항목 제거
+    top5 = sorted(passed, key=lambda x: x.get("종합점수", x.get("점수", 0)), reverse=True)[:5]
     else:
         for r in passed:
             r["수급점수"] = 0
