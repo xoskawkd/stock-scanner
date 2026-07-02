@@ -277,7 +277,9 @@ def kis_name(code: str) -> str:
                 headers=h, timeout=3).json()
             out = r.get("output", {})
             n = out.get("hts_kor_isnm","").strip()
-            if n: return n
+            if n:
+                _KIS_NAME_CACHE[code] = n  # 캐시 저장
+                return n
     except: pass
     # 방법 2: search-stock-info
     try:
@@ -786,10 +788,10 @@ def get_dynamic_pass_score(market: dict) -> int:
     """
     base = 12
     regime_score = market.get("score", 2)
-    if regime_score == 3:   return max(base - 4, 8)   # 상승장: 8점 (완화)
-    elif regime_score == 2: return base                # 중립: 12점 (기본)
-    elif regime_score == 1: return base + 8            # 조정장: 20점 (강화)
-    else:                   return base + 15           # 하락장: 27점 (매우 강화)
+    if regime_score == 3:   return max(base - 4, 8)   # 상승장: 8점
+    elif regime_score == 2: return base                # 중립: 12점
+    elif regime_score == 1: return base + 6            # 조정장: 18점 (기존 20→18)
+    else:                   return base + 11           # 하락장: 23점 (기존 27→23)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1791,13 +1793,13 @@ def scan_contrarian() -> tuple:
         loss  = (-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
         rsi_s = 100 - 100/(1+gain/loss.replace(0,np.nan))
         rsi   = float(rsi_s.iloc[-1])
-        if rsi > 35: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}
+        if rsi > 40: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}  # 급락장 완화
 
         cur_ref = float(ref_cl.iloc[-1])
 
         # 20일 수익률
         ret20 = (cur_ref - float(ref_cl.iloc[-21]))/float(ref_cl.iloc[-21])*100 if len(ref_cl)>=21 else 0
-        if ret20 > -15: return {"_skip":True,"why":f"낙폭부족({ret20:.1f}%)"}
+        if ret20 > -10: return {"_skip":True,"why":f"낙폭부족({ret20:.1f}%)"}  # 급락장 완화
         if ret20 < -35: return {"_skip":True,"why":f"급락악재제외({ret20:.1f}%)"}
 
         # 5일 수익률 (급락 제외)
@@ -1880,7 +1882,8 @@ def scan_contrarian() -> tuple:
         # pass 기준 — 시장 상태 연동
         _mkt_r = get_market_regime()
         _r1 = _mkt_r.get("ret1", 0)
-        if _r1 <= -3:   ct_pass = 10   # 급락장: 완화
+        if _r1 <= -5:   ct_pass = 6    # 극공포: 최대 완화
+        elif _r1 <= -3: ct_pass = 8    # 급락장: 완화
         elif _r1 <= -1: ct_pass = 12   # 약세장: 기본
         else:           ct_pass = 15   # 중립 이상: 엄격
         if score < ct_pass: return {"_skip":True,"why":f"점수부족({score}/{ct_pass}점)"}
@@ -2127,17 +2130,18 @@ def portfolio_data(name: str) -> dict:
         p, src = kr_price(name)
         df = portfolio_ohlcv_kr(name)
         # 종목명: kis_name 직접 호출 (ttl=86400 캐시, 빠름)
-        stock_name = ""
-        if KIS_APP_KEY:
-            stock_name = kis_name(name)  # KIS search-stock-info
-        if not stock_name:
-            stock_name = _KIS_NAME_CACHE.get(name, "")
+        # 종목명 조회: KIS 캐시 → KIS API → KRX
+        stock_name = _KIS_NAME_CACHE.get(name, "")
+        if not stock_name and KIS_APP_KEY:
+            stock_name = kis_name(name)
+            if stock_name: _KIS_NAME_CACHE[name] = stock_name
         if not stock_name:
             try:
                 lst = krx_listing()
                 row = lst[lst["Code"]==name]
                 if not row.empty:
                     stock_name = str(row["Name"].values[0])
+                    if stock_name: _KIS_NAME_CACHE[name] = stock_name
             except: pass
         label = f"{stock_name} ({name})" if stock_name and stock_name != name else name
 
@@ -3069,7 +3073,7 @@ with tab_ct:
 
     if not st.session_state.get("scan_done"):
         st.info("📊 추천 재스캔 버튼을 먼저 눌러주세요.")
-        ct_top = []
+        ct_top = []; ct_skip = []
     else:
         with st.spinner("역발상 스캔 중..."):
             ct_top, ct_skip = scan_contrarian()
