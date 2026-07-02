@@ -2049,8 +2049,6 @@ def scan_kr():
             return r
         with ThreadPoolExecutor(max_workers=5) as ex:
             passed = list(ex.map(_add_supply, passed))
-        # 종합점수(차트+수급)로 정렬
-        passed = [x for x in passed if isinstance(x, dict)]  # dict 아닌 항목 제거
     else:
         for r in passed:
             r["수급점수"] = 0
