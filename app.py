@@ -2051,13 +2051,12 @@ def scan_kr():
             passed = list(ex.map(_add_supply, passed))
         # 종합점수(차트+수급)로 정렬
         passed = [x for x in passed if isinstance(x, dict)]  # dict 아닌 항목 제거
-    top5 = sorted(passed, key=lambda x: x.get("종합점수", x.get("점수", 0)), reverse=True)[:5]
     else:
         for r in passed:
             r["수급점수"] = 0
-            r["종합점수"] = r["점수"]
-        top5 = sorted(passed, key=lambda x: x["점수"], reverse=True)[:5]
+            r["종합점수"] = r.get("점수", 0)
 
+    top5 = sorted(passed, key=lambda x: x.get("종합점수", x.get("점수", 0)), reverse=True)[:5]
     return top5, skips
 
 @st.cache_data(ttl=3600, show_spinner=False)  # 1시간
