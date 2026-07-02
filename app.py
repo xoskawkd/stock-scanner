@@ -1774,21 +1774,16 @@ def scan_contrarian() -> tuple:
             if daily_amount < 500_000_000:
                 return {"_skip":True,"why":f"거래대금부족({daily_amount/1e8:.1f}억)"}
 
-        # 항상 전일 종가 기준 (오늘 반등 봉 제외)
-        # 오늘 봉이 포함되면 RSI/낙폭이 왜곡됨
-        if len(cl) >= 2:
-            ref_cl = cl.iloc[:-1]
-            ref_vo = vo.iloc[:-1]
-        else:
-            ref_cl = cl
-            ref_vo = vo
+        # 데이터 기준: 장 마감 후면 오늘 종가, 장 중이면 오늘 봉 포함
+        # (역발상은 급락 당일 포착이 핵심 — 오늘 봉 제외하면 당일 급락 못 잡음)
+        ref_cl = cl
+        ref_vo = vo
 
-        # 거래량 조건 (최근 급등일 기준)
+        # 거래량 조건 — 오늘 포함 최근 3일 중 최대 (급락 당일 거래량 폭발 포착)
         avg_vol_ref = float(ref_vo.rolling(20).mean().iloc[-1])
-        # 최근 5일 중 MA20의 1.5배 이상인 날이 하루라도 있으면 통과
-        vol_max5 = float(ref_vo.iloc[-5:].max())
-        vol_ratio = vol_max5 / avg_vol_ref if avg_vol_ref > 0 else 0
-        if vol_ratio < 2.0: return {"_skip":True,"why":f"거래량부족({vol_ratio:.1f}배)"}
+        vol_max3 = float(ref_vo.iloc[-3:].max())
+        vol_ratio = vol_max3 / avg_vol_ref if avg_vol_ref > 0 else 0
+        if vol_ratio < 1.5: return {"_skip":True,"why":f"거래량부족({vol_ratio:.1f}배)"}
 
         # RSI (전일 기준)
         delta = ref_cl.diff()
@@ -3081,6 +3076,11 @@ with tab_ct:
 
     if not ct_top:
         st.info("조건 충족 종목 없음 — 과매도 + 거래량 + 수급 조건 동시 충족 종목이 없어요.")
+        # 디버그: 탈락 이유 상위 10개 표시
+        if ct_skip:
+            from collections import Counter
+            why_count = Counter(s.get("why","") for s in ct_skip if isinstance(s,dict))
+            st.caption("📊 탈락 이유: " + " / ".join(f"{w}({c}개)" for w,c in why_count.most_common(5)))
     else:
         medals_ct = ["🥇","🥈","🥉","4️⃣","5️⃣"]
         for i, item in enumerate(ct_top):
