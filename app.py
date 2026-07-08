@@ -1748,8 +1748,17 @@ def scan_contrarian() -> tuple:
     kospi_ret20 = 0.0
     try:
         mkt = get_market_regime()
-        kospi_ret20 = mkt.get("ret5", 0) * 4  # 5일 수익률로 20일 추정
-    except: pass
+        # 코스피 20일 수익률 직접 계산
+        import yfinance as yf
+        ks = yf.Ticker("^KS11").history(period="25d")
+        if len(ks) >= 20:
+            kospi_ret20 = (float(ks["Close"].iloc[-1]) - float(ks["Close"].iloc[-20])) / float(ks["Close"].iloc[-20]) * 100
+        else:
+            kospi_ret20 = mkt.get("ret5", 0) * 3  # fallback
+    except:
+        try:
+            kospi_ret20 = get_market_regime().get("ret5", 0) * 3
+        except: pass
 
     def _fetch_ct(item):
         code, name = item
@@ -2261,9 +2270,9 @@ if st.sidebar.button("🗑️ 전체 캐시 초기화", use_container_width=True
     scan_kr.clear(); scan_us.clear(); scan_kr_sector.clear(); scan_contrarian.clear()
     ohlcv_kr.clear(); ohlcv_us.clear()
     krx_listing.clear(); us_tickers.clear()
-    kis_price.clear()
     kis_investor_trend.clear(); kis_name.clear()
-    st.session_state["scan_done"] = False  # 재스캔 필요
+    _KIS_NAME_CACHE.clear()
+    st.session_state["scan_done"] = False
     st.rerun()
 
 st.title("🚀 Tae Scanner v9")
