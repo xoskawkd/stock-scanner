@@ -875,6 +875,64 @@ def get_tomorrow_outlook() -> dict:
     return result
 
 
+
+if not etf_data:
+    st.warning("KIS API 연결 필요 — ETF 수급 조회 불가")
+else:
+    lev  = etf_data.get("lev_kospi", {})
+    inv  = etf_data.get("inv_kospi", {})
+    lev2 = etf_data.get("lev_kosdaq", {})
+    inv2 = etf_data.get("inv_kosdaq", {})
+
+    lev_flip  = lev.get("flip_buy", False)
+    inv_flip  = inv.get("flip_sell", False)
+    lev_buy   = lev.get("is_buying", False)
+    inv_buy   = inv.get("is_buying", False)
+    spot      = etf_data.get("spot_kospi", {})
+    spot_buy  = spot.get("is_buying", False)
+    spot_flip = spot.get("flip_buy", False)
+
+    # 현물 + ETF 순포지션으로 FESI 판정
+    if spot_buy and (lev_flip or lev_buy) and not inv_buy:
+        # Case 1: 현물+ 레버+ → 가장 강한 상승
+        fesi = "🟢🟢 강한 상승 포지션"
+        fesi_color = "#10b981"
+        fesi_action = "✅ 스캐너 PASS 종목 적극 진입"
+        fesi_ref = "📊 참고: 현물 매수 + 레버리지 동반 (강한 상승 확신)"
+    elif spot_buy and not lev_buy:
+        # Case 2: 현물+ 레버- → 순수 현물 매수 (안정적)
+        fesi = "🟢 현물 매수 (중기 상승)"
+        fesi_color = "#10b981"
+        fesi_action = "✅ 스캐너 PASS 종목 진입 고려"
+        fesi_ref = "📊 참고: 레버리지 없는 순수 현물 매수 (중장기 관점)"
+    elif not spot_buy and lev_buy and not inv_buy:
+        # Case 3: 현물- 레버+ → 개별주엔 부정적, 지수 단기 베팅
+        fesi = "🟡 지수 단기 베팅 (개별주 주의)"
+        fesi_color = "#f59e0b"
+        fesi_action = "⚠️ 개별주 신규매수 자제 — 지수 ETF 단기 베팅 중"
+        fesi_ref = "📊 현물 매도 + 레버 매수: 개별주 매도 압력 가능"
+    elif not spot_buy and inv_buy:
+        # Case 4: 현물- 인버스+ → 가장 강한 하락 신호
+        fesi = "🔴🔴 강한 하락 포지션"
+        fesi_color = "#ef4444"
+        fesi_action = "⛔ 신규매수 금지 — 외국인 강한 하락 베팅"
+        fesi_ref = "📊 현물 매도 + 인버스 매수: 가장 강한 하락 신호"
+    elif inv_buy and not spot_buy:
+        fesi = "🔴 하락 헤지 중"
+        fesi_color = "#ef4444"
+        fesi_action = "⛔ 신규매수 자제"
+        fesi_ref = "📊 참고: 인버스 ETF 관심 구간 (직접매수 신중)"
+    elif spot_flip:
+        fesi = "🟢 현물 매수 전환"
+        fesi_color = "#10b981"
+        fesi_action = "✅ 방향 전환 — 스캐너 PASS 종목 진입 고려"
+        fesi_ref = "📊 외국인 현물 순매수 전환"
+    else:
+        fesi = "⬜ 외국인 관망"
+        fesi_color = "#64748b"
+        fesi_action = "⚠️ 중립 — 고점수 종목만 소량 진입"
+        fesi_ref = ""
+
 def is_kr_open() -> bool:
     """한국 장 중 여부 (09:00~15:30) — KST 기준"""
     try:
@@ -2895,6 +2953,28 @@ else:
         kr_top, kr_skip = scan_kr()
         us_top, us_skip = scan_us()
 
+# FESI 사전 계산 (TOP5 카드 연동용)
+_fesi_data = get_etf_supply()
+_fesi_spot = _fesi_data.get("spot_kospi", {})
+_fesi_lev  = _fesi_data.get("lev_kospi", {})
+_fesi_inv  = _fesi_data.get("inv_kospi", {})
+_spot_buy  = _fesi_spot.get("is_buying", False)
+_lev_buy   = _fesi_lev.get("is_buying", False)
+_inv_buy   = _fesi_inv.get("is_buying", False)
+_lev_flip  = _fesi_lev.get("flip_buy", False)
+
+if _fesi_data and _spot_buy and (_lev_flip or _lev_buy) and not _inv_buy:
+    _fesi_signal = "🟢🟢 강한 상승"; _fesi_ok = True
+elif _fesi_data and _spot_buy and not _lev_buy:
+    _fesi_signal = "🟢 현물 매수"; _fesi_ok = True
+elif _fesi_data and not _spot_buy and _lev_buy and not _inv_buy:
+    _fesi_signal = "🟡 지수 베팅(개별주 주의)"; _fesi_ok = False
+elif _fesi_data and _inv_buy and not _spot_buy:
+    _fesi_signal = "🔴 하락 헤지"; _fesi_ok = False
+else:
+    _fesi_signal = ""; _fesi_ok = True  # 중립 or 데이터 없음
+
+
 # ── 내일 매수 환경 판단 (스캔 완료 후 1회만 렌더링) ──
 tomorrow = get_tomorrow_outlook()
 t_color  = tomorrow["color"]
@@ -3019,6 +3099,15 @@ def render(title, data, currency):
 
 tab_kr, tab_sector, tab_us, tab_etf = st.tabs(["🔥 국내 TOP5", "🏆 섹터 대장 TOP5", "🇺🇸 해외 TOP5", "📊 ETF수급"])
 with tab_kr:
+    # FESI 연동 배너
+    if _fesi_signal:
+        _fc = "#10b981" if _fesi_ok else "#ef4444" if "🔴" in _fesi_signal else "#f59e0b"
+        _msg = "✅ 스캐너 종목 진입 고려" if _fesi_ok else "⛔ 신규매수 자제 — ETF 수급 부정적"
+        st.markdown(f"""<div style="background:#0f172a;border:1px solid {_fc};border-radius:6px;
+padding:8px 12px;margin-bottom:8px;font-size:12px;">
+<span style="color:{_fc};font-weight:bold;">📊 FESI {_fesi_signal}</span>
+&nbsp;—&nbsp; {_msg}
+</div>""", unsafe_allow_html=True)
     render("국내 폭등 예측 TOP 5", kr_top, "KRW")
 with tab_sector:
     st.caption("각 업종 시총 1위 종목 중 신호 강도 순 TOP5")
@@ -3071,122 +3160,8 @@ with tab_us:
 with tab_etf:
     st.caption("📊 ETF 수급 — 외국인 레버리지/인버스 베팅 추적")
 
-    @st.cache_data(ttl=300, show_spinner=False)
-    def get_etf_supply():
-        """레버리지/인버스 ETF 외국인 수급 — 전환 신호 기반 FESI"""
-        ETFs = {
-            "KODEX 레버리지":          ("122630", "lev_kospi"),
-            "KODEX 인버스":            ("114800", "inv_kospi"),
-            "KODEX 코스닥150레버리지": ("233740", "lev_kosdaq"),
-            "KODEX 코스닥150인버스":   ("251340", "inv_kosdaq"),
-        }
-        result = {}
-        if not KIS_APP_KEY: return result
-        for name, (code, key) in ETFs.items():
-            try:
-                trend = kis_investor_trend(code, 5)
-                if trend and len(trend) >= 2:
-                    today = trend[0].get("외국인", 0)
-                    prev  = trend[1].get("외국인", 0)
-                    d3    = sum(t.get("외국인",0) for t in trend[:3])
-                    # 전환 신호 (방향 변화가 핵심)
-                    lev_flip = today > 0 and prev <= 0   # 매도→매수
-                    inv_flip = today < 0 and prev >= 0   # 매수→매도
-                    result[key] = {
-                        "name": name, "code": code,
-                        "today": today, "prev": prev, "d3": d3,
-                        "flip_buy":  lev_flip,   # 매수 전환
-                        "flip_sell": inv_flip,   # 매도 전환
-                        "is_buying": today > 0,
-                    }
-            except: pass
 
-        # 현물 코스피 외국인 순매수 조회
-        try:
-            h = kis_headers("FHKST01010900")
-            if h:
-                r = requests.get(
-                    f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-investor",
-                    params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":"0001",
-                            "fid_begin_date":(datetime.now()-timedelta(days=7)).strftime("%Y%m%d"),
-                            "fid_end_date":datetime.now().strftime("%Y%m%d"),
-                            "fid_period_div_code":"D"},
-                    headers=h, timeout=5).json()
-                rows = r.get("output2", r.get("output", []))
-                if rows and len(rows) >= 2:
-                    spot_today = int(rows[0].get("frgn_ntby_qty", 0) or 0)
-                    spot_prev  = int(rows[1].get("frgn_ntby_qty", 0) or 0)
-                    spot_d3    = sum(int(row.get("frgn_ntby_qty",0) or 0) for row in rows[:3])
-                    result["spot_kospi"] = {
-                        "name": "코스피 현물",
-                        "today": spot_today, "prev": spot_prev, "d3": spot_d3,
-                        "is_buying": spot_today > 0,
-                        "flip_buy":  spot_today > 0 and spot_prev <= 0,
-                        "flip_sell": spot_today < 0 and spot_prev >= 0,
-                    }
-        except: pass
-        return result
-
-    etf_data = get_etf_supply()
-
-    if not etf_data:
-        st.warning("KIS API 연결 필요 — ETF 수급 조회 불가")
-    else:
-        lev  = etf_data.get("lev_kospi", {})
-        inv  = etf_data.get("inv_kospi", {})
-        lev2 = etf_data.get("lev_kosdaq", {})
-        inv2 = etf_data.get("inv_kosdaq", {})
-
-        lev_flip  = lev.get("flip_buy", False)
-        inv_flip  = inv.get("flip_sell", False)
-        lev_buy   = lev.get("is_buying", False)
-        inv_buy   = inv.get("is_buying", False)
-        spot      = etf_data.get("spot_kospi", {})
-        spot_buy  = spot.get("is_buying", False)
-        spot_flip = spot.get("flip_buy", False)
-
-        # 현물 + ETF 순포지션으로 FESI 판정
-        if spot_buy and (lev_flip or lev_buy) and not inv_buy:
-            # Case 1: 현물+ 레버+ → 가장 강한 상승
-            fesi = "🟢🟢 강한 상승 포지션"
-            fesi_color = "#10b981"
-            fesi_action = "✅ 스캐너 PASS 종목 적극 진입"
-            fesi_ref = "📊 참고: 현물 매수 + 레버리지 동반 (강한 상승 확신)"
-        elif spot_buy and not lev_buy:
-            # Case 2: 현물+ 레버- → 순수 현물 매수 (안정적)
-            fesi = "🟢 현물 매수 (중기 상승)"
-            fesi_color = "#10b981"
-            fesi_action = "✅ 스캐너 PASS 종목 진입 고려"
-            fesi_ref = "📊 참고: 레버리지 없는 순수 현물 매수 (중장기 관점)"
-        elif not spot_buy and lev_buy and not inv_buy:
-            # Case 3: 현물- 레버+ → 개별주엔 부정적, 지수 단기 베팅
-            fesi = "🟡 지수 단기 베팅 (개별주 주의)"
-            fesi_color = "#f59e0b"
-            fesi_action = "⚠️ 개별주 신규매수 자제 — 지수 ETF 단기 베팅 중"
-            fesi_ref = "📊 현물 매도 + 레버 매수: 개별주 매도 압력 가능"
-        elif not spot_buy and inv_buy:
-            # Case 4: 현물- 인버스+ → 가장 강한 하락 신호
-            fesi = "🔴🔴 강한 하락 포지션"
-            fesi_color = "#ef4444"
-            fesi_action = "⛔ 신규매수 금지 — 외국인 강한 하락 베팅"
-            fesi_ref = "📊 현물 매도 + 인버스 매수: 가장 강한 하락 신호"
-        elif inv_buy and not spot_buy:
-            fesi = "🔴 하락 헤지 중"
-            fesi_color = "#ef4444"
-            fesi_action = "⛔ 신규매수 자제"
-            fesi_ref = "📊 참고: 인버스 ETF 관심 구간 (직접매수 신중)"
-        elif spot_flip:
-            fesi = "🟢 현물 매수 전환"
-            fesi_color = "#10b981"
-            fesi_action = "✅ 방향 전환 — 스캐너 PASS 종목 진입 고려"
-            fesi_ref = "📊 외국인 현물 순매수 전환"
-        else:
-            fesi = "⬜ 외국인 관망"
-            fesi_color = "#64748b"
-            fesi_action = "⚠️ 중립 — 고점수 종목만 소량 진입"
-            fesi_ref = ""
-
-        st.markdown(f"""
+    st.markdown(f"""
 <div style="background:#0f172a;border:2px solid {fesi_color};
             border-radius:10px;padding:14px;margin-bottom:10px;">
   <div style="font-size:15px;font-weight:bold;color:{fesi_color};margin-bottom:6px;">
@@ -3196,12 +3171,12 @@ with tab_etf:
   {f'<div style="font-size:11px;color:#64748b;margin-top:4px;">{fesi_ref}</div>' if fesi_ref else ''}
 </div>""", unsafe_allow_html=True)
 
-        # 현물 수급 표시
-        if spot:
-            spot_today = spot.get("today", 0)
-            spot_color = "#10b981" if spot_today > 0 else "#ef4444" if spot_today < 0 else "#64748b"
-            spot_flip_label = " 🔄매수전환" if spot.get("flip_buy") else " 🔄매도전환" if spot.get("flip_sell") else ""
-            st.markdown(f"""
+    # 현물 수급 표시
+    if spot:
+        spot_today = spot.get("today", 0)
+        spot_color = "#10b981" if spot_today > 0 else "#ef4444" if spot_today < 0 else "#64748b"
+        spot_flip_label = " 🔄매수전환" if spot.get("flip_buy") else " 🔄매도전환" if spot.get("flip_sell") else ""
+        st.markdown(f"""
 <div style="background:#1a2744;border:2px solid {spot_color};padding:10px 14px;border-radius:8px;margin-bottom:8px;">
   <div style="display:flex;justify-content:space-between;">
     <span style="font-size:12px;font-weight:bold;">🏛️ 코스피 현물</span>
