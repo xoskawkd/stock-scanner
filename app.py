@@ -2922,19 +2922,19 @@ with tab_us:
     render("해외 폭등 예측 TOP 5", us_top, "USD")
 with tab_etf:
     st.caption("📊 ETF 수급 — 외국인 레버리지/인버스 베팅 추적")
-    if not etf_data:
+    if not _fesi_data:
         st.warning("KIS API 연결 필요 — ETF 수급 조회 불가")
     else:
-        lev  = etf_data.get("lev_kospi", {})
-        inv  = etf_data.get("inv_kospi", {})
-        lev2 = etf_data.get("lev_kosdaq", {})
-        inv2 = etf_data.get("inv_kosdaq", {})
+        lev  = _fesi_data.get("lev_kospi", {})
+        inv  = _fesi_data.get("inv_kospi", {})
+        lev2 = _fesi_data.get("lev_kosdaq", {})
+        inv2 = _fesi_data.get("inv_kosdaq", {})
 
         lev_flip  = lev.get("flip_buy", False)
         inv_flip  = inv.get("flip_sell", False)
         lev_buy   = lev.get("is_buying", False)
         inv_buy   = inv.get("is_buying", False)
-        spot      = etf_data.get("spot_kospi", {})
+        spot      = _fesi_data.get("spot_kospi", {})
         spot_buy  = spot.get("is_buying", False)
         spot_flip = spot.get("flip_buy", False)
 
@@ -3056,17 +3056,17 @@ _US_HOLIDAYS = {
 }
 
 def is_us_open():
-        if not ZoneInfo: return True
-        try:
-            now = datetime.now(ZoneInfo("America/New_York"))
-            if now.weekday() >= 5: return False
-            # 휴장일 체크
-            holidays = _US_HOLIDAYS.get(now.year, set())  # 없는 연도는 빈 set
-            if (now.month, now.day) in holidays: return False
-            open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
-            close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
-            return open_t <= now <= close_t
-        except: return True
+    if not ZoneInfo: return True
+    try:
+        now = datetime.now(ZoneInfo("America/New_York"))
+        if now.weekday() >= 5: return False
+        # 휴장일 체크
+        holidays = _US_HOLIDAYS.get(now.year, set())  # 없는 연도는 빈 set
+        if (now.month, now.day) in holidays: return False
+        open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+        close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+        return open_t <= now <= close_t
+    except: return True
 
 @st.cache_data(ttl=60, show_spinner=False)
 def us_price(ticker: str) -> tuple:
