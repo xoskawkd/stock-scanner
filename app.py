@@ -876,243 +876,6 @@ def get_tomorrow_outlook() -> dict:
 
 
 
-if not etf_data:
-    st.warning("KIS API 연결 필요 — ETF 수급 조회 불가")
-else:
-    lev  = etf_data.get("lev_kospi", {})
-    inv  = etf_data.get("inv_kospi", {})
-    lev2 = etf_data.get("lev_kosdaq", {})
-    inv2 = etf_data.get("inv_kosdaq", {})
-
-    lev_flip  = lev.get("flip_buy", False)
-    inv_flip  = inv.get("flip_sell", False)
-    lev_buy   = lev.get("is_buying", False)
-    inv_buy   = inv.get("is_buying", False)
-    spot      = etf_data.get("spot_kospi", {})
-    spot_buy  = spot.get("is_buying", False)
-    spot_flip = spot.get("flip_buy", False)
-
-    # 현물 + ETF 순포지션으로 FESI 판정
-    if spot_buy and (lev_flip or lev_buy) and not inv_buy:
-        # Case 1: 현물+ 레버+ → 가장 강한 상승
-        fesi = "🟢🟢 강한 상승 포지션"
-        fesi_color = "#10b981"
-        fesi_action = "✅ 스캐너 PASS 종목 적극 진입"
-        fesi_ref = "📊 참고: 현물 매수 + 레버리지 동반 (강한 상승 확신)"
-    elif spot_buy and not lev_buy:
-        # Case 2: 현물+ 레버- → 순수 현물 매수 (안정적)
-        fesi = "🟢 현물 매수 (중기 상승)"
-        fesi_color = "#10b981"
-        fesi_action = "✅ 스캐너 PASS 종목 진입 고려"
-        fesi_ref = "📊 참고: 레버리지 없는 순수 현물 매수 (중장기 관점)"
-    elif not spot_buy and lev_buy and not inv_buy:
-        # Case 3: 현물- 레버+ → 개별주엔 부정적, 지수 단기 베팅
-        fesi = "🟡 지수 단기 베팅 (개별주 주의)"
-        fesi_color = "#f59e0b"
-        fesi_action = "⚠️ 개별주 신규매수 자제 — 지수 ETF 단기 베팅 중"
-        fesi_ref = "📊 현물 매도 + 레버 매수: 개별주 매도 압력 가능"
-    elif not spot_buy and inv_buy:
-        # Case 4: 현물- 인버스+ → 가장 강한 하락 신호
-        fesi = "🔴🔴 강한 하락 포지션"
-        fesi_color = "#ef4444"
-        fesi_action = "⛔ 신규매수 금지 — 외국인 강한 하락 베팅"
-        fesi_ref = "📊 현물 매도 + 인버스 매수: 가장 강한 하락 신호"
-    elif inv_buy and not spot_buy:
-        fesi = "🔴 하락 헤지 중"
-        fesi_color = "#ef4444"
-        fesi_action = "⛔ 신규매수 자제"
-        fesi_ref = "📊 참고: 인버스 ETF 관심 구간 (직접매수 신중)"
-    elif spot_flip:
-        fesi = "🟢 현물 매수 전환"
-        fesi_color = "#10b981"
-        fesi_action = "✅ 방향 전환 — 스캐너 PASS 종목 진입 고려"
-        fesi_ref = "📊 외국인 현물 순매수 전환"
-    else:
-        fesi = "⬜ 외국인 관망"
-        fesi_color = "#64748b"
-        fesi_action = "⚠️ 중립 — 고점수 종목만 소량 진입"
-        fesi_ref = ""
-
-def is_kr_open() -> bool:
-    """한국 장 중 여부 (09:00~15:30) — KST 기준"""
-    try:
-        if ZoneInfo:
-            now = datetime.now(ZoneInfo("Asia/Seoul"))
-        else:
-            # UTC+9 수동 변환
-            now = datetime.utcnow() + timedelta(hours=9)
-        if now.weekday() >= 5: return False
-        open_t  = now.replace(hour=9,  minute=0,  second=0, microsecond=0)
-        close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
-        return open_t <= now <= close_t
-    except: return False
-
-
-# 미국 주요 휴장일
-_US_HOLIDAYS = {
-    2025: {(1,1),(1,20),(2,17),(4,18),(5,26),(6,19),(7,4),(9,1),(11,27),(12,25)},
-    2026: {(1,1),(1,19),(2,16),(4,3),(5,25),(6,19),(7,4),(9,7),(11,26),(12,25)},
-    2027: {(1,1),(1,18),(2,15),(4,2),(5,31),(6,19),(7,4),(9,6),(11,25),(12,24)},
-}
-
-def is_us_open():
-    if not ZoneInfo: return True
-    try:
-        now = datetime.now(ZoneInfo("America/New_York"))
-        if now.weekday() >= 5: return False
-        # 휴장일 체크
-        holidays = _US_HOLIDAYS.get(now.year, set())  # 없는 연도는 빈 set
-        if (now.month, now.day) in holidays: return False
-        open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
-        close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
-        return open_t <= now <= close_t
-    except: return True
-
-@st.cache_data(ttl=60, show_spinner=False)
-def us_price(ticker: str) -> tuple:
-    if FINNHUB_API_KEY:
-        try:
-            r = requests.get("https://finnhub.io/api/v1/quote",
-                params={"symbol":ticker,"token":FINNHUB_API_KEY},timeout=3).json()
-            c,pc = float(r.get("c",0) or 0), float(r.get("pc",0) or 0)
-            if is_us_open() and c>0: return c,"Finnhub"
-            if not is_us_open() and pc>0: return pc,"Finnhub(종가)"
-            if c>0: return c,"Finnhub"
-        except: pass
-    try:
-        t = yf.Ticker(ticker)
-        df = t.history(period="1d",interval="1m")
-        if not df.empty:
-            p = float(df["Close"].dropna().iloc[-1])
-            if p>0: return p,"yfinance"
-    except: pass
-    return 0.0,"실패"
-
-def us_prepost(ticker: str) -> tuple:
-    """장외가 조회 — 캐시 없음 (실시간)"""
-    try:
-        t = yf.Ticker(ticker)
-        reg = t.history(period="1d",interval="1m",prepost=False)
-        reg_p = float(reg["Close"].dropna().iloc[-1]) if not reg.empty else 0
-        pp = t.history(period="1d",interval="1m",prepost=True)
-        if pp.empty: return 0,""
-        pp_p = float(pp["Close"].dropna().iloc[-1])
-        if not ZoneInfo: return pp_p,"장외"
-        now = datetime.now(ZoneInfo("America/New_York"))
-        o = now.replace(hour=9,minute=30,second=0)
-        c = now.replace(hour=16,minute=0,second=0)
-        pre = now.replace(hour=4,minute=0,second=0)
-        aft = now.replace(hour=20,minute=0,second=0)
-        if o<=now<=c: sess="🏛️정규장"
-        elif pre<=now<o: sess="🌅프리마켓"
-        elif c<now<=aft: sess="🌙애프터마켓"
-        else: sess="🌙애프터마켓"  # 자정 이후도 애프터마켓으로 표시
-        diff = (pp_p-reg_p)/reg_p*100 if reg_p>0 else 0
-        # 정규장 중엔 차이 없으면 표시 안함
-        if sess == "🏛️정규장" and abs(diff) < 0.05: return 0,""
-        # 그 외엔 항상 표시
-        return pp_p, f"{sess} {diff:+.1f}%"
-    except: return 0,""
-
-# ============================================================
-# OHLCV
-# ============================================================
-@st.cache_data(ttl=1800, show_spinner=False)
-def ohlcv_kr(code):
-    try:
-        df = fdr.DataReader(code, start="2024-01-01")
-        if df is not None and len(df)>=60:
-            df.columns=[c.lower() for c in df.columns]
-            # 마지막 봉이 너무 오래됐으면 stale 데이터
-            last_dt = df.index[-1]
-            try:
-                last_dt = pd.Timestamp(last_dt).tz_localize(None)
-                days_old = (datetime.now() - last_dt.to_pydatetime()).days
-                if days_old > 10:  # 10일 이상 오래된 데이터
-                    return None
-            except: pass
-            return df
-    except: pass
-    return None
-
-@st.cache_data(ttl=300, show_spinner=False)
-def portfolio_ohlcv_kr(code):
-    """보유/관심종목 전용 ohlcv — scan_kr과 독립 캐시"""
-    try:
-        import FinanceDataReader as fdr
-        df = fdr.DataReader(code, start="2024-01-01")
-        if df is not None and len(df)>=60:
-            df.columns=[c.lower() for c in df.columns]
-            return df
-    except: pass
-    return ohlcv_kr(code)
-
-@st.cache_data(ttl=300, show_spinner=False)
-def portfolio_ohlcv_us(ticker):
-    return ohlcv_us(ticker)
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def ohlcv_us(ticker):
-    try:
-        df = yf.Ticker(ticker).history(period="1y")
-        if not df.empty and len(df)>=60:
-            df.columns=[c.lower() for c in df.columns]
-            return df
-    except: pass
-    try:
-        df = fdr.DataReader(ticker, start="2024-01-01")
-        if df is not None and len(df)>=60:
-            df.columns=[c.lower() for c in df.columns]
-            return df
-    except: pass
-    return None
-
-# ============================================================
-# 종목 리스트
-# ============================================================
-@st.cache_data(ttl=3600, show_spinner=False)
-def krx_listing():
-    try:
-        from pykrx import stock as pk
-        # KST 기준 날짜 (Railway는 UTC)
-        if ZoneInfo:
-            today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
-        else:
-            today = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
-        rows=[]
-        for mkt in ["KOSPI","KOSDAQ"]:
-            for code in pk.get_market_ticker_list(today,market=mkt):
-                try:
-                    name = pk.get_market_ticker_name(code)
-                    mc = pk.get_market_cap(today,today,code)
-                    cap = int(mc["시가총액"].iloc[0]) if not mc.empty else 0
-                    rows.append({"Code":code,"Name":name,"Marcap":cap,"Market":mkt})
-                except: pass
-        if rows: return pd.DataFrame(rows)
-    except: pass
-    try:
-        df = fdr.StockListing("KRX")
-        if df is not None and len(df)>0: return df
-    except: pass
-    # fallback
-    data=[
-        ("005930","삼성전자",400e12,"KOSPI"),("000660","SK하이닉스",120e12,"KOSPI"),
-        ("207940","삼성바이오로직스",50e12,"KOSPI"),("373220","LG에너지솔루션",60e12,"KOSPI"),
-        ("035420","NAVER",30e12,"KOSPI"),("005380","현대차",40e12,"KOSPI"),
-        ("000270","기아",30e12,"KOSPI"),("105560","KB금융",15e12,"KOSPI"),
-        ("055550","신한지주",12e12,"KOSPI"),("086790","하나금융지주",10e12,"KOSPI"),
-        ("068270","셀트리온",10e12,"KOSPI"),("006400","삼성SDI",15e12,"KOSPI"),
-        ("329180","HD현대중공업",8e12,"KOSPI"),("042700","한미반도체",8e12,"KOSPI"),
-        ("051910","LG화학",20e12,"KOSPI"),("035720","카카오",15e12,"KOSPI"),
-        ("003550","LG",10e12,"KOSPI"),("096770","SK이노베이션",7e12,"KOSPI"),
-        ("010130","고려아연",8e12,"KOSPI"),("009150","삼성전기",7e12,"KOSPI"),
-        ("247540","에코프로비엠",8e12,"KOSDAQ"),("086520","에코프로",6e12,"KOSDAQ"),
-        ("196170","알테오젠",3e12,"KOSDAQ"),("091990","셀트리온헬스케어",3e12,"KOSDAQ"),
-        ("036570","엔씨소프트",3e12,"KOSDAQ"),("263750","펄어비스",1e12,"KOSDAQ"),
-        ("039030","이오테크닉스",1e12,"KOSDAQ"),("214150","클래시스",1e12,"KOSDAQ"),
-        ("277810","레인보우로보틱스",1e12,"KOSDAQ"),("357780","솔브레인",2e12,"KOSDAQ"),
-    ]
-    return pd.DataFrame(data, columns=["Code","Name","Marcap","Market"])
 
 # ── 섹터 지수 코드 매핑 (KRX 업종 지수) ──
 SECTOR_INDEX = {
@@ -3159,6 +2922,243 @@ with tab_us:
     render("해외 폭등 예측 TOP 5", us_top, "USD")
 with tab_etf:
     st.caption("📊 ETF 수급 — 외국인 레버리지/인버스 베팅 추적")
+    if not etf_data:
+        st.warning("KIS API 연결 필요 — ETF 수급 조회 불가")
+    else:
+        lev  = etf_data.get("lev_kospi", {})
+        inv  = etf_data.get("inv_kospi", {})
+        lev2 = etf_data.get("lev_kosdaq", {})
+        inv2 = etf_data.get("inv_kosdaq", {})
+
+        lev_flip  = lev.get("flip_buy", False)
+        inv_flip  = inv.get("flip_sell", False)
+        lev_buy   = lev.get("is_buying", False)
+        inv_buy   = inv.get("is_buying", False)
+        spot      = etf_data.get("spot_kospi", {})
+        spot_buy  = spot.get("is_buying", False)
+        spot_flip = spot.get("flip_buy", False)
+
+        # 현물 + ETF 순포지션으로 FESI 판정
+        if spot_buy and (lev_flip or lev_buy) and not inv_buy:
+            # Case 1: 현물+ 레버+ → 가장 강한 상승
+            fesi = "🟢🟢 강한 상승 포지션"
+            fesi_color = "#10b981"
+            fesi_action = "✅ 스캐너 PASS 종목 적극 진입"
+            fesi_ref = "📊 참고: 현물 매수 + 레버리지 동반 (강한 상승 확신)"
+        elif spot_buy and not lev_buy:
+            # Case 2: 현물+ 레버- → 순수 현물 매수 (안정적)
+            fesi = "🟢 현물 매수 (중기 상승)"
+            fesi_color = "#10b981"
+            fesi_action = "✅ 스캐너 PASS 종목 진입 고려"
+            fesi_ref = "📊 참고: 레버리지 없는 순수 현물 매수 (중장기 관점)"
+        elif not spot_buy and lev_buy and not inv_buy:
+            # Case 3: 현물- 레버+ → 개별주엔 부정적, 지수 단기 베팅
+            fesi = "🟡 지수 단기 베팅 (개별주 주의)"
+            fesi_color = "#f59e0b"
+            fesi_action = "⚠️ 개별주 신규매수 자제 — 지수 ETF 단기 베팅 중"
+            fesi_ref = "📊 현물 매도 + 레버 매수: 개별주 매도 압력 가능"
+        elif not spot_buy and inv_buy:
+            # Case 4: 현물- 인버스+ → 가장 강한 하락 신호
+            fesi = "🔴🔴 강한 하락 포지션"
+            fesi_color = "#ef4444"
+            fesi_action = "⛔ 신규매수 금지 — 외국인 강한 하락 베팅"
+            fesi_ref = "📊 현물 매도 + 인버스 매수: 가장 강한 하락 신호"
+        elif inv_buy and not spot_buy:
+            fesi = "🔴 하락 헤지 중"
+            fesi_color = "#ef4444"
+            fesi_action = "⛔ 신규매수 자제"
+            fesi_ref = "📊 참고: 인버스 ETF 관심 구간 (직접매수 신중)"
+        elif spot_flip:
+            fesi = "🟢 현물 매수 전환"
+            fesi_color = "#10b981"
+            fesi_action = "✅ 방향 전환 — 스캐너 PASS 종목 진입 고려"
+            fesi_ref = "📊 외국인 현물 순매수 전환"
+        else:
+            fesi = "⬜ 외국인 관망"
+            fesi_color = "#64748b"
+            fesi_action = "⚠️ 중립 — 고점수 종목만 소량 진입"
+            fesi_ref = ""
+
+    def is_kr_open() -> bool:
+        """한국 장 중 여부 (09:00~15:30) — KST 기준"""
+        try:
+            if ZoneInfo:
+                now = datetime.now(ZoneInfo("Asia/Seoul"))
+            else:
+                # UTC+9 수동 변환
+                now = datetime.utcnow() + timedelta(hours=9)
+            if now.weekday() >= 5: return False
+            open_t  = now.replace(hour=9,  minute=0,  second=0, microsecond=0)
+            close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            return open_t <= now <= close_t
+        except: return False
+
+
+    # 미국 주요 휴장일
+    _US_HOLIDAYS = {
+        2025: {(1,1),(1,20),(2,17),(4,18),(5,26),(6,19),(7,4),(9,1),(11,27),(12,25)},
+        2026: {(1,1),(1,19),(2,16),(4,3),(5,25),(6,19),(7,4),(9,7),(11,26),(12,25)},
+        2027: {(1,1),(1,18),(2,15),(4,2),(5,31),(6,19),(7,4),(9,6),(11,25),(12,24)},
+    }
+
+    def is_us_open():
+        if not ZoneInfo: return True
+        try:
+            now = datetime.now(ZoneInfo("America/New_York"))
+            if now.weekday() >= 5: return False
+            # 휴장일 체크
+            holidays = _US_HOLIDAYS.get(now.year, set())  # 없는 연도는 빈 set
+            if (now.month, now.day) in holidays: return False
+            open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+            close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+            return open_t <= now <= close_t
+        except: return True
+
+    @st.cache_data(ttl=60, show_spinner=False)
+    def us_price(ticker: str) -> tuple:
+        if FINNHUB_API_KEY:
+            try:
+                r = requests.get("https://finnhub.io/api/v1/quote",
+                    params={"symbol":ticker,"token":FINNHUB_API_KEY},timeout=3).json()
+                c,pc = float(r.get("c",0) or 0), float(r.get("pc",0) or 0)
+                if is_us_open() and c>0: return c,"Finnhub"
+                if not is_us_open() and pc>0: return pc,"Finnhub(종가)"
+                if c>0: return c,"Finnhub"
+            except: pass
+        try:
+            t = yf.Ticker(ticker)
+            df = t.history(period="1d",interval="1m")
+            if not df.empty:
+                p = float(df["Close"].dropna().iloc[-1])
+                if p>0: return p,"yfinance"
+        except: pass
+        return 0.0,"실패"
+
+    def us_prepost(ticker: str) -> tuple:
+        """장외가 조회 — 캐시 없음 (실시간)"""
+        try:
+            t = yf.Ticker(ticker)
+            reg = t.history(period="1d",interval="1m",prepost=False)
+            reg_p = float(reg["Close"].dropna().iloc[-1]) if not reg.empty else 0
+            pp = t.history(period="1d",interval="1m",prepost=True)
+            if pp.empty: return 0,""
+            pp_p = float(pp["Close"].dropna().iloc[-1])
+            if not ZoneInfo: return pp_p,"장외"
+            now = datetime.now(ZoneInfo("America/New_York"))
+            o = now.replace(hour=9,minute=30,second=0)
+            c = now.replace(hour=16,minute=0,second=0)
+            pre = now.replace(hour=4,minute=0,second=0)
+            aft = now.replace(hour=20,minute=0,second=0)
+            if o<=now<=c: sess="🏛️정규장"
+            elif pre<=now<o: sess="🌅프리마켓"
+            elif c<now<=aft: sess="🌙애프터마켓"
+            else: sess="🌙애프터마켓"  # 자정 이후도 애프터마켓으로 표시
+            diff = (pp_p-reg_p)/reg_p*100 if reg_p>0 else 0
+            # 정규장 중엔 차이 없으면 표시 안함
+            if sess == "🏛️정규장" and abs(diff) < 0.05: return 0,""
+            # 그 외엔 항상 표시
+            return pp_p, f"{sess} {diff:+.1f}%"
+        except: return 0,""
+
+    # ============================================================
+    # OHLCV
+    # ============================================================
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def ohlcv_kr(code):
+        try:
+            df = fdr.DataReader(code, start="2024-01-01")
+            if df is not None and len(df)>=60:
+                df.columns=[c.lower() for c in df.columns]
+                # 마지막 봉이 너무 오래됐으면 stale 데이터
+                last_dt = df.index[-1]
+                try:
+                    last_dt = pd.Timestamp(last_dt).tz_localize(None)
+                    days_old = (datetime.now() - last_dt.to_pydatetime()).days
+                    if days_old > 10:  # 10일 이상 오래된 데이터
+                        return None
+                except: pass
+                return df
+        except: pass
+        return None
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def portfolio_ohlcv_kr(code):
+        """보유/관심종목 전용 ohlcv — scan_kr과 독립 캐시"""
+        try:
+            import FinanceDataReader as fdr
+            df = fdr.DataReader(code, start="2024-01-01")
+            if df is not None and len(df)>=60:
+                df.columns=[c.lower() for c in df.columns]
+                return df
+        except: pass
+        return ohlcv_kr(code)
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def portfolio_ohlcv_us(ticker):
+        return ohlcv_us(ticker)
+
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def ohlcv_us(ticker):
+        try:
+            df = yf.Ticker(ticker).history(period="1y")
+            if not df.empty and len(df)>=60:
+                df.columns=[c.lower() for c in df.columns]
+                return df
+        except: pass
+        try:
+            df = fdr.DataReader(ticker, start="2024-01-01")
+            if df is not None and len(df)>=60:
+                df.columns=[c.lower() for c in df.columns]
+                return df
+        except: pass
+        return None
+
+    # ============================================================
+    # 종목 리스트
+    # ============================================================
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def krx_listing():
+        try:
+            from pykrx import stock as pk
+            # KST 기준 날짜 (Railway는 UTC)
+            if ZoneInfo:
+                today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+            else:
+                today = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
+            rows=[]
+            for mkt in ["KOSPI","KOSDAQ"]:
+                for code in pk.get_market_ticker_list(today,market=mkt):
+                    try:
+                        name = pk.get_market_ticker_name(code)
+                        mc = pk.get_market_cap(today,today,code)
+                        cap = int(mc["시가총액"].iloc[0]) if not mc.empty else 0
+                        rows.append({"Code":code,"Name":name,"Marcap":cap,"Market":mkt})
+                    except: pass
+            if rows: return pd.DataFrame(rows)
+        except: pass
+        try:
+            df = fdr.StockListing("KRX")
+            if df is not None and len(df)>0: return df
+        except: pass
+        # fallback
+        data=[
+            ("005930","삼성전자",400e12,"KOSPI"),("000660","SK하이닉스",120e12,"KOSPI"),
+            ("207940","삼성바이오로직스",50e12,"KOSPI"),("373220","LG에너지솔루션",60e12,"KOSPI"),
+            ("035420","NAVER",30e12,"KOSPI"),("005380","현대차",40e12,"KOSPI"),
+            ("000270","기아",30e12,"KOSPI"),("105560","KB금융",15e12,"KOSPI"),
+            ("055550","신한지주",12e12,"KOSPI"),("086790","하나금융지주",10e12,"KOSPI"),
+            ("068270","셀트리온",10e12,"KOSPI"),("006400","삼성SDI",15e12,"KOSPI"),
+            ("329180","HD현대중공업",8e12,"KOSPI"),("042700","한미반도체",8e12,"KOSPI"),
+            ("051910","LG화학",20e12,"KOSPI"),("035720","카카오",15e12,"KOSPI"),
+            ("003550","LG",10e12,"KOSPI"),("096770","SK이노베이션",7e12,"KOSPI"),
+            ("010130","고려아연",8e12,"KOSPI"),("009150","삼성전기",7e12,"KOSPI"),
+            ("247540","에코프로비엠",8e12,"KOSDAQ"),("086520","에코프로",6e12,"KOSDAQ"),
+            ("196170","알테오젠",3e12,"KOSDAQ"),("091990","셀트리온헬스케어",3e12,"KOSDAQ"),
+            ("036570","엔씨소프트",3e12,"KOSDAQ"),("263750","펄어비스",1e12,"KOSDAQ"),
+            ("039030","이오테크닉스",1e12,"KOSDAQ"),("214150","클래시스",1e12,"KOSDAQ"),
+            ("277810","레인보우로보틱스",1e12,"KOSDAQ"),("357780","솔브레인",2e12,"KOSDAQ"),
+        ]
+        return pd.DataFrame(data, columns=["Code","Name","Marcap","Market"])
 
 
     st.markdown(f"""
