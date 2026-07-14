@@ -1794,7 +1794,7 @@ def scan_contrarian() -> tuple:
         avg_vol_ref = float(ref_vo.rolling(20).mean().iloc[-1])
         vol_max3 = float(ref_vo.iloc[-3:].max())
         vol_ratio = vol_max3 / avg_vol_ref if avg_vol_ref > 0 else 0
-        if vol_ratio < 1.5: return {"_skip":True,"why":f"거래량부족({vol_ratio:.1f}배)"}
+        if vol_ratio < 1.2: return {"_skip":True,"why":f"거래량부족({vol_ratio:.1f}배)"}
 
         # RSI (전일 기준)
         delta = ref_cl.diff()
@@ -3017,7 +3017,7 @@ def render(title, data, currency):
   </details>
 </div>""", unsafe_allow_html=True)
 
-tab_kr, tab_sector, tab_us, tab_ct = st.tabs(["🔥 국내 TOP5", "🏆 섹터 대장 TOP5", "🇺🇸 해외 TOP5", "⚡ 역발상"])
+tab_kr, tab_sector, tab_us, tab_etf = st.tabs(["🔥 국내 TOP5", "🏆 섹터 대장 TOP5", "🇺🇸 해외 TOP5", "📊 ETF수급"])
 with tab_kr:
     render("국내 폭등 예측 TOP 5", kr_top, "KRW")
 with tab_sector:
@@ -3068,69 +3068,178 @@ with tab_sector:
         st.info("섹터 대장주 데이터를 가져오는 중이에요. 잠시 후 재스캔해보세요.")
 with tab_us:
     render("해외 폭등 예측 TOP 5", us_top, "USD")
-with tab_ct:
-    # 시장 상태 확인 — get_market_regime 직접 사용
-    _mkt_ct   = get_market_regime()
-    _mkt_score = _mkt_ct.get("score", 2)
-    _mkt_name  = _mkt_ct.get("regime","")
-    _ret1_ct   = _mkt_ct.get("ret1", 0)
+with tab_etf:
+    st.caption("📊 ETF 수급 — 외국인 레버리지/인버스 베팅 추적")
 
-    # 역발상 활성화 조건: 조정장 이하 (score <= 1) or 당일 -2% 이상
-    ct_active = _mkt_score <= 1 or _ret1_ct <= -2
+    @st.cache_data(ttl=300, show_spinner=False)
+    def get_etf_supply():
+        """레버리지/인버스 ETF 외국인 수급 — 전환 신호 기반 FESI"""
+        ETFs = {
+            "KODEX 레버리지":          ("122630", "lev_kospi"),
+            "KODEX 인버스":            ("114800", "inv_kospi"),
+            "KODEX 코스닥150레버리지": ("233740", "lev_kosdaq"),
+            "KODEX 코스닥150인버스":   ("251340", "inv_kosdaq"),
+        }
+        result = {}
+        if not KIS_APP_KEY: return result
+        for name, (code, key) in ETFs.items():
+            try:
+                trend = kis_investor_trend(code, 5)
+                if trend and len(trend) >= 2:
+                    today = trend[0].get("외국인", 0)
+                    prev  = trend[1].get("외국인", 0)
+                    d3    = sum(t.get("외국인",0) for t in trend[:3])
+                    # 전환 신호 (방향 변화가 핵심)
+                    lev_flip = today > 0 and prev <= 0   # 매도→매수
+                    inv_flip = today < 0 and prev >= 0   # 매수→매도
+                    result[key] = {
+                        "name": name, "code": code,
+                        "today": today, "prev": prev, "d3": d3,
+                        "flip_buy":  lev_flip,   # 매수 전환
+                        "flip_sell": inv_flip,   # 매도 전환
+                        "is_buying": today > 0,
+                    }
+            except: pass
 
-    if not ct_active:
-        st.warning(f"⚠️ 현재 시장은 {_mkt_name} ({_ret1_ct:+.1f}%)예요. 역발상 전략의 기대수익이 낮아요.")
+        # 현물 코스피 외국인 순매수 조회
+        try:
+            h = kis_headers("FHKST01010900")
+            if h:
+                r = requests.get(
+                    f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-investor",
+                    params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":"0001",
+                            "fid_begin_date":(datetime.now()-timedelta(days=7)).strftime("%Y%m%d"),
+                            "fid_end_date":datetime.now().strftime("%Y%m%d"),
+                            "fid_period_div_code":"D"},
+                    headers=h, timeout=5).json()
+                rows = r.get("output2", r.get("output", []))
+                if rows and len(rows) >= 2:
+                    spot_today = int(rows[0].get("frgn_ntby_qty", 0) or 0)
+                    spot_prev  = int(rows[1].get("frgn_ntby_qty", 0) or 0)
+                    spot_d3    = sum(int(row.get("frgn_ntby_qty",0) or 0) for row in rows[:3])
+                    result["spot_kospi"] = {
+                        "name": "코스피 현물",
+                        "today": spot_today, "prev": spot_prev, "d3": spot_d3,
+                        "is_buying": spot_today > 0,
+                        "flip_buy":  spot_today > 0 and spot_prev <= 0,
+                        "flip_sell": spot_today < 0 and spot_prev >= 0,
+                    }
+        except: pass
+        return result
 
-    st.caption("⚡ 역발상 스캐너 — 과매도 + 거래량 급증 + 수급 개선 | 보유기간 2~5일 | 손절 -5%")
+    etf_data = get_etf_supply()
 
-    if not st.session_state.get("scan_done"):
-        st.info("📊 추천 재스캔 버튼을 먼저 눌러주세요.")
-        ct_top = []; ct_skip = []
+    if not etf_data:
+        st.warning("KIS API 연결 필요 — ETF 수급 조회 불가")
     else:
-        with st.spinner("역발상 스캔 중..."):
-            ct_top, ct_skip = scan_contrarian()
+        lev  = etf_data.get("lev_kospi", {})
+        inv  = etf_data.get("inv_kospi", {})
+        lev2 = etf_data.get("lev_kosdaq", {})
+        inv2 = etf_data.get("inv_kosdaq", {})
 
-    if not ct_top:
-        st.info("조건 충족 종목 없음 — 과매도 + 거래량 + 수급 조건 동시 충족 종목이 없어요.")
-        # 디버그: 탈락 이유 상위 10개 표시
-        if ct_skip:
-            from collections import Counter
-            why_count = Counter(s.get("why","") for s in ct_skip if isinstance(s,dict))
-            st.caption("📊 탈락 이유: " + " / ".join(f"{w}({c}개)" for w,c in why_count.most_common(5)))
-    else:
-        medals_ct = ["🥇","🥈","🥉","4️⃣","5️⃣"]
-        for i, item in enumerate(ct_top):
-            gc = {"A+":"#f59e0b","A":"#10b981","B+":"#3b82f6","B":"#94a3b8"}.get(item.get("등급","B"),"#94a3b8")
-            sigs_html = "".join(f"<li style='font-size:11px;margin:2px 0;'>{s}</li>" for s in item.get("signals",[]))
-            st.markdown(f"""
-<div style="background:#1e293b;padding:14px;border-radius:10px;border-left:4px solid {gc};margin-bottom:8px;">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-    <b>{medals_ct[i]} {item['종목']}</b> <span style="color:#64748b;font-size:11px;">({item.get('코드','')})</span>
-    <span style="background:{gc};color:#000;font-size:11px;padding:2px 6px;border-radius:4px;">{item.get('등급','?')} {item['점수']}점</span>
+        lev_flip  = lev.get("flip_buy", False)
+        inv_flip  = inv.get("flip_sell", False)
+        lev_buy   = lev.get("is_buying", False)
+        inv_buy   = inv.get("is_buying", False)
+        spot      = etf_data.get("spot_kospi", {})
+        spot_buy  = spot.get("is_buying", False)
+        spot_flip = spot.get("flip_buy", False)
+
+        # 현물 + ETF 순포지션으로 FESI 판정
+        if spot_buy and (lev_flip or lev_buy) and not inv_buy:
+            # Case 1: 현물+ 레버+ → 가장 강한 상승
+            fesi = "🟢🟢 강한 상승 포지션"
+            fesi_color = "#10b981"
+            fesi_action = "✅ 스캐너 PASS 종목 적극 진입"
+            fesi_ref = "📊 참고: 현물 매수 + 레버리지 동반 (강한 상승 확신)"
+        elif spot_buy and not lev_buy:
+            # Case 2: 현물+ 레버- → 순수 현물 매수 (안정적)
+            fesi = "🟢 현물 매수 (중기 상승)"
+            fesi_color = "#10b981"
+            fesi_action = "✅ 스캐너 PASS 종목 진입 고려"
+            fesi_ref = "📊 참고: 레버리지 없는 순수 현물 매수 (중장기 관점)"
+        elif not spot_buy and lev_buy and not inv_buy:
+            # Case 3: 현물- 레버+ → 개별주엔 부정적, 지수 단기 베팅
+            fesi = "🟡 지수 단기 베팅 (개별주 주의)"
+            fesi_color = "#f59e0b"
+            fesi_action = "⚠️ 개별주 신규매수 자제 — 지수 ETF 단기 베팅 중"
+            fesi_ref = "📊 현물 매도 + 레버 매수: 개별주 매도 압력 가능"
+        elif not spot_buy and inv_buy:
+            # Case 4: 현물- 인버스+ → 가장 강한 하락 신호
+            fesi = "🔴🔴 강한 하락 포지션"
+            fesi_color = "#ef4444"
+            fesi_action = "⛔ 신규매수 금지 — 외국인 강한 하락 베팅"
+            fesi_ref = "📊 현물 매도 + 인버스 매수: 가장 강한 하락 신호"
+        elif inv_buy and not spot_buy:
+            fesi = "🔴 하락 헤지 중"
+            fesi_color = "#ef4444"
+            fesi_action = "⛔ 신규매수 자제"
+            fesi_ref = "📊 참고: 인버스 ETF 관심 구간 (직접매수 신중)"
+        elif spot_flip:
+            fesi = "🟢 현물 매수 전환"
+            fesi_color = "#10b981"
+            fesi_action = "✅ 방향 전환 — 스캐너 PASS 종목 진입 고려"
+            fesi_ref = "📊 외국인 현물 순매수 전환"
+        else:
+            fesi = "⬜ 외국인 관망"
+            fesi_color = "#64748b"
+            fesi_action = "⚠️ 중립 — 고점수 종목만 소량 진입"
+            fesi_ref = ""
+
+        st.markdown(f"""
+<div style="background:#0f172a;border:2px solid {fesi_color};
+            border-radius:10px;padding:14px;margin-bottom:10px;">
+  <div style="font-size:15px;font-weight:bold;color:{fesi_color};margin-bottom:6px;">
+    {fesi}
   </div>
-  <div style="font-size:11px;color:#f59e0b;margin-bottom:6px;">⚡ 단기 반등 전략 — 손절 철저히</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px;">
-    <div style="background:#0f172a;padding:6px;border-radius:6px;text-align:center;">
-      <div style="font-size:9px;color:#94a3b8;">RSI</div>
-      <div style="color:#10b981;font-weight:bold;">{item['RSI']}</div>
-    </div>
-    <div style="background:#0f172a;padding:6px;border-radius:6px;text-align:center;">
-      <div style="font-size:9px;color:#94a3b8;">20일 낙폭</div>
-      <div style="color:#ef4444;font-weight:bold;">{item['낙폭20일']:+.1f}%</div>
-    </div>
-    <div style="background:#0f172a;padding:6px;border-radius:6px;text-align:center;">
-      <div style="font-size:9px;color:#94a3b8;">거래량</div>
-      <div style="color:#f59e0b;font-weight:bold;">{item['거래량배율']:.1f}배</div>
-    </div>
-  </div>
-  <div style="font-size:12px;line-height:1.8;">
-    💰 <b>₩{int(item['현재가']):,}</b> <span style="font-size:10px;color:#64748b;">({item.get('source','')})</span><br>
-    📈 <span style="color:#3b82f6;">목표 ₩{int(item['목표가']):,}</span>
-    📉 <span style="color:#ef4444;">손절 ₩{int(item['손절가']):,}</span>
-  </div>
-  <details><summary style="font-size:11px;color:#94a3b8;cursor:pointer;margin-top:6px;">수급 상세</summary>
-    <ul style="padding-left:14px;margin-top:4px;">{sigs_html}</ul>
-  </details>
+  <div style="font-size:13px;margin-bottom:4px;">{fesi_action}</div>
+  {f'<div style="font-size:11px;color:#64748b;margin-top:4px;">{fesi_ref}</div>' if fesi_ref else ''}
 </div>""", unsafe_allow_html=True)
+
+        # 현물 수급 표시
+        if spot:
+            spot_today = spot.get("today", 0)
+            spot_color = "#10b981" if spot_today > 0 else "#ef4444" if spot_today < 0 else "#64748b"
+            spot_flip_label = " 🔄매수전환" if spot.get("flip_buy") else " 🔄매도전환" if spot.get("flip_sell") else ""
+            st.markdown(f"""
+<div style="background:#1a2744;border:2px solid {spot_color};padding:10px 14px;border-radius:8px;margin-bottom:8px;">
+  <div style="display:flex;justify-content:space-between;">
+    <span style="font-size:12px;font-weight:bold;">🏛️ 코스피 현물</span>
+    <span style="color:{spot_color};font-size:11px;">{spot_today:+,.0f}주{spot_flip_label}</span>
+  </div>
+  <div style="font-size:10px;color:#64748b;margin-top:3px;">
+    전일: {spot.get('prev',0):+,.0f}주 &nbsp;|&nbsp; 3일누적: {spot.get('d3',0):+,.0f}주
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        st.caption("외국인 ETF 수급 상세")
+        for key, d in etf_data.items():
+            if key == "spot_kospi": continue  # 현물은 위에서 표시
+            if not d: continue
+            today = d.get("today", 0)
+            prev  = d.get("prev", 0)
+            d3    = d.get("d3", 0)
+            flip_b = d.get("flip_buy", False)
+            flip_s = d.get("flip_sell", False)
+            color = "#10b981" if today > 0 else "#ef4444" if today < 0 else "#64748b"
+            flip_label = " 🔄매수전환" if flip_b else " 🔄매도전환" if flip_s else ""
+            st.markdown(f"""
+<div style="background:#1e293b;padding:10px 14px;border-radius:8px;margin-bottom:5px;
+            border-left:3px solid {color};">
+  <div style="display:flex;justify-content:space-between;">
+    <span style="font-size:12px;font-weight:bold;">{d.get('name','')}</span>
+    <span style="color:{color};font-size:11px;">{today:+,.0f}주{flip_label}</span>
+  </div>
+  <div style="font-size:10px;color:#64748b;margin-top:3px;">
+    전일: {prev:+,.0f}주 &nbsp;|&nbsp; 3일누적: {d3:+,.0f}주
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.caption("""**B안 활용법** — FESI는 개별 종목 진입 타이밍 판단 보조지표
+🟢 강세 신호 → 국내 TOP5 스캐너 PASS 종목 진입 고려
+🔴 약세 신호 → 신규매수 자제, 기존 보유 종목 관리 집중
+🟡 중립 → 점수 최상위 종목만 소량 진입
+📊 레버리지/인버스 ETF 직접 매매는 참고용 — 진입 신중""")
 
 
