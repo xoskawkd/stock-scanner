@@ -2329,7 +2329,6 @@ if st.sidebar.button("🗑️ 전체 캐시 초기화", use_container_width=True
     scan_kr.clear(); scan_us.clear(); scan_kr_sector.clear(); scan_contrarian.clear()
     ohlcv_kr.clear(); ohlcv_us.clear()
     krx_listing.clear(); us_tickers.clear()
-    kis_price.clear()
     kis_investor_trend.clear(); kis_name.clear()
     st.session_state["scan_done"] = False  # 재스캔 필요
     st.rerun()
