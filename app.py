@@ -914,6 +914,26 @@ def get_etf_supply() -> dict:
     for name, (code, key) in ETFs.items():
         try:
             trend = kis_investor_trend(code, 5)
+            if not trend:
+                # ETF 종목 직접 조회 시도
+                h2 = kis_headers("FHKST01010600")
+                if h2:
+                    end2 = datetime.now().strftime("%Y%m%d")
+                    start2 = (datetime.now()-timedelta(days=14)).strftime("%Y%m%d")
+                    r2 = requests.get(
+                        f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-investor",
+                        params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code,
+                                "fid_begin_date":start2,"fid_end_date":end2,
+                                "fid_period_div_code":"D"},
+                        headers=h2, timeout=5).json()
+                    trend = []
+                    for row in r2.get("output",[])[:5]:
+                        try:
+                            trend.append({
+                                "외국인": int(row.get("frgn_ntby_qty",0) or 0),
+                                "기관":   int(row.get("orgn_ntby_qty",0) or 0),
+                            })
+                        except: pass
             if trend and len(trend) >= 2:
                 today = trend[0].get("외국인", 0)
                 prev  = trend[1].get("외국인", 0)
