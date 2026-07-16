@@ -306,7 +306,8 @@ def kis_investor_trend(code: str, days=5) -> list:
         start = (datetime.now()-timedelta(days=days*2)).strftime("%Y%m%d")
         r = requests.get(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-investor",
             params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code,
-                    "fid_begin_dt":start,"fid_end_dt":end},
+                    "fid_begin_date":start,"fid_end_date":end,
+                    "fid_period_div_code":"D"},
             headers=h, timeout=4).json()
         trend = []
         for row in r.get("output",[])[:days]:
