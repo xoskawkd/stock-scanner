@@ -77,6 +77,26 @@ def load_weights():
 
 W = load_weights()
 
+# ── 미국장 운영 여부 (조기 정의 — 사이드바에서 사용) ──
+_US_HOLIDAYS = {
+    2025: {(1,1),(1,20),(2,17),(4,18),(5,26),(6,19),(7,4),(9,1),(11,27),(12,25)},
+    2026: {(1,1),(1,19),(2,16),(4,3),(5,25),(6,19),(7,4),(9,7),(11,26),(12,25)},
+    2027: {(1,1),(1,18),(2,15),(4,2),(5,31),(6,19),(7,4),(9,6),(11,25),(12,24)},
+}
+
+def is_us_open() -> bool:
+    if not ZoneInfo: return True
+    try:
+        now = datetime.now(ZoneInfo("America/New_York"))
+        if now.weekday() >= 5: return False
+        holidays = _US_HOLIDAYS.get(now.year, set())
+        if (now.month, now.day) in holidays: return False
+        open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+        close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+        return open_t <= now <= close_t
+    except: return True
+
+
 # ============================================================
 # 포트폴리오 저장
 # ============================================================
@@ -85,15 +105,15 @@ DATA_FILE = "portfolio.json"
 def gist_load() -> list:
     """GitHub Gist에서 포트폴리오 불러오기"""
     if not GITHUB_TOKEN or not GITHUB_GIST_ID:
-        return []
+    return []
     try:
-        r = requests.get(
+    r = requests.get(
             f"https://api.github.com/gists/{GITHUB_GIST_ID}",
             headers={"Authorization": f"token {GITHUB_TOKEN}",
                      "Accept": "application/vnd.github.v3+json"},
             timeout=5).json()
-        files = r.get("files", {})
-        if "portfolio.json" in files:
+    files = r.get("files", {})
+    if "portfolio.json" in files:
             raw = files["portfolio.json"].get("content", "[]")
             return json.loads(raw)
     except: pass
@@ -104,21 +124,21 @@ def gist_save(data: list) -> bool:
     """GitHub Gist에 포트폴리오 저장"""
     global GITHUB_GIST_ID
     if not GITHUB_TOKEN:
-        return False
+    return False
     payload = {
-        "description": "Tae Scanner Portfolio",
-        "public": False,
-        "files": {"portfolio.json": {"content": json.dumps(data, ensure_ascii=False, indent=2)}}
+    "description": "Tae Scanner Portfolio",
+    "public": False,
+    "files": {"portfolio.json": {"content": json.dumps(data, ensure_ascii=False, indent=2)}}
     }
     try:
-        if GITHUB_GIST_ID:
+    if GITHUB_GIST_ID:
             # 기존 Gist 업데이트
             r = requests.patch(
                 f"https://api.github.com/gists/{GITHUB_GIST_ID}",
                 headers={"Authorization": f"token {GITHUB_TOKEN}",
                          "Accept": "application/vnd.github.v3+json"},
                 json=payload, timeout=5)
-        else:
+    else:
             # 새 Gist 생성
             r = requests.post(
                 "https://api.github.com/gists",
@@ -129,23 +149,23 @@ def gist_save(data: list) -> bool:
             if gist_id:
                 GITHUB_GIST_ID = gist_id
                 st.sidebar.info(f"✅ Gist 생성됨: {gist_id} — Streamlit Secrets에 GITHUB_GIST_ID 추가하세요")
-        return r.status_code in [200, 201]
+    return r.status_code in [200, 201]
     except: return False
 
 
 def load_portfolio():
     # 1. GitHub Gist 우선
     if GITHUB_TOKEN and GITHUB_GIST_ID:
-        data = gist_load()
-        if data:
+    data = gist_load()
+    if data:
             # 로컬에도 백업
             try: json.dump(data, open(DATA_FILE,"w"), ensure_ascii=False)
             except: pass
             return data
     # 2. 로컬 파일 fallback
     if os.path.exists(DATA_FILE):
-        try: return json.load(open(DATA_FILE,"r"))
-        except: pass
+    try: return json.load(open(DATA_FILE,"r"))
+    except: pass
     return []
 
 def save_portfolio(data):
@@ -154,7 +174,7 @@ def save_portfolio(data):
     except: pass
     # 2. GitHub Gist 동기화
     if GITHUB_TOKEN:
-        gist_save(data)
+    gist_save(data)
 
 # ============================================================
 # KIS API
@@ -165,13 +185,13 @@ def kis_token() -> str:
     now = datetime.now()
     # 캐시 확인 (Lock 없이 먼저 — 대부분 여기서 끝남)
     if _KIS_TOKEN["token"] and _KIS_TOKEN["expires"] and now < _KIS_TOKEN["expires"]:
-        return _KIS_TOKEN["token"]
+    return _KIS_TOKEN["token"]
     # 발급 필요 시 Lock으로 race condition 방지
     with _KIS_LOCK:
-        # Lock 진입 후 다시 확인 (다른 스레드가 먼저 발급했을 수 있음)
-        if _KIS_TOKEN["token"] and _KIS_TOKEN["expires"] and now < _KIS_TOKEN["expires"]:
+    # Lock 진입 후 다시 확인 (다른 스레드가 먼저 발급했을 수 있음)
+    if _KIS_TOKEN["token"] and _KIS_TOKEN["expires"] and now < _KIS_TOKEN["expires"]:
             return _KIS_TOKEN["token"]
-        for attempt in range(3):  # 최대 3회 재시도
+    for attempt in range(3):  # 최대 3회 재시도
             try:
                 r = requests.post(f"{KIS_BASE_URL}/oauth2/tokenP",
                     json={"grant_type":"client_credentials",
@@ -199,12 +219,12 @@ def kis_close_price(code: str) -> tuple:
     h = kis_headers("FHKST03010100")
     if not h: return 0.0, ""
     try:
-        # KST 기준 날짜 (Railway는 UTC)
-        if ZoneInfo:
+    # KST 기준 날짜 (Railway는 UTC)
+    if ZoneInfo:
             today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
-        else:
+    else:
             today = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
-        r = requests.get(
+    r = requests.get(
             f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
             params={
                 "fid_cond_mrkt_div_code": "J",
@@ -215,25 +235,25 @@ def kis_close_price(code: str) -> tuple:
                 "fid_org_adj_prc": "0",
             },
             headers=h, timeout=4).json()
-        rows = r.get("output2", []) or r.get("output1", [])
-        if rows:
+    rows = r.get("output2", []) or r.get("output1", [])
+    if rows:
             p = float(str(rows[0].get("stck_clpr", 0) or 0).replace(",",""))
             kor_name = rows[0].get("hts_kor_isnm","").strip()
             if kor_name and code not in _KIS_NAME_CACHE:
                 _KIS_NAME_CACHE[code] = kor_name
             if p > 0: return p, "KIS(종가)"
-        return 0.0, ""
+    return 0.0, ""
     except: return 0.0, ""
 
 
 def kis_price(code: str) -> tuple:
     """KIS 현재가 — 장 중 실시간, 장외 종가 자동 전환"""
     if not KIS_APP_KEY or not KIS_APP_SECRET:
-        return 0.0, ""
+    return 0.0, ""
     for attempt in range(2):
-        h = kis_headers("FHKST01010100")
-        if not h: return 0.0, ""
-        try:
+    h = kis_headers("FHKST01010100")
+    if not h: return 0.0, ""
+    try:
             r = requests.get(
                 f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
                 params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code},
@@ -255,7 +275,7 @@ def kis_price(code: str) -> tuple:
             p_close, src_close = kis_close_price(code)
             if p_close > 0: return p_close, src_close
             return 0.0, ""
-        except:
+    except:
             return 0.0, ""
     return 0.0, ""
 
@@ -269,8 +289,8 @@ def kis_name(code: str) -> str:
     if not KIS_APP_KEY or not KIS_APP_SECRET: return ""
     # 방법 1: inquire-price에서 hts_kor_isnm 추출 (가장 정확)
     try:
-        h = kis_headers("FHKST01010100")
-        if h:
+    h = kis_headers("FHKST01010100")
+    if h:
             r = requests.get(
                 f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
                 params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code},
@@ -283,8 +303,8 @@ def kis_name(code: str) -> str:
     except: pass
     # 방법 2: search-stock-info
     try:
-        h2 = kis_headers("CTPF1002R")
-        if h2:
+    h2 = kis_headers("CTPF1002R")
+    if h2:
             r2 = requests.get(
                 f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/search-stock-info",
                 params={"PRDT_TYPE_CD":"300","PDNO":code},
@@ -302,14 +322,14 @@ def kis_investor_trend(code: str, days=5) -> list:
     h = kis_headers("FHKST01010600")
     if not h: return []
     try:
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now()-timedelta(days=days*2)).strftime("%Y%m%d")
-        r = requests.get(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-investor",
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now()-timedelta(days=days*2)).strftime("%Y%m%d")
+    r = requests.get(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-investor",
             params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code,
                     "fid_begin_dt":start,"fid_end_dt":end},
             headers=h, timeout=4).json()
-        trend = []
-        for row in r.get("output",[])[:days]:
+    trend = []
+    for row in r.get("output",[])[:days]:
             try:
                 trend.append({
                     "date":   row.get("stck_bsop_date",""),
@@ -319,7 +339,7 @@ def kis_investor_trend(code: str, days=5) -> list:
                     "연기금": int(row.get("pnsn_ntby_qty",0) or 0),
                 })
             except: pass
-        return trend
+    return trend
     except: return []
 
 def supply_score(code: str) -> int:
@@ -329,7 +349,7 @@ def supply_score(code: str) -> int:
     반환: 0~40점
     """
     if not KIS_APP_KEY or not KIS_APP_SECRET:
-        return 0
+    return 0
     trend = kis_investor_trend(code, 5)
     if not trend: return 0
 
@@ -353,37 +373,37 @@ def supply_score(code: str) -> int:
 
     # ── 외국인 ──
     if fore > 0:
-        score += 5
-        # 강도 보너스 (전체 순매수 중 외국인 비중)
-        if fore_ratio >= 0.7: score += 5   # 외국인이 70%+ 주도
-        elif fore_ratio >= 0.5: score += 3
-        # 연속성 보너스
-        if fore_streak >= 3: score += 8
-        elif fore_streak >= 2: score += 4
+    score += 5
+    # 강도 보너스 (전체 순매수 중 외국인 비중)
+    if fore_ratio >= 0.7: score += 5   # 외국인이 70%+ 주도
+    elif fore_ratio >= 0.5: score += 3
+    # 연속성 보너스
+    if fore_streak >= 3: score += 8
+    elif fore_streak >= 2: score += 4
     elif fore < 0:
-        score -= 5
-        if fore_streak == 0:  # 5일 연속 매도
+    score -= 5
+    if fore_streak == 0:  # 5일 연속 매도
             score -= 3
 
     # ── 기관 ──
     if inst > 0:
-        score += 5
-        if inst_streak >= 2: score += 4
-        # 기관 전환 매수 (어제 매도 → 오늘 매수)
-        if len(trend) >= 2 and trend[1].get("기관", 0) <= 0:
+    score += 5
+    if inst_streak >= 2: score += 4
+    # 기관 전환 매수 (어제 매도 → 오늘 매수)
+    if len(trend) >= 2 and trend[1].get("기관", 0) <= 0:
             score += 3
     elif inst < 0:
-        score -= 3
+    score -= 3
 
     # ── 연기금 (장기 투자자, 신뢰도 높음) ──
     if pension > 0:
-        score += 3  # 2→3점 (연기금 매수는 강한 신호)
+    score += 3  # 2→3점 (연기금 매수는 강한 신호)
 
     # ── 외국인 + 기관 동시 매수 (가장 강한 신호) ──
     if fore > 0 and inst > 0:
-        score += 5
-        # 외국인+기관+연기금 동시 → 추가 보너스
-        if pension > 0:
+    score += 5
+    # 외국인+기관+연기금 동시 → 추가 보너스
+    if pension > 0:
             score += 3
 
     return max(0, min(score, 40))
@@ -402,12 +422,12 @@ def supply_signal(code: str) -> dict:
 
     score = 0; signals = []
     if fore > 0:
-        score += 2; signals.append(f"외국인 순매수")
-        if fore_streak >= 3: score += 2; signals.append(f"{fore_streak}일 연속★")
+    score += 2; signals.append(f"외국인 순매수")
+    if fore_streak >= 3: score += 2; signals.append(f"{fore_streak}일 연속★")
     elif fore < 0: score -= 2; signals.append("외국인 순매도")
     if inst > 0:
-        score += 2; signals.append("기관 순매수")
-        if inst_rev: score += 2; signals.append("기관 전환★")
+    score += 2; signals.append("기관 순매수")
+    if inst_rev: score += 2; signals.append("기관 전환★")
     elif inst < 0: score -= 1; signals.append("기관 순매도")
 
     if score >= 5: v,c = "🔥강한매수세","#10b981"
@@ -426,11 +446,11 @@ def supply_signal(code: str) -> dict:
 def kr_price(code: str, market_map: dict = None) -> tuple:
     # 1순위: KIS 실시간
     if KIS_APP_KEY and KIS_APP_SECRET:
-        p, src = kis_price(code)
-        if p > 0: return p, src
+    p, src = kis_price(code)
+    if p > 0: return p, src
     # 2순위: KRX
     if KRX_API_KEY:
-        try:
+    try:
             d = datetime.now()
             for _ in range(5):
                 ds = d.strftime("%Y%m%d")
@@ -444,12 +464,12 @@ def kr_price(code: str, market_map: dict = None) -> tuple:
                         p = float(str(row.iloc[0].get("TDD_CLSPRC","0")).replace(",",""))
                         if p > 0: return p, "KRX"
                 d -= timedelta(days=1)
-        except: pass
+    except: pass
     # yfinance fallback — KIS listing으로 시장 구분
     try:
-        # market_map으로 suffix 결정 (listing 반복 호출 방지)
-        _sfx = ".KQ"  # 기본 코스닥
-        try:
+    # market_map으로 suffix 결정 (listing 반복 호출 방지)
+    _sfx = ".KQ"  # 기본 코스닥
+    try:
             if market_map and code in market_map:
                 mkt = str(market_map[code])
                 _sfx = ".KS" if "KOSPI" in mkt else ".KQ"
@@ -459,11 +479,11 @@ def kr_price(code: str, market_map: dict = None) -> tuple:
                 if not _row.empty:
                     mkt = str(_row["Market"].values[0])
                     _sfx = ".KS" if "KOSPI" in mkt else ".KQ"
-        except:
+    except:
             _sfx = ".KS" if code[:2] in ["00","01","02","03","04","05","06"] else ".KQ"
-        t = yf.Ticker(f"{code}{_sfx}")
-        p = float(getattr(t.fast_info,"last_price",0) or 0)
-        if p > 0: return p, "yfinance"
+    t = yf.Ticker(f"{code}{_sfx}")
+    p = float(getattr(t.fast_info,"last_price",0) or 0)
+    if p > 0: return p, "yfinance"
     except: pass
     return 0.0, "실패"
 
@@ -474,46 +494,46 @@ def kr_price(code: str, market_map: dict = None) -> tuple:
 def get_kospi_today() -> dict:
     """KIS API로 코스피 당일 등락률 조회"""
     if not KIS_APP_KEY or not KIS_APP_SECRET:
-        return {"ok": False, "ret1": 0}
+    return {"ok": False, "ret1": 0}
     try:
-        h = kis_headers("FHPUP02100000")
-        if not h: return {"ok": False, "ret1": 0}
-        r = requests.get(
+    h = kis_headers("FHPUP02100000")
+    if not h: return {"ok": False, "ret1": 0}
+    r = requests.get(
             f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-index-price",
             params={"fid_cond_mrkt_div_code": "U", "fid_input_iscd": "0001"},  # 코스피
             headers=h, timeout=4).json()
-        out = r.get("output", {})
-        # 당일 등락률
-        ret1 = float(out.get("bstp_nmix_prdy_ctrt", 0) or 0)  # 전일 대비 등락률
-        cur  = float(out.get("bstp_nmix_prpr", 0) or 0)       # 현재 지수
-        return {"ok": True, "ret1": ret1, "cur": cur}
+    out = r.get("output", {})
+    # 당일 등락률
+    ret1 = float(out.get("bstp_nmix_prdy_ctrt", 0) or 0)  # 전일 대비 등락률
+    cur  = float(out.get("bstp_nmix_prpr", 0) or 0)       # 현재 지수
+    return {"ok": True, "ret1": ret1, "cur": cur}
     except:
-        return {"ok": False, "ret1": 0}
+    return {"ok": False, "ret1": 0}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_sector_index_kis(sector_code: str) -> dict:
     """KIS API로 업종 지수 당일 등락 조회"""
     if not KIS_APP_KEY or not KIS_APP_SECRET:
-        return {"ok": False, "ret1": 0}
+    return {"ok": False, "ret1": 0}
     try:
-        h = kis_headers("FHPUP02100000")
-        if not h: return {"ok": False, "ret1": 0}
-        r = requests.get(
+    h = kis_headers("FHPUP02100000")
+    if not h: return {"ok": False, "ret1": 0}
+    r = requests.get(
             f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-index-price",
             params={"fid_cond_mrkt_div_code": "U", "fid_input_iscd": sector_code},
             headers=h, timeout=4).json()
-        out = r.get("output", {})
-        # 등락률 필드 여러 개 시도
-        ret1 = float(out.get("bstp_nmix_prdy_ctrt", 0) or
+    out = r.get("output", {})
+    # 등락률 필드 여러 개 시도
+    ret1 = float(out.get("bstp_nmix_prdy_ctrt", 0) or
                      out.get("prdy_ctrt", 0) or 0)
-        cur  = float(out.get("bstp_nmix_prpr", 0) or
+    cur  = float(out.get("bstp_nmix_prpr", 0) or
                      out.get("prpr", 0) or 0)
-        if cur > 0:
+    if cur > 0:
             return {"ok": True, "ret1": ret1, "cur": cur}
-        return {"ok": False, "ret1": 0}
+    return {"ok": False, "ret1": 0}
     except:
-        return {"ok": False, "ret1": 0}
+    return {"ok": False, "ret1": 0}
 
 
 # KIS 업종 지수 코드
@@ -564,9 +584,9 @@ def get_market_regime() -> dict:
     # 2. fdr로 5일 흐름
     ret5 = 0; ma5 = 0; ma20 = 0; down_days = 0; dd_from_hi = 0
     try:
-        import FinanceDataReader as fdr
-        df = fdr.DataReader("KS11", start=(datetime.now()-timedelta(days=120)).strftime("%Y-%m-%d"))
-        if df is not None and len(df) >= 10:
+    import FinanceDataReader as fdr
+    df = fdr.DataReader("KS11", start=(datetime.now()-timedelta(days=120)).strftime("%Y-%m-%d"))
+    if df is not None and len(df) >= 10:
             df.columns = [c.lower() for c in df.columns]
             cl = df["close"].astype(float)
             cur = float(cl.iloc[-1])
@@ -582,20 +602,20 @@ def get_market_regime() -> dict:
 
     # ── 당일 등락률 최우선 판단 ──
     if ret1 <= -3:
-        regime="🔴 당일 급락"; score=0; color="#ef4444"
-        desc=f"오늘 {ret1:+.1f}% — 매수 절대 금지"
+    regime="🔴 당일 급락"; score=0; color="#ef4444"
+    desc=f"오늘 {ret1:+.1f}% — 매수 절대 금지"
     elif ret1 <= -1.5:
-        regime="🟠 당일 약세"; score=0; color="#f97316"
-        desc=f"오늘 {ret1:+.1f}% — 매수 자제"
+    regime="🟠 당일 약세"; score=0; color="#f97316"
+    desc=f"오늘 {ret1:+.1f}% — 매수 자제"
     elif ret1 >= 1.5:
-        regime="🟢 당일 강세"; score=3; color="#10b981"
-        desc=f"오늘 {ret1:+.1f}%"
+    regime="🟢 당일 강세"; score=3; color="#10b981"
+    desc=f"오늘 {ret1:+.1f}%"
     elif ret1 >= 0:
-        regime="🟡 당일 보합"; score=2; color="#f59e0b"
-        desc=f"오늘 {ret1:+.1f}%"
+    regime="🟡 당일 보합"; score=2; color="#f59e0b"
+    desc=f"오늘 {ret1:+.1f}%"
     else:
-        regime="🟡 당일 소폭하락"; score=1; color="#f59e0b"
-        desc=f"오늘 {ret1:+.1f}%"
+    regime="🟡 당일 소폭하락"; score=1; color="#f59e0b"
+    desc=f"오늘 {ret1:+.1f}%"
 
     # 5일 흐름으로 보정 (당일 판단과 같은 방향이면 강화)
     if ret5 < -3 and score > 0: score = max(0, score-1)
@@ -604,15 +624,15 @@ def get_market_regime() -> dict:
 
     # 극공포 (당일 -5% 이상)
     if ret1 <= -5:
-        regime="🔥 극공포"; score=0; color="#ef4444"
-        desc=f"오늘 {ret1:+.1f}% 급락 — 역발상 기회 탐색"
+    regime="🔥 극공포"; score=0; color="#ef4444"
+    desc=f"오늘 {ret1:+.1f}% 급락 — 역발상 기회 탐색"
 
     return {
-        "ok": True, "regime": regime, "score": score,
-        "color": color, "desc": desc,
-        "ret1": round(ret1,2), "ret5": round(ret5,2),
-        "ma_bull": ma5 > ma20 if ma5>0 and ma20>0 else True,
-        "down_days": down_days, "dd_from_hi": round(dd_from_hi,1),
+    "ok": True, "regime": regime, "score": score,
+    "color": color, "desc": desc,
+    "ret1": round(ret1,2), "ret5": round(ret5,2),
+    "ma_bull": ma5 > ma20 if ma5>0 and ma20>0 else True,
+    "down_days": down_days, "dd_from_hi": round(dd_from_hi,1),
     }
 
 
@@ -637,11 +657,11 @@ SECTOR_INDEX_MAP = {
 def get_stock_sector_name(code: str) -> str:
     """종목 섹터명 조회 — KIS inquire-price → 하드코딩"""
     if code in _STOCK_SECTOR_CACHE:
-        return _STOCK_SECTOR_CACHE[code]
+    return _STOCK_SECTOR_CACHE[code]
 
     # 1. KIS inquire-price 응답에서 업종 추출 (가장 안정적)
     if KIS_APP_KEY:
-        try:
+    try:
             h = kis_headers("FHKST01010100")
             if h:
                 r = requests.get(
@@ -654,24 +674,24 @@ def get_stock_sector_name(code: str) -> str:
                 if sec:
                     _STOCK_SECTOR_CACHE[code] = sec.strip()
                     return sec.strip()
-        except: pass
+    except: pass
 
     # 2. 하드코딩 (주요 종목 fallback)
     SECTOR_HARDCODE = {
-        "005930":"전기전자","000660":"전기전자","353200":"전기전자",
-        "005380":"운수장비","000270":"운수장비","012330":"운수장비",
-        "207940":"의약품","068270":"의약품","196170":"의약품",
-        "373220":"전기전자","006400":"전기전자","247540":"화학",
-        "086520":"화학","010130":"철강금속","329180":"조선",
-        "042660":"조선","105560":"금융","055550":"금융",
-        "086790":"금융","138040":"금융","316140":"금융",
-        "035420":"통신","035720":"통신","017670":"통신",
-        "051910":"화학","096770":"화학","011170":"화학",
-        "230360":"일반서비스","064290":"기계","211050":"전기전자",
+    "005930":"전기전자","000660":"전기전자","353200":"전기전자",
+    "005380":"운수장비","000270":"운수장비","012330":"운수장비",
+    "207940":"의약품","068270":"의약품","196170":"의약품",
+    "373220":"전기전자","006400":"전기전자","247540":"화학",
+    "086520":"화학","010130":"철강금속","329180":"조선",
+    "042660":"조선","105560":"금융","055550":"금융",
+    "086790":"금융","138040":"금융","316140":"금융",
+    "035420":"통신","035720":"통신","017670":"통신",
+    "051910":"화학","096770":"화학","011170":"화학",
+    "230360":"일반서비스","064290":"기계","211050":"전기전자",
     }
     sec = SECTOR_HARDCODE.get(code,"")
     if sec:
-        _STOCK_SECTOR_CACHE[code] = sec
+    _STOCK_SECTOR_CACHE[code] = sec
     return sec
 
 
@@ -681,17 +701,17 @@ def get_sector_regime(sector_name: str) -> dict:
     # KIS 업종 코드 매핑
     kis_code = ""
     for key, code in KIS_SECTOR_CODE.items():
-        if key in sector_name:
+    if key in sector_name:
             kis_code = code
             break
 
     # 1. KIS 업종 지수 (당일 등락률) — 여러 코드 시도
     if kis_code and KIS_APP_KEY:
-        # 코드 변형 시도 (0030 → 030 → 30 등)
-        codes_to_try = [kis_code, kis_code.lstrip("0") or kis_code,
+    # 코드 변형 시도 (0030 → 030 → 30 등)
+    codes_to_try = [kis_code, kis_code.lstrip("0") or kis_code,
                         f"{int(kis_code):04d}" if kis_code.isdigit() else kis_code]
-        codes_to_try = list(dict.fromkeys(codes_to_try))  # 중복 제거
-        for try_code in codes_to_try:
+    codes_to_try = list(dict.fromkeys(codes_to_try))  # 중복 제거
+    for try_code in codes_to_try:
             data = get_sector_index_kis(try_code)
             if data.get("ok"):
                 ret1 = data.get("ret1", 0)
@@ -705,11 +725,11 @@ def get_sector_regime(sector_name: str) -> dict:
     # 2. fdr fallback (5일 기준)
     fdr_code = ""
     for key, code in SECTOR_INDEX_MAP.items():
-        if key in sector_name:
+    if key in sector_name:
             fdr_code = code
             break
     if fdr_code:
-        try:
+    try:
             import FinanceDataReader as fdr
             df = fdr.DataReader(fdr_code,
                                start=(datetime.now()-timedelta(days=30)).strftime("%Y-%m-%d"))
@@ -723,7 +743,7 @@ def get_sector_regime(sector_name: str) -> dict:
                 else:           status="🔴 급락"; score=-1
                 return {"ok":True,"status":status,"score":score,
                         "ret5":round(ret5,2),"sector_name":sector_name}
-        except: pass
+    except: pass
 
     return {"ok":False,"status":"조회실패","score":1,"ret5":0}
 
@@ -745,38 +765,38 @@ def get_stock_full_regime(code: str) -> dict:
 
     # 종합 판단 — 섹터 확인 불가 시 시장만으로 판단
     if not sec_ok:
-        if mkt_score >= 3:
+    if mkt_score >= 3:
             summary = "🟡 시장 강세 (섹터확인불가)"
             color   = "#f59e0b"; buy_adj = 1
-        elif mkt_score <= 1:
+    elif mkt_score <= 1:
             summary = "🟠 시장 약세 (섹터확인불가)"
             color   = "#f97316"; buy_adj = -1
-        else:
+    else:
             summary = "⬜ 시장 중립 (섹터확인불가)"
             color   = "#64748b"; buy_adj = 0
     elif combined >= 4:
-        summary = "🟢 시장+섹터 강세"
-        color   = "#10b981"; buy_adj = 2
+    summary = "🟢 시장+섹터 강세"
+    color   = "#10b981"; buy_adj = 2
     elif combined >= 3:
-        summary = "🟡 시장 or 섹터 중립"
-        color   = "#f59e0b"; buy_adj = 0
+    summary = "🟡 시장 or 섹터 중립"
+    color   = "#f59e0b"; buy_adj = 0
     elif combined >= 2:
-        summary = "🟠 주의"
-        color   = "#f97316"; buy_adj = -1
+    summary = "🟠 주의"
+    color   = "#f97316"; buy_adj = -1
     else:
-        summary = "🔴 시장+섹터 약세"
-        color   = "#ef4444"; buy_adj = -3
+    summary = "🔴 시장+섹터 약세"
+    color   = "#ef4444"; buy_adj = -3
 
     return {
-        "market":         mkt,
-        "sector":         sec,
-        "sector_name":    sec_nm,
-        "combined_score": combined,
-        "summary":        summary,
-        "color":          color,
-        "buy_adj":        buy_adj,
-        "mkt_regime":     mkt.get("regime",""),
-        "sec_status":     sec.get("status",""),
+    "market":         mkt,
+    "sector":         sec,
+    "sector_name":    sec_nm,
+    "combined_score": combined,
+    "summary":        summary,
+    "color":          color,
+    "buy_adj":        buy_adj,
+    "mkt_regime":     mkt.get("regime",""),
+    "sec_status":     sec.get("status",""),
     }
 
 
@@ -801,17 +821,17 @@ def get_tomorrow_outlook() -> dict:
     나스닥 등락 + 코스피200 선물 + 환율
     """
     result = {
-        "nasdaq_ret": 0.0, "nasdaq_ok": False,
-        "futures_ret": 0.0, "futures_ok": False,
-        "usd_krw": 0.0, "fx_ok": False,
-        "score": 0, "verdict": "알수없음", "color": "#64748b",
+    "nasdaq_ret": 0.0, "nasdaq_ok": False,
+    "futures_ret": 0.0, "futures_ok": False,
+    "usd_krw": 0.0, "fx_ok": False,
+    "score": 0, "verdict": "알수없음", "color": "#64748b",
     }
 
     # 1. 나스닥 등락 (yfinance)
     try:
-        import yfinance as yf
-        nq = yf.Ticker("^IXIC").history(period="2d")
-        if len(nq) >= 2:
+    import yfinance as yf
+    nq = yf.Ticker("^IXIC").history(period="2d")
+    if len(nq) >= 2:
             ret = (float(nq["Close"].iloc[-1]) - float(nq["Close"].iloc[-2])) / float(nq["Close"].iloc[-2]) * 100
             result["nasdaq_ret"] = round(ret, 2)
             result["nasdaq_ok"] = ret > 0
@@ -819,8 +839,8 @@ def get_tomorrow_outlook() -> dict:
 
     # 2. 코스피200 선물 (yfinance — KS200F)
     try:
-        fut = yf.Ticker("ES=F").history(period="1d", interval="5m")  # S&P500 선물로 대체
-        if not fut.empty:
+    fut = yf.Ticker("ES=F").history(period="1d", interval="5m")  # S&P500 선물로 대체
+    if not fut.empty:
             p_now  = float(fut["Close"].iloc[-1])
             p_prev = float(fut["Close"].iloc[0])
             ret_f  = (p_now - p_prev) / p_prev * 100
@@ -830,8 +850,8 @@ def get_tomorrow_outlook() -> dict:
 
     # 3. 원달러 환율
     try:
-        fx = yf.Ticker("KRW=X").history(period="2d")
-        if len(fx) >= 2:
+    fx = yf.Ticker("KRW=X").history(period="2d")
+    if len(fx) >= 2:
             usd_krw = float(fx["Close"].iloc[-1])
             result["usd_krw"] = round(usd_krw, 1)
             # 환율 하락(원화강세) = 외국인 매수 우호적
@@ -860,17 +880,17 @@ def get_tomorrow_outlook() -> dict:
     result["score"] = score
 
     if score >= 4:
-        result["verdict"] = "✅ 내일 매수 적합"
-        result["color"]   = "#10b981"
+    result["verdict"] = "✅ 내일 매수 적합"
+    result["color"]   = "#10b981"
     elif score >= 2:
-        result["verdict"] = "🟡 내일 조건부 매수"
-        result["color"]   = "#f59e0b"
+    result["verdict"] = "🟡 내일 조건부 매수"
+    result["color"]   = "#f59e0b"
     elif score >= 0:
-        result["verdict"] = "🟠 내일 신중하게"
-        result["color"]   = "#f97316"
+    result["verdict"] = "🟠 내일 신중하게"
+    result["color"]   = "#f97316"
     else:
-        result["verdict"] = "🔴 내일 매수 보류"
-        result["color"]   = "#ef4444"
+    result["verdict"] = "🔴 내일 매수 보류"
+    result["color"]   = "#ef4444"
 
     return result
 
@@ -901,11 +921,11 @@ def get_sector_momentum(sector_code: str, days: int = 5) -> float:
     양수 = 섹터 상승 중, 음수 = 섹터 하락 중
     """
     try:
-        df = fdr.DataReader(sector_code, start=(datetime.now()-timedelta(days=30)).strftime("%Y-%m-%d"))
-        if df is None or len(df) < days+1: return 0.0
-        df.columns = [c.lower() for c in df.columns]
-        cl = df["close"].astype(float)
-        return float((cl.iloc[-1] - cl.iloc[-days]) / cl.iloc[-days] * 100)
+    df = fdr.DataReader(sector_code, start=(datetime.now()-timedelta(days=30)).strftime("%Y-%m-%d"))
+    if df is None or len(df) < days+1: return 0.0
+    df.columns = [c.lower() for c in df.columns]
+    cl = df["close"].astype(float)
+    return float((cl.iloc[-1] - cl.iloc[-days]) / cl.iloc[-days] * 100)
     except: return 0.0
 
 @st.cache_data(ttl=86400, show_spinner=False)  # 업종 정보는 거의 안 바뀜
@@ -913,13 +933,13 @@ def get_stock_sector(code: str) -> str:
     """종목의 업종 코드 조회 — KIS API"""
     if not KIS_APP_KEY: return ""
     try:
-        h = kis_headers("CTPF1002R")
-        if not h: return ""
-        r = requests.get(
+    h = kis_headers("CTPF1002R")
+    if not h: return ""
+    r = requests.get(
             f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/search-stock-info",
             params={"PRDT_TYPE_CD":"300","PDNO":code},
             headers=h, timeout=3).json()
-        return r.get("output",{}).get("bstp_kor_isnm","")  # 업종명
+    return r.get("output",{}).get("bstp_kor_isnm","")  # 업종명
     except: return ""
 
 def sector_momentum_score(code: str) -> int:
@@ -933,7 +953,7 @@ def sector_momentum_score(code: str) -> int:
     # 업종명에서 섹터 코드 매핑
     sector_code = ""
     for name, code_s in SECTOR_INDEX.items():
-        if name in sector_name:
+    if name in sector_name:
             sector_code = code_s
             break
     if not sector_code: return 0
@@ -952,17 +972,17 @@ def get_krx_caution_stocks() -> set:
     codes = set()
     if not KRX_API_KEY: return codes
     try:
-        # KRX 투자주의/경고/위험 종목 (실제 API 경로)
-        # KST 기준 날짜 (Railway는 UTC)
-        if ZoneInfo:
+    # KRX 투자주의/경고/위험 종목 (실제 API 경로)
+    # KST 기준 날짜 (Railway는 UTC)
+    if ZoneInfo:
             today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
-        else:
+    else:
             today = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
-        for url_path in [
+    for url_path in [
             "sto/invst_caution_isu",   # 투자주의
             "sto/invst_wrnng_isu",     # 투자경고
             "sto/invst_risk_isu",      # 투자위험
-        ]:
+    ]:
             try:
                 r = requests.get(
                     f"http://data-dbg.krx.co.kr/svc/apis/{url_path}",
@@ -980,7 +1000,7 @@ def get_krx_caution_stocks() -> set:
 def get_caution_label(code: str, caution_set: set) -> str:
     """투자주의 라벨 반환"""
     if code in caution_set:
-        return "⚠️ 투자주의"
+    return "⚠️ 투자주의"
     return ""
 
 
@@ -992,9 +1012,9 @@ def get_dart_disclosures(code: str, days: int = 3) -> list:
     """
     if not DART_API_KEY: return []
     try:
-        end_dt   = datetime.now().strftime("%Y%m%d")
-        start_dt = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
-        r = requests.get(
+    end_dt   = datetime.now().strftime("%Y%m%d")
+    start_dt = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+    r = requests.get(
             "https://opendart.fss.or.kr/api/list.json",
             params={
                 "crtfc_key": DART_API_KEY,
@@ -1005,15 +1025,15 @@ def get_dart_disclosures(code: str, days: int = 3) -> list:
                 "page_count": 20,
             }, timeout=5).json()
 
-        if r.get("status") != "000": return []
+    if r.get("status") != "000": return []
 
-        # 주가 긍정 공시 키워드
-        POS_KEYWORDS = ["수주","계약","자사주","실적","흑자","배당","공급","MOU","협약","인수"]
-        # 주가 부정 공시 키워드
-        NEG_KEYWORDS = ["유상증자","전환사채","신주인수권","감사의견","횡령","소송"]
+    # 주가 긍정 공시 키워드
+    POS_KEYWORDS = ["수주","계약","자사주","실적","흑자","배당","공급","MOU","협약","인수"]
+    # 주가 부정 공시 키워드
+    NEG_KEYWORDS = ["유상증자","전환사채","신주인수권","감사의견","횡령","소송"]
 
-        result = []
-        for item in r.get("list", []):
+    result = []
+    for item in r.get("list", []):
             title = item.get("report_nm", "")
             pos = any(k in title for k in POS_KEYWORDS)
             neg = any(k in title for k in NEG_KEYWORDS)
@@ -1023,7 +1043,7 @@ def get_dart_disclosures(code: str, days: int = 3) -> list:
                     "title": title,
                     "type":  "positive" if pos and not neg else "negative",
                 })
-        return result
+    return result
     except: return []
 
 
@@ -1037,12 +1057,12 @@ def dart_score(code: str) -> tuple:
 
     score = 0
     for d in disclosures:
-        if d["type"] == "positive":
+    if d["type"] == "positive":
             score += 5
             # 수주/계약은 추가 가산
             if any(k in d["title"] for k in ["수주","계약","공급"]):
                 score += 3
-        else:
+    else:
             score -= 8  # 유상증자 등은 강한 감점
 
     return max(-20, min(score, 15)), disclosures
@@ -1052,10 +1072,10 @@ def dart_score(code: str) -> tuple:
 def us_tickers():
     tickers=[]
     for url, id_attr in [
-        ("https://en.wikipedia.org/wiki/Nasdaq-100", "constituents"),
-        ("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", None),
+    ("https://en.wikipedia.org/wiki/Nasdaq-100", "constituents"),
+    ("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", None),
     ]:
-        try:
+    try:
             kw = {"attrs":{"id":id_attr}} if id_attr else {}
             tables = pd.read_html(url,**kw)
             if tables:
@@ -1064,10 +1084,10 @@ def us_tickers():
                 if col:
                     tickers.extend([t.replace(".","-") for t in df[col].dropna()
                                     if isinstance(t,str) and len(t)<=6])
-        except: pass
+    except: pass
     seen=set(); unique=[]
     for t in tickers:
-        if t not in seen: seen.add(t); unique.append(t)
+    if t not in seen: seen.add(t); unique.append(t)
     if len(unique)>=100: return unique[:500]
     return ["NVDA","META","GOOGL","AMZN","MSFT","AMD","TSLA","AAPL","NFLX","AVGO",
             "PLTR","CRM","SNOW","DDOG","NET","CRWD","PANW","PYPL","SOFI","COIN",
@@ -1084,66 +1104,66 @@ def _sf(v, d=0.0):
 
 def quant_predict(df, market="KR"):
     OUT={"score":0,"grade":"C","signals":[],"pass":False,
-         "buy_min":0.0,"buy_max":0.0,"target":0.0,"stop":0.0,
-         "rsi":50.0,"current":0.0,"s1":False,"s2":False,"s3":False,"s4":False,"s5":False,"s6":False,"s7":False,
-         "atr_pct":0.0,"s3_streak":0,"s4_streak":0}
+     "buy_min":0.0,"buy_max":0.0,"target":0.0,"stop":0.0,
+     "rsi":50.0,"current":0.0,"s1":False,"s2":False,"s3":False,"s4":False,"s5":False,"s6":False,"s7":False,
+     "atr_pct":0.0,"s3_streak":0,"s4_streak":0}
     th=THRESHOLDS.get(market,THRESHOLDS["KR"])
     try:
-        if df is None or len(df)<60: return OUT
-        df=df.copy(); df.columns=[c.lower() for c in df.columns]
-        cl=df["close"].astype(float); hi=df["high"].astype(float)
-        lo=df["low"].astype(float);   vo=df["volume"].astype(float)
-        cur=_sf(cl.iloc[-1]); OUT["current"]=cur
-        if cur<=0: return OUT
+    if df is None or len(df)<60: return OUT
+    df=df.copy(); df.columns=[c.lower() for c in df.columns]
+    cl=df["close"].astype(float); hi=df["high"].astype(float)
+    lo=df["low"].astype(float);   vo=df["volume"].astype(float)
+    cur=_sf(cl.iloc[-1]); OUT["current"]=cur
+    if cur<=0: return OUT
 
-        rejected=False
-        avg_vol=_sf(vo.rolling(20).mean().iloc[-1])
-        # 거래정지/상장폐지 감지
-        recent_vol = _sf(vo.iloc[-5:].sum())
-        recent_days_zero = sum(1 for v in vo.iloc[-5:] if _sf(v) == 0)
-        if recent_vol == 0:
+    rejected=False
+    avg_vol=_sf(vo.rolling(20).mean().iloc[-1])
+    # 거래정지/상장폐지 감지
+    recent_vol = _sf(vo.iloc[-5:].sum())
+    recent_days_zero = sum(1 for v in vo.iloc[-5:] if _sf(v) == 0)
+    if recent_vol == 0:
             OUT["signals"].append("❌ 거래정지 의심 (5일 거래량 0)"); rejected=True
-        elif recent_days_zero >= 2:
+    elif recent_days_zero >= 2:
             OUT["signals"].append(f"❌ 간헐적 거래정지 의심 ({recent_days_zero}일 거래량 0)"); rejected=True
-        elif avg_vol<th["min_vol"]:
+    elif avg_vol<th["min_vol"]:
             OUT["signals"].append("❌ 유동성 부족"); rejected=True
 
-        # 거래대금 필터 (5억원 이상, 국내만 적용)
-        if market == "KR" and not rejected:
+    # 거래대금 필터 (5억원 이상, 국내만 적용)
+    if market == "KR" and not rejected:
             daily_amount = _sf((cl * vo).rolling(20).mean().iloc[-1])
             if daily_amount < 500_000_000:
                 OUT["signals"].append(f"❌ 거래대금 부족 ({daily_amount/1e8:.1f}억)"); rejected=True
-        # MA 계산 (rejected 체크보다 먼저)
-        _ma20_s  = cl.rolling(20).mean().replace(0, np.nan)
-        _std20_s = cl.rolling(20).std()
-        ma20 = _sf(_ma20_s.iloc[-1])
-        ma5  = _sf(cl.rolling(5).mean().iloc[-1])
-        ma60 = _sf(cl.rolling(60).mean().iloc[-1])
+    # MA 계산 (rejected 체크보다 먼저)
+    _ma20_s  = cl.rolling(20).mean().replace(0, np.nan)
+    _std20_s = cl.rolling(20).std()
+    ma20 = _sf(_ma20_s.iloc[-1])
+    ma5  = _sf(cl.rolling(5).mean().iloc[-1])
+    ma60 = _sf(cl.rolling(60).mean().iloc[-1])
 
-        if ma20>0 and cur>ma20*th["max_ma20_dev"]:
+    if ma20>0 and cur>ma20*th["max_ma20_dev"]:
             OUT["signals"].append("❌ 이미 급등"); rejected=True
-        p5=_sf(cl.iloc[-6]) if len(cl)>=6 else cur
-        if p5>0 and (cur-p5)/p5>th["max_gain5"]:
+    p5=_sf(cl.iloc[-6]) if len(cl)>=6 else cur
+    if p5>0 and (cur-p5)/p5>th["max_gain5"]:
             OUT["signals"].append("❌ 5일 급등"); rejected=True
-        hi60=_sf(cl.rolling(60).max().iloc[-1])
-        if hi60>0 and cur>=hi60*th["max_hi60"]:
+    hi60=_sf(cl.rolling(60).max().iloc[-1])
+    if hi60>0 and cur>=hi60*th["max_hi60"]:
             OUT["signals"].append("❌ 60일 고점권"); rejected=True
-        delta=cl.diff()
-        # Wilder RSI (EMA alpha=1/14) — 단순 rolling mean보다 정확
-        gain=delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
-        loss=(-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
-        rsi_s=100-100/(1+gain/loss.replace(0,np.nan))
-        rsi=_sf(rsi_s.iloc[-1],50.0); OUT["rsi"]=rsi
-        if rsi>th["max_rsi"]:
+    delta=cl.diff()
+    # Wilder RSI (EMA alpha=1/14) — 단순 rolling mean보다 정확
+    gain=delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+    loss=(-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+    rsi_s=100-100/(1+gain/loss.replace(0,np.nan))
+    rsi=_sf(rsi_s.iloc[-1],50.0); OUT["rsi"]=rsi
+    if rsi>th["max_rsi"]:
             OUT["signals"].append(f"❌ RSI 과열 ({rsi:.0f})"); rejected=True
 
-        score=0; setup=0; strong=0; trigger=0
+    score=0; setup=0; strong=0; trigger=0
 
-        # S1 BB수축 (_ma20_s, _std20_s 위에서 이미 계산됨)
-        bbw=(_std20_s*2)/_ma20_s
-        bw=_sf(bbw.iloc[-1]); bwavg=_sf(bbw.rolling(20).mean().iloc[-1])
-        s1=False
-        if bwavg>0 and bw>0:
+    # S1 BB수축 (_ma20_s, _std20_s 위에서 이미 계산됨)
+    bbw=(_std20_s*2)/_ma20_s
+    bw=_sf(bbw.iloc[-1]); bwavg=_sf(bbw.rolling(20).mean().iloc[-1])
+    s1=False
+    if bwavg>0 and bw>0:
             # percentile 기반 squeeze (60봉 중 하위 20%/10%)
             bbw_60 = bbw.iloc[-60:].dropna()
             pct20 = bbw_60.quantile(0.20) if len(bbw_60)>=20 else bwavg*0.85
@@ -1151,30 +1171,30 @@ def quant_predict(df, market="KR"):
             if bw<=pct10: s1=True;setup+=1;strong+=1;score+=8; OUT["signals"].append(f"✅ [S1] BB강수축 (하위10%)")
             elif bw<=pct20: s1=True;setup+=1;score+=4; OUT["signals"].append(f"🔶 [S1] BB수축 (하위20%)")
             else: OUT["signals"].append("⬜ [S1] BB수축없음")
-        OUT["s1"]=s1
+    OUT["s1"]=s1
 
-        # S2 거래량눌림
-        vm5=_sf(vo.rolling(5).mean().iloc[-1]); vm20=_sf(vo.rolling(20).mean().iloc[-1])
-        vol_now=_sf(vo.iloc[-1]); s2=False
-        if vm20>0:
+    # S2 거래량눌림
+    vm5=_sf(vo.rolling(5).mean().iloc[-1]); vm20=_sf(vo.rolling(20).mean().iloc[-1])
+    vol_now=_sf(vo.iloc[-1]); s2=False
+    if vm20>0:
             if vm5<vm20*0.65: s2=True;setup+=1;strong+=1;score+=W["s2_strong"]; OUT["signals"].append(f"✅ [S2] 거래량강눌림 ({vm5/vm20*100:.0f}%)")
             elif vm5<vm20*0.80: s2=True;setup+=1;score+=W["s2_weak"]; OUT["signals"].append(f"🔶 [S2] 거래량눌림 ({vm5/vm20*100:.0f}%)")
             else: OUT["signals"].append(f"⬜ [S2] 거래량눌림없음 ({vm5/vm20*100:.0f}%)" if vm20>0 else "⬜ [S2] 거래량데이터없음")
-        if vm5>0:
+    if vm5>0:
             if vol_now>vm5*2.0: trigger+=1;score+=W["s2t_strong"]; OUT["signals"].append(f"➕ [S2T] 거래량폭발")
             elif vol_now>vm5*1.5: trigger+=1;score+=W["s2t_weak"]; OUT["signals"].append(f"➕ [S2T] 거래량증가")
-        OUT["s2"]=s2
+    OUT["s2"]=s2
 
-        # S3 정배열+눌림목
-        aligned=ma5>0 and ma20>0 and ma60>0 and ma5>ma20>ma60
-        mid_up=ma20>0 and ma60>0 and ma20>ma60
-        near=ma20>0 and abs(cur-ma20)/ma20<=0.04; s3=False
-        if aligned and near: s3=True;setup+=1;strong+=1;score+=W["s3_strong"]
-        elif mid_up and near: s3=True;setup+=1;score+=W["s3_weak"]
+    # S3 정배열+눌림목
+    aligned=ma5>0 and ma20>0 and ma60>0 and ma5>ma20>ma60
+    mid_up=ma20>0 and ma60>0 and ma20>ma60
+    near=ma20>0 and abs(cur-ma20)/ma20<=0.04; s3=False
+    if aligned and near: s3=True;setup+=1;strong+=1;score+=W["s3_strong"]
+    elif mid_up and near: s3=True;setup+=1;score+=W["s3_weak"]
 
-        # S3 연속 유지일수 계산 (노이즈성 신호 vs 안정된 신호 구분)
-        s3_streak = 0
-        try:
+    # S3 연속 유지일수 계산 (노이즈성 신호 vs 안정된 신호 구분)
+    s3_streak = 0
+    try:
             _ma5s  = cl.rolling(5).mean()
             _ma20s = cl.rolling(20).mean()
             _ma60s = cl.rolling(60).mean()
@@ -1187,21 +1207,21 @@ def quant_predict(df, market="KR"):
                 _nr  = _m20>0 and abs(_c-_m20)/_m20<=0.04
                 if (_al and _nr) or (_mu and _nr): s3_streak += 1
                 else: break
-        except: pass
-        OUT["s3_streak"] = s3_streak
+    except: pass
+    OUT["s3_streak"] = s3_streak
 
-        if s3:
+    if s3:
             if s3_streak >= 2:
                 score += 3; OUT["signals"].append(f"✅ [S3] 정배열+눌림목 ★ ({s3_streak+1}일째 유지)")
             else:
                 OUT["signals"].append("✅ [S3] 정배열+눌림목 ★ (오늘 첫 발생)")
-        else:
+    else:
             OUT["signals"].append(f"⬜ [S3] 눌림목없음 (이격 {abs(cur-ma20)/ma20*100:.1f}%)" if ma20>0 else "⬜ [S3] MA20없음")
-        OUT["s3"]=s3
+    OUT["s3"]=s3
 
-        # S4 RSI다이버전스
-        s4=False
-        try:
+    # S4 RSI다이버전스
+    s4=False
+    try:
             if len(cl)>=60:
                 # RSI Divergence: 최근 60봉 전반(0~29)/후반(30~59)
                 pw=cl.iloc[-60:].reset_index(drop=True)
@@ -1248,12 +1268,12 @@ def quant_predict(df, market="KR"):
                 else: OUT["signals"].append("⬜ [S4] 다이버전스없음")
             else:
                 OUT["signals"].append("⬜ [S4] 데이터부족")
-        except: OUT["signals"].append("⬜ [S4] 계산실패")
-        OUT["s4"]=s4
+    except: OUT["signals"].append("⬜ [S4] 계산실패")
+    OUT["s4"]=s4
 
-        # S5 캔들
-        s5=False
-        try:
+    # S5 캔들
+    s5=False
+    try:
             if "open" in df.columns and len(df)>=2:
                 op=df["open"].astype(float)
                 o1,c1=_sf(op.iloc[-1]),_sf(cl.iloc[-1])
@@ -1266,12 +1286,12 @@ def quant_predict(df, market="KR"):
                     s5=hammer or bull
                     if s5: OUT["signals"].append(f"✅ [S5] {'망치형' if hammer else '양봉전환'}")  # 점수 제외 (노이즈)
                     else: OUT["signals"].append("⬜ [S5] 캔들없음")
-        except: OUT["signals"].append("⬜ [S5] 캔들실패")
-        OUT["s5"]=s5
+    except: OUT["signals"].append("⬜ [S5] 캔들실패")
+    OUT["s5"]=s5
 
-        # ── [S6] 거래량 폭발 후 눌림 — 가산점 전용 ──
-        s6 = False
-        try:
+    # ── [S6] 거래량 폭발 후 눌림 — 가산점 전용 ──
+    s6 = False
+    try:
             vm20_s6 = vo.rolling(20).mean()
             burst_day = -1; burst_price = 0.0
             for k in range(3, 16):
@@ -1294,13 +1314,13 @@ def quant_predict(df, market="KR"):
                     else:
                         score += 4
                         OUT["signals"].append(f"🔶 [S6] 거래량폭발후눌림 ({burst_day}일전)")
-        except: pass
-        OUT["s6"] = s6
+    except: pass
+    OUT["s6"] = s6
 
-        # ── [S7] OBV 매집 신호 ──
-        # OBV가 MA20 위에 있고 5일 전보다 상승 중이면 조용한 매집
-        s7 = False
-        try:
+    # ── [S7] OBV 매집 신호 ──
+    # OBV가 MA20 위에 있고 5일 전보다 상승 중이면 조용한 매집
+    s7 = False
+    try:
             obv = (np.sign(cl.diff()) * vo).fillna(0).cumsum()
             obv_ma20 = obv.rolling(20).mean()
             obv_now  = _sf(obv.iloc[-1])
@@ -1322,20 +1342,20 @@ def quant_predict(df, market="KR"):
                 OUT["signals"].append("⬜ [S7] OBV 분산 중")
             else:
                 OUT["signals"].append("⬜ [S7] OBV 중립")
-        except:
+    except:
             OUT["signals"].append("⬜ [S7] OBV 계산실패")
-        OUT["s7"] = s7
+    OUT["s7"] = s7
 
-        # RSI 보너스
-        if 40<=rsi<=55: score+=W["rsi_good"]; OUT["signals"].append(f"✅ RSI 매수구간 ({rsi:.0f})")
-        elif 30<=rsi<40: score+=W["rsi_oversold"]; OUT["signals"].append(f"🔶 RSI 과매도 ({rsi:.0f})")
-        elif rsi<30: score+=W["rsi_extreme"]; OUT["signals"].append(f"🔶 RSI 극과매도 ({rsi:.0f})")
-        else: OUT["signals"].append(f"⬜ RSI 보너스없음 ({rsi:.0f})")
+    # RSI 보너스
+    if 40<=rsi<=55: score+=W["rsi_good"]; OUT["signals"].append(f"✅ RSI 매수구간 ({rsi:.0f})")
+    elif 30<=rsi<40: score+=W["rsi_oversold"]; OUT["signals"].append(f"🔶 RSI 과매도 ({rsi:.0f})")
+    elif rsi<30: score+=W["rsi_extreme"]; OUT["signals"].append(f"🔶 RSI 극과매도 ({rsi:.0f})")
+    else: OUT["signals"].append(f"⬜ RSI 보너스없음 ({rsi:.0f})")
 
-        # ATR 목표가/손절가
-        _tgt=cur*1.08; _stp=cur*0.93; _blo=cur*0.97; _bhi=cur*1.02
-        atr_pct = 0.0  # ATR 비율 (변동성 지표) — 보유종목 판단에도 재사용
-        try:
+    # ATR 목표가/손절가
+    _tgt=cur*1.08; _stp=cur*0.93; _blo=cur*0.97; _bhi=cur*1.02
+    atr_pct = 0.0  # ATR 비율 (변동성 지표) — 보유종목 판단에도 재사용
+    try:
             tr=pd.concat([hi-lo,(hi-cl.shift()).abs(),(lo-cl.shift()).abs()],axis=1).max(axis=1)
             atr=_sf(tr.rolling(14).mean().iloc[-1])
             if atr>0 and cur>0:
@@ -1351,28 +1371,28 @@ def quant_predict(df, market="KR"):
                 _stp=max(_stp,cur*0.92)   # 손절 하한 -8% (모순 방지용 캡)
                 _stp=min(_stp,cur*0.96)   # 손절 상한 -4%
                 _blo=max(cur*0.97,cur-atr*0.5); _bhi=min(cur*1.02,cur+atr*0.3)
-        except: pass
-        OUT["atr_pct"]=round(atr_pct,2)
-        OUT["target"]=round(_tgt,4); OUT["stop"]=round(_stp,4)
-        OUT["buy_min"]=round(_blo,4); OUT["buy_max"]=round(_bhi,4)
-        OUT["score"]=int(score)
+    except: pass
+    OUT["atr_pct"]=round(atr_pct,2)
+    OUT["target"]=round(_tgt,4); OUT["stop"]=round(_stp,4)
+    OUT["buy_min"]=round(_blo,4); OUT["buy_max"]=round(_bhi,4)
+    OUT["score"]=int(score)
 
-        # 통과 게이트
-        # S3(정배열눌림목) 또는 S4(RSI다이버전스) 하나 이상 + 점수
-        core = s3 or s4
-        OUT["pass"]=(not rejected) and core and (score>=W["min_pass_score"])
+    # 통과 게이트
+    # S3(정배열눌림목) 또는 S4(RSI다이버전스) 하나 이상 + 점수
+    core = s3 or s4
+    OUT["pass"]=(not rejected) and core and (score>=W["min_pass_score"])
 
-        # 등급
-        # 최대 score=63 기준 재조정
-        if score>=55 and strong>=1 and trigger>=1: g="A+"
-        elif score>=45 and setup>=1 and trigger>=1: g="A"
-        elif score>=35 and setup>=1: g="B+"
-        elif score>=28 and setup>=1: g="B"
-        else: g="C"
-        OUT["grade"]=g
+    # 등급
+    # 최대 score=63 기준 재조정
+    if score>=55 and strong>=1 and trigger>=1: g="A+"
+    elif score>=45 and setup>=1 and trigger>=1: g="A"
+    elif score>=35 and setup>=1: g="B+"
+    elif score>=28 and setup>=1: g="B"
+    else: g="C"
+    OUT["grade"]=g
 
     except Exception as e:
-        OUT["signals"].append(f"오류:{e}")
+    OUT["signals"].append(f"오류:{e}")
     return OUT
 
 # ============================================================
@@ -1386,21 +1406,21 @@ def get_sector_leaders() -> list:
     반환: [(code, name, sector), ...]
     """
     try:
-        from pykrx import stock as pk
-        # KST 기준 날짜 (Railway는 UTC)
-        if ZoneInfo:
+    from pykrx import stock as pk
+    # KST 기준 날짜 (Railway는 UTC)
+    if ZoneInfo:
             today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
-        else:
+    else:
             today = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d")
 
-        # 전체 종목 시총 데이터
-        df_cap = pk.get_market_cap(today, market="KOSPI")
-        df_cap.index.name = "Code"
-        df_cap = df_cap.reset_index()
+    # 전체 종목 시총 데이터
+    df_cap = pk.get_market_cap(today, market="KOSPI")
+    df_cap.index.name = "Code"
+    df_cap = df_cap.reset_index()
 
-        # 업종별 시총 상위 종목 (pykrx 업종 분류 사용)
-        sectors = {}
-        try:
+    # 업종별 시총 상위 종목 (pykrx 업종 분류 사용)
+    sectors = {}
+    try:
             # 업종별 종목 한번에 가져오기
             df_sector = pk.get_market_sector_classifications(today, market="KOSPI")
             if not df_sector.empty:
@@ -1408,11 +1428,11 @@ def get_sector_leaders() -> list:
                     sec_name = row.get("업종명","기타")
                     code = row.get("티커","") or str(row.name)
                     sectors.setdefault(sec_name,[]).append(str(code))
-        except: pass  # pykrx 로그인 필요 시 무시
+    except: pass  # pykrx 로그인 필요 시 무시
 
-        # 섹터별 시총 1위
-        leaders = []
-        for sec_name, codes in sectors.items():
+    # 섹터별 시총 1위
+    leaders = []
+    for sec_name, codes in sectors.items():
             best_code = None; best_cap = 0
             for code in codes:
                 row = df_cap[df_cap["Code"]==code]
@@ -1427,20 +1447,20 @@ def get_sector_leaders() -> list:
                 except: name = best_code
                 leaders.append((best_code, name, sec_name))
 
-        if leaders:
+    if leaders:
             return leaders
     except: pass
 
     # fallback: krx_listing 기반 섹터 추정
     try:
-        listing = krx_listing()
-        if "Market" in listing.columns:
+    listing = krx_listing()
+    if "Market" in listing.columns:
             kospi = listing[listing["Market"].str.contains("KOSPI", na=False)]
-        else:
+    else:
             kospi = listing
 
-        # 종목명 기반 업종 추정 (간략)
-        sector_keywords = {
+    # 종목명 기반 업종 추정 (간략)
+    sector_keywords = {
             "반도체":   ["전자","하이닉스","반도체","마이크론"],
             "바이오":   ["바이오","제약","생명","헬스"],
             "자동차":   ["자동차","현대차","기아","모비스"],
@@ -1451,11 +1471,11 @@ def get_sector_leaders() -> list:
             "철강":     ["철강","스틸","포스코"],
             "건설":     ["건설","건영","엔지니어링"],
             "IT서비스": ["NAVER","카카오","네이버","크래프톤"],
-        }
+    }
 
-        used_codes = set()
-        leaders = []
-        for sec_name, keywords in sector_keywords.items():
+    used_codes = set()
+    leaders = []
+    for sec_name, keywords in sector_keywords.items():
             best = None; best_cap = 0
             for _, row in kospi.iterrows():
                 code = row.get("Code","")
@@ -1470,7 +1490,7 @@ def get_sector_leaders() -> list:
                 leaders.append(best)
                 used_codes.add(best[0])
 
-        return leaders if leaders else []
+    return leaders if leaders else []
     except: return []
 
 
@@ -1479,31 +1499,31 @@ def scan_kr_sector() -> tuple:
     """섹터별 대장주 스캔 — 각 섹터 1위 종목에 동일 로직 적용"""
     leaders = get_sector_leaders()
     if not leaders:
-        return [], []
+    return [], []
 
     listing  = krx_listing()
     market_map = dict(zip(listing["Code"], listing.get("Market", pd.Series())))                  if "Market" in listing.columns else {}
 
     if KIS_APP_KEY and KIS_APP_SECRET:
-        kis_token()  # 토큰 미리 발급
+    kis_token()  # 토큰 미리 발급
 
     def _fetch_leader(item):
-        code, name, sector = item
-        df = ohlcv_kr(code)
-        if df is None: return {"_skip": True, "why": "데이터없음", "sector": sector}
-        r = quant_predict(df, "KR")
-        p, src = kr_price(code, market_map)
-        if p <= 0: p = r["current"]
-        if p <= 0: return {"_skip": True, "why": "가격없음", "sector": sector}
+    code, name, sector = item
+    df = ohlcv_kr(code)
+    if df is None: return {"_skip": True, "why": "데이터없음", "sector": sector}
+    r = quant_predict(df, "KR")
+    p, src = kr_price(code, market_map)
+    if p <= 0: p = r["current"]
+    if p <= 0: return {"_skip": True, "why": "가격없음", "sector": sector}
 
-        # pass 여부와 관계없이 섹터 대장은 항상 포함
-        display_name = _KIS_NAME_CACHE.get(code) or name
-        bmin = int(r["buy_min"]) if r["buy_min"]>p*0.90 and r["buy_min"]<p else int(p*0.97)
-        bmax = int(r["buy_max"]) if r["buy_max"]>p and r["buy_max"]<p*1.05 else int(p*1.02)
-        tgt  = int(r["target"]) if r["target"]>p*1.03 and r["target"]<=p*1.15 else int(p*1.08)
-        stp  = int(r["stop"])   if r["stop"]>p*0.85   and r["stop"]<p*0.98   else int(p*0.93)
+    # pass 여부와 관계없이 섹터 대장은 항상 포함
+    display_name = _KIS_NAME_CACHE.get(code) or name
+    bmin = int(r["buy_min"]) if r["buy_min"]>p*0.90 and r["buy_min"]<p else int(p*0.97)
+    bmax = int(r["buy_max"]) if r["buy_max"]>p and r["buy_max"]<p*1.05 else int(p*1.02)
+    tgt  = int(r["target"]) if r["target"]>p*1.03 and r["target"]<=p*1.15 else int(p*1.08)
+    stp  = int(r["stop"])   if r["stop"]>p*0.85   and r["stop"]<p*0.98   else int(p*0.93)
 
-        return {
+    return {
             "_skip":   False,
             "종목":    f"{display_name} ({code})",
             "코드":    code,
@@ -1522,18 +1542,18 @@ def scan_kr_sector() -> tuple:
                         r.get("s6",False),r.get("s7",False)],
             "수급점수": 0, "섹터점수": 0, "공시점수": 0,
             "공시목록": [], "종합점수": r["score"], "섹터강세": False,
-        }
+    }
 
     with ThreadPoolExecutor(max_workers=8) as ex:
-        raw = list(ex.map(_fetch_leader, leaders))
+    raw = list(ex.map(_fetch_leader, leaders))
 
     passed = [x for x in raw if not x.get("_skip") and isinstance(x, dict)]
     skips  = [x for x in raw if x.get("_skip") and isinstance(x, dict)]
 
     # KIS 가격 재조회 — 상위 20개만 순차 처리 (rate limit 방지)
     if KIS_APP_KEY and KIS_APP_SECRET:
-        import time as _time
-        for item in passed[:20]:
+    import time as _time
+    for item in passed[:20]:
             try:
                 p_kis, src_kis = kis_price(item["코드"])
                 if p_kis > 0:
@@ -1568,82 +1588,82 @@ def scan_contrarian() -> tuple:
     # 코스피 20일 수익률 (상대강도 계산용)
     kospi_ret20 = 0.0
     try:
-        mkt = get_market_regime()
-        # 코스피 20일 수익률 직접 계산
-        import yfinance as yf
-        ks = yf.Ticker("^KS11").history(period="25d")
-        if len(ks) >= 20:
+    mkt = get_market_regime()
+    # 코스피 20일 수익률 직접 계산
+    import yfinance as yf
+    ks = yf.Ticker("^KS11").history(period="25d")
+    if len(ks) >= 20:
             kospi_ret20 = (float(ks["Close"].iloc[-1]) - float(ks["Close"].iloc[-20])) / float(ks["Close"].iloc[-20]) * 100
-        else:
+    else:
             kospi_ret20 = mkt.get("ret5", 0) * 3  # fallback
     except:
-        try:
+    try:
             kospi_ret20 = get_market_regime().get("ret5", 0) * 3
-        except: pass
+    except: pass
 
     def _fetch_ct(item):
-        code, name = item
-        if code in caution_set: return {"_skip":True,"why":"투자주의/경고"}
-        df = ohlcv_kr(code)
-        if df is None or len(df)<25: return {"_skip":True,"why":"데이터부족"}
-        df = df.copy(); df.columns=[c.lower() for c in df.columns]
-        cl = df["close"].astype(float)
-        vo = df["volume"].astype(float)
+    code, name = item
+    if code in caution_set: return {"_skip":True,"why":"투자주의/경고"}
+    df = ohlcv_kr(code)
+    if df is None or len(df)<25: return {"_skip":True,"why":"데이터부족"}
+    df = df.copy(); df.columns=[c.lower() for c in df.columns]
+    cl = df["close"].astype(float)
+    vo = df["volume"].astype(float)
 
-        cur = float(cl.iloc[-1])
-        if cur <= 0: return {"_skip":True,"why":"가격없음"}
+    cur = float(cl.iloc[-1])
+    if cur <= 0: return {"_skip":True,"why":"가격없음"}
 
-        # 평균 거래량
-        avg_vol = float(vo.rolling(20).mean().iloc[-1])
-        if avg_vol < 50000: return {"_skip":True,"why":"유동성부족"}
-        # 거래정지 감지
-        zero_days = sum(1 for v in vo.iloc[-5:] if float(v) == 0)
-        if zero_days >= 2: return {"_skip":True,"why":f"거래정지의심({zero_days}일 거래량0)"}
+    # 평균 거래량
+    avg_vol = float(vo.rolling(20).mean().iloc[-1])
+    if avg_vol < 50000: return {"_skip":True,"why":"유동성부족"}
+    # 거래정지 감지
+    zero_days = sum(1 for v in vo.iloc[-5:] if float(v) == 0)
+    if zero_days >= 2: return {"_skip":True,"why":f"거래정지의심({zero_days}일 거래량0)"}
 
-        # 거래대금 조건 (5억 이상)
-        if "close" in df.columns:
+    # 거래대금 조건 (5억 이상)
+    if "close" in df.columns:
             daily_amount = float((cl * vo).rolling(20).mean().iloc[-1])
             if daily_amount < 500_000_000:
                 return {"_skip":True,"why":f"거래대금부족({daily_amount/1e8:.1f}억)"}
 
-        # 데이터 기준: 장 마감 후면 오늘 종가, 장 중이면 오늘 봉 포함
-        # (역발상은 급락 당일 포착이 핵심 — 오늘 봉 제외하면 당일 급락 못 잡음)
-        ref_cl = cl
-        ref_vo = vo
+    # 데이터 기준: 장 마감 후면 오늘 종가, 장 중이면 오늘 봉 포함
+    # (역발상은 급락 당일 포착이 핵심 — 오늘 봉 제외하면 당일 급락 못 잡음)
+    ref_cl = cl
+    ref_vo = vo
 
-        # 거래량 조건 — 오늘 포함 최근 3일 중 최대 (급락 당일 거래량 폭발 포착)
-        avg_vol_ref = float(ref_vo.rolling(20).mean().iloc[-1])
-        vol_max3 = float(ref_vo.iloc[-3:].max())
-        vol_ratio = vol_max3 / avg_vol_ref if avg_vol_ref > 0 else 0
-        if vol_ratio < 1.2: return {"_skip":True,"why":f"거래량부족({vol_ratio:.1f}배)"}
+    # 거래량 조건 — 오늘 포함 최근 3일 중 최대 (급락 당일 거래량 폭발 포착)
+    avg_vol_ref = float(ref_vo.rolling(20).mean().iloc[-1])
+    vol_max3 = float(ref_vo.iloc[-3:].max())
+    vol_ratio = vol_max3 / avg_vol_ref if avg_vol_ref > 0 else 0
+    if vol_ratio < 1.2: return {"_skip":True,"why":f"거래량부족({vol_ratio:.1f}배)"}
 
-        # RSI (전일 기준)
-        delta = ref_cl.diff()
-        gain  = delta.clip(lower=0).ewm(alpha=1/14,adjust=False).mean()
-        loss  = (-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
-        rsi_s = 100 - 100/(1+gain/loss.replace(0,np.nan))
-        rsi   = float(rsi_s.iloc[-1])
-        if rsi > 35: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}
+    # RSI (전일 기준)
+    delta = ref_cl.diff()
+    gain  = delta.clip(lower=0).ewm(alpha=1/14,adjust=False).mean()
+    loss  = (-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
+    rsi_s = 100 - 100/(1+gain/loss.replace(0,np.nan))
+    rsi   = float(rsi_s.iloc[-1])
+    if rsi > 35: return {"_skip":True,"why":f"RSI미충족({rsi:.0f})"}
 
-        cur_ref = float(ref_cl.iloc[-1])
+    cur_ref = float(ref_cl.iloc[-1])
 
-        # 20일 수익률
-        ret20 = (cur_ref - float(ref_cl.iloc[-21]))/float(ref_cl.iloc[-21])*100 if len(ref_cl)>=21 else 0
-        # 20일 낙폭 -15% 이상 OR 오늘 단일 낙폭 -5% 이상 (급락 당일 포착)
-        today_ret = (float(cl.iloc[-1]) - float(cl.iloc[-2])) / float(cl.iloc[-2]) * 100 if len(cl) >= 2 else 0
-        if ret20 > -15 and today_ret > -5:
+    # 20일 수익률
+    ret20 = (cur_ref - float(ref_cl.iloc[-21]))/float(ref_cl.iloc[-21])*100 if len(ref_cl)>=21 else 0
+    # 20일 낙폭 -15% 이상 OR 오늘 단일 낙폭 -5% 이상 (급락 당일 포착)
+    today_ret = (float(cl.iloc[-1]) - float(cl.iloc[-2])) / float(cl.iloc[-2]) * 100 if len(cl) >= 2 else 0
+    if ret20 > -15 and today_ret > -5:
             return {"_skip":True,"why":f"낙폭부족(20일:{ret20:.1f}% 오늘:{today_ret:.1f}%)"}
-        if ret20 < -35: return {"_skip":True,"why":f"급락악재제외({ret20:.1f}%)"}
+    if ret20 < -35: return {"_skip":True,"why":f"급락악재제외({ret20:.1f}%)"}
 
-        # 5일 수익률 (급락 제외)
-        ret5 = (cur_ref - float(ref_cl.iloc[-6]))/float(ref_cl.iloc[-6])*100 if len(ref_cl)>=6 else 0
-        if ret5 <= -25: return {"_skip":True,"why":f"급락제외({ret5:.1f}%)"}
+    # 5일 수익률 (급락 제외)
+    ret5 = (cur_ref - float(ref_cl.iloc[-6]))/float(ref_cl.iloc[-6])*100 if len(ref_cl)>=6 else 0
+    if ret5 <= -25: return {"_skip":True,"why":f"급락제외({ret5:.1f}%)"}
 
-        # ── 가산점수 ──
-        score = 0; signals = []
+    # ── 가산점수 ──
+    score = 0; signals = []
 
-        # 수급 점수
-        if KIS_APP_KEY:
+    # 수급 점수
+    if KIS_APP_KEY:
             try:
                 trend = kis_investor_trend(code, 5)
                 if trend:
@@ -1664,25 +1684,25 @@ def scan_contrarian() -> tuple:
                         score += 4; signals.append("✅ 연기금 순매수 +4")
             except: pass
 
-        # OBV 3일 연속 상승
-        try:
+    # OBV 3일 연속 상승
+    try:
             obv = (np.sign(cl.diff())*vo).fillna(0).cumsum()
             obv_rising3 = (float(obv.iloc[-1]) > float(obv.iloc[-2]) > float(obv.iloc[-3]))
             if obv_rising3:
                 score += 6; signals.append("✅ OBV 3일 연속 상승 +6")
             elif float(obv.iloc[-1]) > float(obv.iloc[-6]):
                 score += 3; signals.append("✅ OBV 반등 +3")
-        except: pass
+    except: pass
 
-        # 52주 신저가 구간
-        try:
+    # 52주 신저가 구간
+    try:
             lo52 = float(cl.rolling(252).min().iloc[-1]) if len(cl)>=252 else float(cl.min())
             if cur <= lo52 * 1.05:
                 score += 5; signals.append("✅ 52주 신저가 ±5% +5")
-        except: pass
+    except: pass
 
-        # 전일 양봉 + 거래량 증가
-        try:
+    # 전일 양봉 + 거래량 증가
+    try:
             if "open" in df.columns:
                 op = df["open"].astype(float)
                 # 전일 기준 (ref_cl)
@@ -1693,17 +1713,17 @@ def scan_contrarian() -> tuple:
                     score += 5; signals.append("✅ 양봉+거래량증가 +5")
                 elif is_bull:
                     score += 3; signals.append("✅ 양봉 마감 +3")
-        except: pass
+    except: pass
 
-        # 코스피 대비 상대강도
-        try:
+    # 코스피 대비 상대강도
+    try:
             rel_str = ret20 - kospi_ret20
             if rel_str > 0:
                 score += 4; signals.append(f"✅ 코스피 대비 강함 +4 ({rel_str:+.1f}%)")
-        except: pass
+    except: pass
 
-        # DART 공시 제외 조건
-        if DART_API_KEY:
+    # DART 공시 제외 조건
+    if DART_API_KEY:
             try:
                 disc = get_dart_disclosures(code, days=3)
                 bad_kw = ["유상증자","전환사채","감자","거래정지","상장폐지","BW"]
@@ -1712,29 +1732,29 @@ def scan_contrarian() -> tuple:
                         return {"_skip":True,"why":f"악재공시:{d['title'][:10]}"}
             except: pass
 
-        # pass 기준 — 시장 상태 연동
-        _mkt_r = get_market_regime()
-        _r1 = _mkt_r.get("ret1", 0)
-        if _r1 <= -5:   ct_pass = 8    # 극공포 (-5%↓): 완화
-        elif _r1 <= -3: ct_pass = 10   # 급락장 (-3%↓): 기본
-        elif _r1 <= -1: ct_pass = 12   # 약세장 (-1%↓): 중간
-        else:           ct_pass = 15   # 중립 이상: 엄격
-        if score < ct_pass: return {"_skip":True,"why":f"점수부족({score}/{ct_pass}점)"}
+    # pass 기준 — 시장 상태 연동
+    _mkt_r = get_market_regime()
+    _r1 = _mkt_r.get("ret1", 0)
+    if _r1 <= -5:   ct_pass = 8    # 극공포 (-5%↓): 완화
+    elif _r1 <= -3: ct_pass = 10   # 급락장 (-3%↓): 기본
+    elif _r1 <= -1: ct_pass = 12   # 약세장 (-1%↓): 중간
+    else:           ct_pass = 15   # 중립 이상: 엄격
+    if score < ct_pass: return {"_skip":True,"why":f"점수부족({score}/{ct_pass}점)"}
 
-        # 가격 조회
-        p, src = kr_price(code, market_map)
-        if p <= 0: p = cur
+    # 가격 조회
+    p, src = kr_price(code, market_map)
+    if p <= 0: p = cur
 
-        # 등급
-        if score >= 25: grade="A+"
-        elif score >= 18: grade="A"
-        elif score >= 13: grade="B+"
-        else: grade="B"
+    # 등급
+    if score >= 25: grade="A+"
+    elif score >= 18: grade="A"
+    elif score >= 13: grade="B+"
+    else: grade="B"
 
-        tgt = int(p * 1.10)   # 목표 +10%
-        stp = int(p * 0.95)   # 손절 -5%
+    tgt = int(p * 1.10)   # 목표 +10%
+    stp = int(p * 0.95)   # 손절 -5%
 
-        return {
+    return {
             "_skip":   False,
             "종목":    _KIS_NAME_CACHE.get(code) or name,
             "코드":    code,
@@ -1750,21 +1770,21 @@ def scan_contrarian() -> tuple:
             "signals": signals,
             "source":  src,
             "caution": False,
-        }
+    }
 
     if KIS_APP_KEY and KIS_APP_SECRET:
-        kis_token()
+    kis_token()
 
     with ThreadPoolExecutor(max_workers=8) as ex:
-        raw = list(ex.map(_fetch_ct, codes))
+    raw = list(ex.map(_fetch_ct, codes))
 
     passed = [r for r in raw if not r.get("_skip")]
     skips  = [r for r in raw if r.get("_skip")]
 
     # KIS 가격 재조회 — 순차 처리 (rate limit 방지)
     if KIS_APP_KEY and KIS_APP_SECRET:
-        import time
-        for item in passed[:20]:
+    import time
+    for item in passed[:20]:
             try:
                 p_kis, src_kis = kis_price(item["코드"])
                 if p_kis > 0:
@@ -1797,30 +1817,30 @@ def scan_kr():
     market_map = dict(zip(listing["Code"], listing.get("Market", pd.Series()))) if "Market" in listing.columns else {}
     # KIS 토큰 미리 발급 (ThreadPool 진입 전) — 스레드들이 캐시 토큰 재사용
     if KIS_APP_KEY and KIS_APP_SECRET:
-        _pre_token = kis_token()
-        if not _pre_token:
+    _pre_token = kis_token()
+    if not _pre_token:
             st.sidebar.warning("⚠️ KIS 토큰 발급 실패 — yfinance로 대체됩니다")
 
     def _fetch(item):
-        code,name = item
-        df = ohlcv_kr(code)
-        if df is None: return {"_skip":True,"why":"데이터없음"}
-        r = quant_predict(df,"KR")
-        # 시장 상태에 따라 pass 기준 동적 적용
-        r_pass = (r["pass"] or
+    code,name = item
+    df = ohlcv_kr(code)
+    if df is None: return {"_skip":True,"why":"데이터없음"}
+    r = quant_predict(df,"KR")
+    # 시장 상태에 따라 pass 기준 동적 적용
+    r_pass = (r["pass"] or
                   ((r["s3"] or r["s4"]) and r["score"] >= dynamic_score))
-        if not r_pass:
+    if not r_pass:
             why=next((s for s in r["signals"] if "❌" in s),"조건미충족")
             return {"_skip":True,"why":why}
-        p, src = kr_price(code, market_map)
-        if p<=0: p=r["current"]
-        tgt = int(r["target"]) if r["target"]>p*1.03 and r["target"]<=p*1.15 else int(p*1.08)
-        stp = int(r["stop"])   if r["stop"]>p*0.85  and r["stop"]<p*0.98  else int(p*0.93)
-        bmin = int(r["buy_min"]) if r["buy_min"]>p*0.90 and r["buy_min"]<p else int(p*0.97)
-        bmax = int(r["buy_max"]) if r["buy_max"]>p and r["buy_max"]<p*1.05 else int(p*1.02)
-        # 종목명: 캐시 → listing → 코드 그대로
-        display_name = _KIS_NAME_CACHE.get(code) or name
-        return {"_skip":False,"종목":display_name,"코드":code,"등급":r["grade"],"점수":r["score"],
+    p, src = kr_price(code, market_map)
+    if p<=0: p=r["current"]
+    tgt = int(r["target"]) if r["target"]>p*1.03 and r["target"]<=p*1.15 else int(p*1.08)
+    stp = int(r["stop"])   if r["stop"]>p*0.85  and r["stop"]<p*0.98  else int(p*0.93)
+    bmin = int(r["buy_min"]) if r["buy_min"]>p*0.90 and r["buy_min"]<p else int(p*0.97)
+    bmax = int(r["buy_max"]) if r["buy_max"]>p and r["buy_max"]<p*1.05 else int(p*1.02)
+    # 종목명: 캐시 → listing → 코드 그대로
+    display_name = _KIS_NAME_CACHE.get(code) or name
+    return {"_skip":False,"종목":display_name,"코드":code,"등급":r["grade"],"점수":r["score"],
                 "현재가":int(p),"RSI":round(r["rsi"],1),
                 "매수구간":f"₩{bmin:,}~₩{bmax:,}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
@@ -1831,13 +1851,13 @@ def scan_kr():
                 "수급점수":0,"섹터점수":0,"공시점수":0,"공시목록":[],"종합점수":r["score"],"섹터강세":False}
 
     with ThreadPoolExecutor(max_workers=8) as ex:
-        raw=list(ex.map(_fetch,codes))
+    raw=list(ex.map(_fetch,codes))
     skips=[r for r in raw if r.get("_skip")]
     passed=[r for r in raw if not r.get("_skip")]
 
     # pass된 종목 KIS 가격+종목명 재조회 (ThreadPool 밖 — 토큰 안정적)
     if KIS_APP_KEY and KIS_APP_SECRET:
-        for item in passed:
+    for item in passed:
             try:
                 p_kis, src_kis = kis_price(item["코드"])
                 if p_kis > 0:
@@ -1851,7 +1871,7 @@ def scan_kr():
 
     # 수급 점수 추가 (KIS 있을 때만)
     if KIS_APP_KEY and KIS_APP_SECRET and passed:
-        def _add_supply(r):
+    def _add_supply(r):
             try:
                 sup  = supply_score(r["코드"])
                 # 섹터 진단 (종목별 섹터 상태)
@@ -1878,10 +1898,10 @@ def scan_kr():
                 r["종합점수"] = r["점수"]
                 r["섹터강세"] = False
             return r
-        with ThreadPoolExecutor(max_workers=5) as ex:
+    with ThreadPoolExecutor(max_workers=5) as ex:
             passed = list(ex.map(_add_supply, passed))
     else:
-        for r in passed:
+    for r in passed:
             r["수급점수"] = 0
             r["종합점수"] = r.get("점수", 0)
 
@@ -1892,25 +1912,25 @@ def scan_kr():
 def scan_us():
     rt = {}
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futs={t:ex.submit(us_price,t) for t in US_LIST}
-        for t,f in futs.items():
+    futs={t:ex.submit(us_price,t) for t in US_LIST}
+    for t,f in futs.items():
             try: rt[t]=f.result()
             except: rt[t]=(0.0,"실패")
 
     def _fetch(ticker):
-        df=ohlcv_us(ticker)
-        if df is None: return {"_skip":True,"why":"데이터없음"}
-        r=quant_predict(df,"US")
-        if not r["pass"]:
+    df=ohlcv_us(ticker)
+    if df is None: return {"_skip":True,"why":"데이터없음"}
+    r=quant_predict(df,"US")
+    if not r["pass"]:
             why=next((s for s in r["signals"] if "❌" in s),"조건미충족")
             return {"_skip":True,"why":why}
-        p,src=rt.get(ticker,(0.0,"없음"))
-        if p<=0: p,src=us_price(ticker)
-        if p<=0: p=r["current"]
-        def uf(v): return f"${v:,.4f}" if v<1 else f"${v:,.3f}" if v<10 else f"${v:,.2f}"
-        tgt=round(r["target"],2) if r["target"]>p*1.03 and r["target"]<=p*1.15 else round(p*1.08,2)
-        stp=round(r["stop"],2)   if r["stop"]>p*0.85  and r["stop"]<p*0.98  else round(p*0.93,2)
-        return {"_skip":False,"종목":ticker,"등급":r["grade"],"점수":r["score"],
+    p,src=rt.get(ticker,(0.0,"없음"))
+    if p<=0: p,src=us_price(ticker)
+    if p<=0: p=r["current"]
+    def uf(v): return f"${v:,.4f}" if v<1 else f"${v:,.3f}" if v<10 else f"${v:,.2f}"
+    tgt=round(r["target"],2) if r["target"]>p*1.03 and r["target"]<=p*1.15 else round(p*1.08,2)
+    stp=round(r["stop"],2)   if r["stop"]>p*0.85  and r["stop"]<p*0.98  else round(p*0.93,2)
+    return {"_skip":False,"종목":ticker,"등급":r["grade"],"점수":r["score"],
                 "현재가":round(p,2),"RSI":round(r["rsi"],1),
                 "매수구간":f"{uf(p*0.97)}~{uf(p*1.02)}",
                 "목표가":tgt,"손절가":stp,"signals":r["signals"],"source":src,
@@ -1919,7 +1939,7 @@ def scan_us():
                 "수급점수":0,"섹터점수":0,"공시점수":0,"공시목록":[],"종합점수":r["score"],"섹터강세":False}
 
     with ThreadPoolExecutor(max_workers=8) as ex:
-        raw=list(ex.map(_fetch,US_LIST))
+    raw=list(ex.map(_fetch,US_LIST))
     skips=[r for r in raw if r.get("_skip")]
     top5=sorted([r for r in raw if not r.get("_skip")],key=lambda x:x["점수"],reverse=True)[:5]
     return top5, skips
@@ -1931,26 +1951,26 @@ def get_stock_name(code: str) -> str:
     """종목명 조회 — 캐시 → KIS API → listing 순서"""
     # 1. 가격 조회 시 저장된 캐시 (가장 빠름)
     if code in _KIS_NAME_CACHE:
-        return _KIS_NAME_CACHE[code]
+    return _KIS_NAME_CACHE[code]
     # 2. KIS search-stock-info API
     if KIS_APP_KEY:
-        n = kis_name(code)
-        if n:
+    n = kis_name(code)
+    if n:
             _KIS_NAME_CACHE[code] = n
             return n
     # 3. krx_listing (pykrx/fdr/하드코딩)
     try:
-        listing = krx_listing()
-        row = listing[listing["Code"]==code]
-        if not row.empty:
+    listing = krx_listing()
+    row = listing[listing["Code"]==code]
+    if not row.empty:
             n = row["Name"].values[0]
             _KIS_NAME_CACHE[code] = n
             return n
     except: pass
     # 4. 가격 조회하면서 이름 가져오기 (마지막 수단)
     if KIS_APP_KEY:
-        p, _ = kis_price(code)
-        if code in _KIS_NAME_CACHE:
+    p, _ = kis_price(code)
+    if code in _KIS_NAME_CACHE:
             return _KIS_NAME_CACHE[code]
     return code
 
@@ -1960,15 +1980,15 @@ def portfolio_data(name: str) -> dict:
             "source":"실패","ok":False,"signals":[]}
 
     if name.isdigit() and len(name)==6:
-        p, src = kr_price(name)
-        df = portfolio_ohlcv_kr(name)
-        # 종목명: kis_name 직접 호출 (ttl=86400 캐시, 빠름)
-        # 종목명 조회: KIS 캐시 → KIS API → KRX
-        stock_name = _KIS_NAME_CACHE.get(name, "")
-        if not stock_name and KIS_APP_KEY:
+    p, src = kr_price(name)
+    df = portfolio_ohlcv_kr(name)
+    # 종목명: kis_name 직접 호출 (ttl=86400 캐시, 빠름)
+    # 종목명 조회: KIS 캐시 → KIS API → KRX
+    stock_name = _KIS_NAME_CACHE.get(name, "")
+    if not stock_name and KIS_APP_KEY:
             stock_name = kis_name(name)
             if stock_name: _KIS_NAME_CACHE[name] = stock_name
-        if not stock_name:
+    if not stock_name:
             try:
                 lst = krx_listing()
                 row = lst[lst["Code"]==name]
@@ -1976,9 +1996,9 @@ def portfolio_data(name: str) -> dict:
                     stock_name = str(row["Name"].values[0])
                     if stock_name: _KIS_NAME_CACHE[name] = stock_name
             except: pass
-        label = f"{stock_name} ({name})" if stock_name and stock_name != name else name
+    label = f"{stock_name} ({name})" if stock_name and stock_name != name else name
 
-        if df is not None:
+    if df is not None:
             r = quant_predict(df,"KR")
             curr = p if p>0 else r["current"]
             if curr <= 0: return FAIL
@@ -1989,12 +2009,12 @@ def portfolio_data(name: str) -> dict:
                     "buy_min":int(curr*0.97),"buy_max":int(curr*1.02),
                     "source":src,"ok":curr>0,"signals":r["signals"],
                     "atr_pct":r.get("atr_pct",0),"s3_streak":r.get("s3_streak",0)}
-        if p>0:
+    if p>0:
             return {"label":label,"curr":p,"score":0,"grade":"-","rsi":50,"currency":"KRW",
                     "stop":int(p*0.93),"target":int(p*1.08),
                     "buy_min":int(p*0.97),"buy_max":int(p*1.02),
                     "source":src,"ok":True,"signals":[]}
-        return FAIL
+    return FAIL
 
     # 해외
     p, src = us_price(name)
@@ -2003,18 +2023,18 @@ def portfolio_data(name: str) -> dict:
     def ur(v): return round(v,4) if v<1 else round(v,3) if v<10 else round(v,2)
 
     if df is not None:
-        r = quant_predict(df,"US")
-        curr = p if p>0 else r["current"]
-        if curr<=0: return FAIL
-        tgt=ur(r["target"]) if r["target"]>curr*1.03 and r["target"]<=curr*1.15 else ur(curr*1.08)
-        stp=ur(r["stop"])   if r["stop"]>curr*0.85  and r["stop"]<curr*0.98  else ur(curr*0.93)
-        return {"label":f"{name} ({src})","curr":ur(curr),"score":r["score"],"grade":r["grade"],
+    r = quant_predict(df,"US")
+    curr = p if p>0 else r["current"]
+    if curr<=0: return FAIL
+    tgt=ur(r["target"]) if r["target"]>curr*1.03 and r["target"]<=curr*1.15 else ur(curr*1.08)
+    stp=ur(r["stop"])   if r["stop"]>curr*0.85  and r["stop"]<curr*0.98  else ur(curr*0.93)
+    return {"label":f"{name} ({src})","curr":ur(curr),"score":r["score"],"grade":r["grade"],
                 "rsi":round(r["rsi"],1),"currency":"USD","stop":stp,"target":tgt,
                 "buy_min":ur(curr*0.97),"buy_max":ur(curr*1.02),
                 "source":src,"ok":curr>0,"signals":r["signals"],
                 "prepost":pp,"prepost_label":pp_label}
     if p>0:
-        return {"label":f"{name} ({src})","curr":ur(p),"score":0,"grade":"-","rsi":50,
+    return {"label":f"{name} ({src})","curr":ur(p),"score":0,"grade":"-","rsi":50,
                 "currency":"USD","stop":ur(p*0.93),"target":ur(p*1.08),
                 "buy_min":ur(p*0.97),"buy_max":ur(p*1.02),
                 "source":src,"ok":True,"signals":[],
@@ -2797,20 +2817,20 @@ S_LABELS=["S1:BB","S2:거래량","S3:정배열","S4:RSI","S5:캔들","S6:폭발"
 def render(title, data, currency):
     st.header(title)
     if not data:
-        st.info("조건 충족 종목 없음")
-        return
+    st.info("조건 충족 종목 없음")
+    return
     medals=["🥇","🥈","🥉","4️⃣","5️⃣"]
     for i,item in enumerate(data):
-        gc={"A+":"#f59e0b","A":"#10b981","B+":"#3b82f6","B":"#94a3b8","C":"#64748b"}.get(item.get("등급","C"),"#64748b")
-        is_kr=currency=="KRW"
-        def ff(v): return f"${v:,.4f}" if v<1 else f"${v:,.3f}" if v<10 else f"${v:,.2f}"
-        fmt2=(lambda v:f"₩{int(v):,}") if is_kr else ff
-        flags=item.get("s_flags",[False]*5)
-        badges=" ".join(
+    gc={"A+":"#f59e0b","A":"#10b981","B+":"#3b82f6","B":"#94a3b8","C":"#64748b"}.get(item.get("등급","C"),"#64748b")
+    is_kr=currency=="KRW"
+    def ff(v): return f"${v:,.4f}" if v<1 else f"${v:,.3f}" if v<10 else f"${v:,.2f}"
+    fmt2=(lambda v:f"₩{int(v):,}") if is_kr else ff
+    flags=item.get("s_flags",[False]*5)
+    badges=" ".join(
             f"<span style='background:{'#10b981' if ok else '#1e293b'};color:{'#fff' if ok else '#475569'};font-size:9px;padding:2px 4px;border-radius:3px;'>{lbl}</span>"
             for ok,lbl in zip(flags,S_LABELS))
-        sigs_html="".join(f"<li style='font-size:11px;margin:2px 0;'>{s}</li>" for s in item.get("signals",[]))
-        if True:  # 1열 세로 나열 (폰 최적화)
+    sigs_html="".join(f"<li style='font-size:11px;margin:2px 0;'>{s}</li>" for s in item.get("signals",[]))
+    if True:  # 1열 세로 나열 (폰 최적화)
             # 점수 표시 조립
             score_parts = f"차트 <b>{item['점수']}점</b>"
             if item.get('수급점수',0) > 0:
@@ -2986,15 +3006,15 @@ with tab_etf:
 def get_etf_supply() -> dict:
     """레버리지/인버스 ETF + 현물 외국인 수급 — FESI B안"""
     ETFs = {
-        "KODEX 레버리지":          ("122630", "lev_kospi"),
-        "KODEX 인버스":            ("114800", "inv_kospi"),
-        "KODEX 코스닥150레버리지": ("233740", "lev_kosdaq"),
-        "KODEX 코스닥150인버스":   ("251340", "inv_kosdaq"),
+    "KODEX 레버리지":          ("122630", "lev_kospi"),
+    "KODEX 인버스":            ("114800", "inv_kospi"),
+    "KODEX 코스닥150레버리지": ("233740", "lev_kosdaq"),
+    "KODEX 코스닥150인버스":   ("251340", "inv_kosdaq"),
     }
     result = {}
     if not KIS_APP_KEY: return result
     for name, (code, key) in ETFs.items():
-        try:
+    try:
             trend = kis_investor_trend(code, 5)
             if trend and len(trend) >= 2:
                 today = trend[0].get("외국인", 0)
@@ -3007,10 +3027,10 @@ def get_etf_supply() -> dict:
                     "flip_sell": today < 0 and prev >= 0,
                     "is_buying": today > 0,
                 }
-        except: pass
+    except: pass
     try:
-        h = kis_headers("FHKST01010900")
-        if h:
+    h = kis_headers("FHKST01010900")
+    if h:
             r = requests.get(
                 f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-investor",
                 params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":"0001",
@@ -3034,8 +3054,8 @@ def get_etf_supply() -> dict:
     return result
 
 def is_kr_open() -> bool:
-        """한국 장 중 여부 (09:00~15:30) — KST 기준"""
-        try:
+    """한국 장 중 여부 (09:00~15:30) — KST 기준"""
+    try:
             if ZoneInfo:
                 now = datetime.now(ZoneInfo("Asia/Seoul"))
             else:
@@ -3045,7 +3065,7 @@ def is_kr_open() -> bool:
             open_t  = now.replace(hour=9,  minute=0,  second=0, microsecond=0)
             close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
             return open_t <= now <= close_t
-        except: return False
+    except: return False
 
 
 # 미국 주요 휴장일
@@ -3058,19 +3078,19 @@ _US_HOLIDAYS = {
 def is_us_open():
     if not ZoneInfo: return True
     try:
-        now = datetime.now(ZoneInfo("America/New_York"))
-        if now.weekday() >= 5: return False
-        # 휴장일 체크
-        holidays = _US_HOLIDAYS.get(now.year, set())  # 없는 연도는 빈 set
-        if (now.month, now.day) in holidays: return False
-        open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
-        close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
-        return open_t <= now <= close_t
+    now = datetime.now(ZoneInfo("America/New_York"))
+    if now.weekday() >= 5: return False
+    # 휴장일 체크
+    holidays = _US_HOLIDAYS.get(now.year, set())  # 없는 연도는 빈 set
+    if (now.month, now.day) in holidays: return False
+    open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+    close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+    return open_t <= now <= close_t
     except: return True
 
 @st.cache_data(ttl=60, show_spinner=False)
 def us_price(ticker: str) -> tuple:
-        if FINNHUB_API_KEY:
+    if FINNHUB_API_KEY:
             try:
                 r = requests.get("https://finnhub.io/api/v1/quote",
                     params={"symbol":ticker,"token":FINNHUB_API_KEY},timeout=3).json()
@@ -3079,18 +3099,18 @@ def us_price(ticker: str) -> tuple:
                 if not is_us_open() and pc>0: return pc,"Finnhub(종가)"
                 if c>0: return c,"Finnhub"
             except: pass
-        try:
+    try:
             t = yf.Ticker(ticker)
             df = t.history(period="1d",interval="1m")
             if not df.empty:
                 p = float(df["Close"].dropna().iloc[-1])
                 if p>0: return p,"yfinance"
-        except: pass
-        return 0.0,"실패"
+    except: pass
+    return 0.0,"실패"
 
 def us_prepost(ticker: str) -> tuple:
-        """장외가 조회 — 캐시 없음 (실시간)"""
-        try:
+    """장외가 조회 — 캐시 없음 (실시간)"""
+    try:
             t = yf.Ticker(ticker)
             reg = t.history(period="1d",interval="1m",prepost=False)
             reg_p = float(reg["Close"].dropna().iloc[-1]) if not reg.empty else 0
@@ -3112,14 +3132,14 @@ def us_prepost(ticker: str) -> tuple:
             if sess == "🏛️정규장" and abs(diff) < 0.05: return 0,""
             # 그 외엔 항상 표시
             return pp_p, f"{sess} {diff:+.1f}%"
-        except: return 0,""
+    except: return 0,""
 
 # ============================================================
 # OHLCV
 # ============================================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def ohlcv_kr(code):
-        try:
+    try:
             df = fdr.DataReader(code, start="2024-01-01")
             if df is not None and len(df)>=60:
                 df.columns=[c.lower() for c in df.columns]
@@ -3132,47 +3152,47 @@ def ohlcv_kr(code):
                         return None
                 except: pass
                 return df
-        except: pass
-        return None
+    except: pass
+    return None
 
 @st.cache_data(ttl=300, show_spinner=False)
 def portfolio_ohlcv_kr(code):
-        """보유/관심종목 전용 ohlcv — scan_kr과 독립 캐시"""
-        try:
+    """보유/관심종목 전용 ohlcv — scan_kr과 독립 캐시"""
+    try:
             import FinanceDataReader as fdr
             df = fdr.DataReader(code, start="2024-01-01")
             if df is not None and len(df)>=60:
                 df.columns=[c.lower() for c in df.columns]
                 return df
-        except: pass
-        return ohlcv_kr(code)
+    except: pass
+    return ohlcv_kr(code)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def portfolio_ohlcv_us(ticker):
-        return ohlcv_us(ticker)
+    return ohlcv_us(ticker)
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def ohlcv_us(ticker):
-        try:
+    try:
             df = yf.Ticker(ticker).history(period="1y")
             if not df.empty and len(df)>=60:
                 df.columns=[c.lower() for c in df.columns]
                 return df
-        except: pass
-        try:
+    except: pass
+    try:
             df = fdr.DataReader(ticker, start="2024-01-01")
             if df is not None and len(df)>=60:
                 df.columns=[c.lower() for c in df.columns]
                 return df
-        except: pass
-        return None
+    except: pass
+    return None
 
 # ============================================================
 # 종목 리스트
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def krx_listing():
-        try:
+    try:
             from pykrx import stock as pk
             # KST 기준 날짜 (Railway는 UTC)
             if ZoneInfo:
@@ -3189,13 +3209,13 @@ def krx_listing():
                         rows.append({"Code":code,"Name":name,"Marcap":cap,"Market":mkt})
                     except: pass
             if rows: return pd.DataFrame(rows)
-        except: pass
-        try:
+    except: pass
+    try:
             df = fdr.StockListing("KRX")
             if df is not None and len(df)>0: return df
-        except: pass
-        # fallback
-        data=[
+    except: pass
+    # fallback
+    data=[
             ("005930","삼성전자",400e12,"KOSPI"),("000660","SK하이닉스",120e12,"KOSPI"),
             ("207940","삼성바이오로직스",50e12,"KOSPI"),("373220","LG에너지솔루션",60e12,"KOSPI"),
             ("035420","NAVER",30e12,"KOSPI"),("005380","현대차",40e12,"KOSPI"),
@@ -3211,7 +3231,7 @@ def krx_listing():
             ("036570","엔씨소프트",3e12,"KOSDAQ"),("263750","펄어비스",1e12,"KOSDAQ"),
             ("039030","이오테크닉스",1e12,"KOSDAQ"),("214150","클래시스",1e12,"KOSDAQ"),
             ("277810","레인보우로보틱스",1e12,"KOSDAQ"),("357780","솔브레인",2e12,"KOSDAQ"),
-        ]
-        return pd.DataFrame(data, columns=["Code","Name","Marcap","Market"])
+    ]
+    return pd.DataFrame(data, columns=["Code","Name","Marcap","Market"])
 
 
