@@ -913,31 +913,34 @@ def get_etf_supply() -> dict:
     }
     for name, (code, key) in ETFs.items():
         try:
-            trend = kis_investor_trend(code, 5)
-            if not trend:
-                # ETF 종목 직접 조회 시도
-                h2 = kis_headers("FHKST01010600")
-                if h2:
-                    end2 = datetime.now().strftime("%Y%m%d")
-                    start2 = (datetime.now()-timedelta(days=14)).strftime("%Y%m%d")
-                    r2 = requests.get(
-                        f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-investor",
-                        params={"fid_cond_mrkt_div_code":"J","fid_input_iscd":code,
-                                "fid_begin_date":start2,"fid_end_date":end2,
-                                "fid_period_div_code":"D"},
-                        headers=h2, timeout=5).json()
-                    trend = []
-                    for row in r2.get("output",[])[:5]:
-                        try:
-                            trend.append({
-                                "외국인": int(row.get("frgn_ntby_qty",0) or 0),
-                                "기관":   int(row.get("orgn_ntby_qty",0) or 0),
-                            })
-                        except: pass
-            if trend and len(trend) >= 2:
-                today = trend[0].get("외국인", 0)
-                prev  = trend[1].get("외국인", 0)
-                d3    = sum(t.get("외국인",0) for t in trend[:3])
+            h2 = kis_headers("FHKST01010600")
+            if not h2: continue
+            end2   = datetime.now().strftime("%Y%m%d")
+            start2 = (datetime.now()-timedelta(days=14)).strftime("%Y%m%d")
+            r2 = requests.get(
+                f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-investor",
+                params={
+                    "FID_COND_MRKT_DIV_CODE": "J",
+                    "FID_INPUT_ISCD": code,
+                    "FID_BEGIN_DATE": start2,
+                    "FID_END_DATE":   end2,
+                    "FID_PERIOD_DIV_CODE": "D",
+                },
+                headers=h2, timeout=5).json()
+            rows_raw = r2.get("output2", r2.get("output", []))
+            if not rows_raw: continue
+            rows = []
+            for row in rows_raw[:5]:
+                try:
+                    rows.append({
+                        "외국인": int(str(row.get("frgn_ntby_qty","0")).replace(",","") or 0),
+                        "기관":   int(str(row.get("orgn_ntby_qty","0")).replace(",","") or 0),
+                    })
+                except: pass
+            if len(rows) >= 2:
+                today = rows[0].get("외국인", 0)
+                prev  = rows[1].get("외국인", 0)
+                d3    = sum(r.get("외국인",0) for r in rows[:3])
                 result[key] = {
                     "name": name, "code": code,
                     "today": today, "prev": prev, "d3": d3,
